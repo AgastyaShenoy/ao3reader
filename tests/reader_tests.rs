@@ -202,3 +202,210 @@ fn test_in_reader_search() {
     assert!(search.matches[0].match_text.contains("auxiliary power"));
 }
 
+#[test]
+fn test_ereader_paged_mode_navigation() {
+    use ao3reader::reader::paginator::Paginator;
+    use ao3reader::reader::view::{ReaderAction, ReaderView};
+    use ao3reader::reader::typography::TypographySettings;
+
+    let work = Ao3Parser::parse_work(SAMPLE_AO3_HTML, "999999").unwrap();
+    let mut reader = ReaderView::new(work.clone(), 1);
+    let typography = TypographySettings::default();
+
+    // Paginate chapter 1
+    let pages = Paginator::paginate(
+        &work.chapters[0],
+        true,
+        &work.meta,
+        700.0,
+        600.0,
+        &typography,
+    );
+    reader.cached_pages = pages.clone();
+    assert!(reader.cached_pages.len() >= 2);
+
+    let mut action = ReaderAction::None;
+
+    // Flip to next page
+    reader.turn_page_next_spread(false, &mut action);
+    assert_eq!(reader.current_page_idx, 2);
+
+    // If we advance past all pages of Chapter 1, it should advance to Chapter 2
+    reader.current_page_idx = reader.cached_pages.len();
+    reader.turn_page_next_spread(false, &mut action);
+    assert_eq!(reader.current_chapter_idx, 2);
+    assert_eq!(reader.current_page_idx, 1);
+
+    // If on Page 1 of Chapter 2 and we flip back, it should return to Chapter 1
+    reader.turn_page_prev_spread(false, &mut action);
+    assert_eq!(reader.current_chapter_idx, 1);
+}
+
+#[test]
+fn test_two_page_spread_stepping() {
+    use ao3reader::reader::paginator::Paginator;
+    use ao3reader::reader::view::{ReaderAction, ReaderView};
+    use ao3reader::reader::typography::TypographySettings;
+
+    let work = Ao3Parser::parse_work(SAMPLE_AO3_HTML, "999999").unwrap();
+    let mut reader = ReaderView::new(work.clone(), 1);
+    let typography = TypographySettings::default();
+
+    reader.cached_pages = Paginator::paginate(
+        &work.chapters[0],
+        true,
+        &work.meta,
+        500.0,
+        400.0,
+        &typography,
+    );
+    assert!(reader.cached_pages.len() >= 2);
+
+    let mut action = ReaderAction::None;
+    // In dual spread mode (is_dual = true), next step should advance by 2
+    reader.current_page_idx = 1;
+    reader.turn_page_next_spread(true, &mut action);
+    assert!(reader.current_page_idx >= 3 || reader.current_page_idx == reader.cached_pages.len());
+}
+
+#[test]
+fn test_reader_ui_render() {
+    use ao3reader::storage::config::AppConfig;
+    use ao3reader::reader::view::ReaderView;
+    use ao3reader::reader::typography::FontFamilyChoice;
+
+    let work = Ao3Parser::parse_work(SAMPLE_AO3_HTML, "999999").unwrap();
+    let mut reader = ReaderView::new(work, 1);
+    let mut config = AppConfig::default();
+    config.typography.font_family = FontFamilyChoice::Serif;
+
+    let ctx = egui::Context::default();
+    let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let _ = reader.ui(ui, &mut config);
+        });
+    });
+}
+
+#[test]
+fn test_font_family_custom_serialization() {
+    use ao3reader::reader::typography::{FontFamilyChoice, TypographySettings};
+    use std::path::PathBuf;
+
+    let mut typo = TypographySettings::default();
+    typo.font_family = FontFamilyChoice::Custom("Georgia".to_string());
+    typo.custom_font_name = Some("Georgia".to_string());
+    typo.custom_font_path = Some(PathBuf::from("C:\\Windows\\Fonts\\georgia.ttf"));
+
+    let json = serde_json::to_string(&typo).expect("Should serialize typography settings");
+    let deserialized: TypographySettings = serde_json::from_str(&json).expect("Should deserialize typography settings");
+
+    assert_eq!(deserialized.font_family, FontFamilyChoice::Custom("Georgia".to_string()));
+    assert_eq!(deserialized.custom_font_name, Some("Georgia".to_string()));
+    assert_eq!(deserialized.custom_font_path, Some(PathBuf::from("C:\\Windows\\Fonts\\georgia.ttf")));
+}
+
+#[test]
+fn test_font_manager_caches() {
+    use ao3reader::reader::font_manager::FontManager;
+
+    let sys_fonts = FontManager::cached_system_fonts();
+    let curated = FontManager::cached_curated_fonts();
+
+    // Calling again should return identical slices from cache without re-scanning disk
+    let sys_again = FontManager::cached_system_fonts();
+    assert_eq!(sys_fonts.len(), sys_again.len());
+
+    let curated_again = FontManager::cached_curated_fonts();
+    assert_eq!(curated.len(), curated_again.len());
+}
+
+#[test]
+fn test_font_family_resolution() {
+    use ao3reader::reader::typography::FontFamilyChoice;
+
+    let ctx = egui::Context::default();
+
+    assert_eq!(
+        FontFamilyChoice::SansSerif.to_egui_family(&ctx),
+        egui::FontFamily::Proportional
+    );
+    assert_eq!(
+        FontFamilyChoice::Monospace.to_egui_family(&ctx),
+        egui::FontFamily::Monospace
+    );
+    // Before FontManager::init_fonts, falls back safely to Proportional
+    assert_eq!(
+        FontFamilyChoice::Custom("Georgia".to_string()).to_egui_family(&ctx),
+        egui::FontFamily::Proportional
+    );
+
+    // After FontManager::init_fonts and first frame run, resolves to READER_BOOK_FONT
+    ao3reader::reader::FontManager::init_fonts(&ctx, None, None);
+    let _ = ctx.run(egui::RawInput::default(), |_| {});
+
+    assert_eq!(
+        FontFamilyChoice::Custom("Georgia".to_string()).to_egui_family(&ctx),
+        egui::FontFamily::Name(FontFamilyChoice::READER_BOOK_FONT.into())
+    );
+    assert_eq!(
+        FontFamilyChoice::Serif.to_egui_family(&ctx),
+        egui::FontFamily::Name(FontFamilyChoice::READER_BOOK_FONT.into())
+    );
+}
+
+#[test]
+fn test_custom_font_fic_rendering() {
+    use ao3reader::storage::config::AppConfig;
+    use ao3reader::reader::view::ReaderView;
+    use ao3reader::reader::typography::{FontFamilyChoice, ReadingMode};
+    use std::path::PathBuf;
+
+    let mut config = AppConfig::default();
+    config.typography.font_family = FontFamilyChoice::Custom("Open Sans".to_string());
+    config.typography.custom_font_name = Some("Open Sans".to_string());
+    config.typography.custom_font_path = Some(PathBuf::from("C:\\Windows\\Fonts\\OpenSans-Regular.ttf"));
+
+    let work = Ao3Parser::parse_work(SAMPLE_AO3_HTML, "999999").unwrap();
+    let mut reader = ReaderView::new(work, 1);
+
+    let ctx = egui::Context::default();
+    ao3reader::reader::FontManager::init_fonts(
+        &ctx,
+        config.typography.custom_font_path.as_deref(),
+        config.typography.custom_font_name.as_deref(),
+    );
+
+    // Frame 1: Paged mode with custom Open Sans font
+    config.typography.reading_mode = ReadingMode::Paged;
+    let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let _ = reader.ui(ui, &mut config);
+        });
+    });
+
+    // Frame 2: Continuous scroll mode with custom Open Sans font
+    config.typography.reading_mode = ReadingMode::Scroll;
+    let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let _ = reader.ui(ui, &mut config);
+        });
+    });
+}
+
+#[test]
+fn test_invalid_font_bytes_handling() {
+    let ctx = egui::Context::default();
+    let dummy_path = std::path::PathBuf::from("non_existent_or_corrupt.ttf");
+    ao3reader::reader::FontManager::init_fonts(&ctx, Some(&dummy_path), Some("DummyCorrupt"));
+
+    let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new("Safe text fallback")
+                    .family(egui::FontFamily::Name(ao3reader::reader::typography::FontFamilyChoice::READER_BOOK_FONT.into()))
+            );
+        });
+    });
+}
+

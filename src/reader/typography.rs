@@ -1,15 +1,18 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum FontFamilyChoice {
     #[default]
     SansSerif,
     Serif,
     Monospace,
+    Custom(String),
 }
 
 impl FontFamilyChoice {
-    pub fn all() -> &'static [FontFamilyChoice] {
+    pub const READER_BOOK_FONT: &'static str = "ReaderBookFont";
+
+    pub fn all_standard() -> &'static [FontFamilyChoice] {
         &[
             FontFamilyChoice::SansSerif,
             FontFamilyChoice::Serif,
@@ -17,18 +20,36 @@ impl FontFamilyChoice {
         ]
     }
 
-    pub fn display_name(&self) -> &'static str {
+    pub fn all() -> &'static [FontFamilyChoice] {
+        Self::all_standard()
+    }
+
+    pub fn display_name(&self) -> &str {
         match self {
             FontFamilyChoice::SansSerif => "Modern Sans",
             FontFamilyChoice::Serif => "Classic Serif",
             FontFamilyChoice::Monospace => "Code Monospace",
+            FontFamilyChoice::Custom(name) => name.as_str(),
         }
     }
 
-    pub fn to_egui_family(&self) -> egui::FontFamily {
+    pub fn to_egui_family(&self, ctx: &egui::Context) -> egui::FontFamily {
         match self {
-            FontFamilyChoice::SansSerif | FontFamilyChoice::Serif => egui::FontFamily::Proportional,
             FontFamilyChoice::Monospace => egui::FontFamily::Monospace,
+            FontFamilyChoice::SansSerif => egui::FontFamily::Proportional,
+            FontFamilyChoice::Serif | FontFamilyChoice::Custom(_) => {
+                let name = egui::FontFamily::Name(Self::READER_BOOK_FONT.into());
+                let is_bound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    ctx.fonts(|f| f.families().contains(&name))
+                }))
+                .unwrap_or(false);
+
+                if is_bound {
+                    name
+                } else {
+                    egui::FontFamily::Proportional
+                }
+            }
         }
     }
 }
@@ -51,6 +72,52 @@ impl TextAlignment {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ReadingMode {
+    #[default]
+    Paged,
+    Scroll,
+}
+
+impl ReadingMode {
+    pub fn all() -> &'static [ReadingMode] {
+        &[ReadingMode::Paged, ReadingMode::Scroll]
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            ReadingMode::Paged => "📖 E-Reader (Paged / Flip)",
+            ReadingMode::Scroll => "📜 Continuous Scroll",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PageLayoutMode {
+    #[default]
+    Auto,
+    Single,
+    Dual,
+}
+
+impl PageLayoutMode {
+    pub fn all() -> &'static [PageLayoutMode] {
+        &[PageLayoutMode::Auto, PageLayoutMode::Single, PageLayoutMode::Dual]
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            PageLayoutMode::Auto => "Auto (Dual on wide screen)",
+            PageLayoutMode::Single => "Single Page",
+            PageLayoutMode::Dual => "Two-Page Book Spread",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypographySettings {
     pub font_family: FontFamilyChoice,
@@ -65,6 +132,18 @@ pub struct TypographySettings {
     pub show_chapter_post_notes: bool,
     pub show_chapter_summary: bool,
     pub show_reading_progress_bar: bool,
+    #[serde(default)]
+    pub reading_mode: ReadingMode,
+    #[serde(default)]
+    pub page_layout: PageLayoutMode,
+    #[serde(default = "default_true")]
+    pub show_page_turn_indicators: bool,
+    #[serde(default = "default_true")]
+    pub page_flip_mouse_wheel: bool,
+    #[serde(default)]
+    pub custom_font_name: Option<String>,
+    #[serde(default)]
+    pub custom_font_path: Option<std::path::PathBuf>,
 }
 
 impl Default for TypographySettings {
@@ -82,6 +161,12 @@ impl Default for TypographySettings {
             show_chapter_post_notes: true,
             show_chapter_summary: true,
             show_reading_progress_bar: true,
+            reading_mode: ReadingMode::Paged,
+            page_layout: PageLayoutMode::Auto,
+            show_page_turn_indicators: true,
+            page_flip_mouse_wheel: true,
+            custom_font_name: None,
+            custom_font_path: None,
         }
     }
 }

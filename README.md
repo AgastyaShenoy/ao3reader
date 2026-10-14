@@ -8,10 +8,12 @@
 A fast, lightweight, native desktop ebook reader for **Archive of Our Own (AO3)** built in 100% Rust with GPU-accelerated immediate-mode graphics (`eframe` / `egui`).
 
 Designed for pure performance, privacy, and long, comfortable reading sessions:
-- **Zero Webview / Zero Chromium bloat**: Standalone native Windows binary (~19 MB binary, ~7.7 MB zip distribution).
+- **Zero Webview / Zero Chromium bloat**: Standalone native Windows binary (~19.5 MB binary, ~7.7 MB zip distribution).
 - **GPU-Accelerated**: Silky smooth 60/120+ FPS scrolling powered natively by DirectX 12.
 - **Low Memory Overhead**: Utilizes the high-efficiency `mimalloc` allocator and bounded thread pools.
 - **100% Offline Capability**: Download and cache your favorite works locally as structured JSON for distraction-free offline reading.
+- **Real E-Reader Page Flipping**: Read like an e-book or paper novel with automatic single and dual-page spreads.
+- **Universal Font Support**: Read using any font installed on your PC, search installed fonts, or load any `.ttf` / `.otf` file.
 - **Built-in Auto-Update**: Automated GitHub Releases checker with release note previews and one-click downloads.
 
 ---
@@ -25,30 +27,52 @@ This project was conceived as an exploration into building high-performance, low
 
 ---
 
+## 🌟 What's New in v1.1.0 🚀
+
+- 📖 **Real E-Reader Page Flipping**: Experience distraction-free e-book reading with page spreads! Supports single-page and automatic dual-page layouts on wide displays, edge turn indicators (`‹ / ›`), and mouse scroll wheel page flipping.
+- 🔤 **Universal Font Support**: Select and read in any font installed on your system! Includes real-time font search, curated book-optimized typefaces, and custom `.ttf` / `.otf` font file loading with safe proportional fallback.
+- 📱 **Responsive Adaptive Work Cards**: Work cards in the library now dynamically adjust on window resize, positioning buttons on the right on wide displays and stacking cleanly on the bottom on narrow screens without icon overlap or text clipping.
+- ⚙ **Organized Tabbed Settings Hub**: Brand-new categorized Preferences interface with tabs for Reading & Ergonomics, Typography & Fonts, Theme Palettes, Keyboard Shortcuts, Storage & Updates, and About.
+- 📏 **Enhanced Text Wrapping & Metrics**: Multiline summary previews with safe character boundary truncation and perfectly aligned typography sliders.
+
+---
+
 ## 🌟 Key Features
 
-### 📖 Comprehensive E-Reader Features
-- **Distraction-Free Reading Canvas**: Center-aligned reading column (adjustable width from 500px to 1200px) maintaining optimal 60–80 characters per line.
+### 📖 Comprehensive E-Reader Experience
+- **Two Reading Modes**:
+  - **📖 E-Reader Mode (Paged / Flip)**: Reads like an authentic Kindle or paper novel. Flip pages using `Arrow Keys`, `PageUp / PageDown`, `Space / Shift+Space`, `J / K`, or the mouse wheel.
+  - **📜 Continuous Scroll**: Classic web reading with smooth vertical scrolling.
+- **Adaptive Page Spreads**:
+  - **Auto**: Automatically switches between single-page on compact screens and side-by-side dual-page book spreads on wider windows ($\ge 1100\text{px}$).
+  - **Single Page**: Dedicated clean single-column view.
+  - **Dual Page**: Classic open book two-page spread.
+- **Universal Custom Font Support**:
+  - Choose from standard presets (**Modern Sans**, **Code Monospace**), curated book fonts (**Georgia**, **Palatino**, **Baskerville**, **Garamond**, **Calibri**, etc.), or search across all installed system fonts.
+  - Load any downloaded `.ttf` or `.otf` font file directly from your computer.
+  - Font customization applies strictly to the reading canvas, leaving app navigation and UI clean and proportional.
+- **Distraction-Free Canvas & Zen Mode**:
+  - Center-aligned reading column (adjustable width from 450px to 1400px).
+  - Press `F11` for Zen Mode (fullscreen borderless immersion).
 - **Eye-Care Color Themes**:
   - **Dark Slate** (default modern dark mode)
   - **OLED Black** (pitch-black background, high contrast for OLED displays)
   - **Paper Light** (clean crisp white reading page)
   - **Warm Sepia** (parchment tint for daytime eye-strain reduction)
   - **Nord Arctic** (cool arctic blue palette)
-  - **Midnight Blue** (deep navy night mode)
+  - **Solarized Light** (calm low-contrast daylight palette)
 - **Typography & Ergonomics Controls**:
-  - Font families: Modern Sans-Serif, Classic Book Serif, Monospace.
-  - Granular font sizing slider (12 pt to 32 pt) with hotkeys (`Ctrl + =` / `Ctrl + -`).
-  - Adjustable line height multiplier (1.2x to 2.4x).
-  - Paragraph spacing adjustments and optional first-line book indentation.
+  - Granular font sizing slider (12 pt to 36 pt) with quick hotkey toggles (`A+` / `A-`).
+  - Adjustable line height multiplier (1.1x to 2.6x).
+  - Paragraph spacing adjustments and optional first-line book indentation (4 spaces).
   - Collapsible author preface notes and post-chapter end notes.
 - **Chapter Navigation & Table of Contents**:
   - Slide-out Table of Contents drawer with word counts per chapter and instant jumping.
-  - Previous / Next Chapter buttons with keyboard shortcuts (`Left / Right Arrow`, `J / K`).
+  - Previous / Next Chapter buttons with keyboard shortcuts (`Ctrl + Left / Right Arrow`).
   - Auto-scroll to chapter top and persistent position tracking.
 - **Reading Metrics & Progress**:
   - Real-time progress bar showing Chapter X of Y and reading percentage.
-  - Estimated reading time remaining for current chapter and entire work (calculated using customizable Words-Per-Minute reading speed).
+  - Estimated reading time remaining per chapter and total work (calculated using customizable Words-Per-Minute reading speed).
 - **In-Work Search (`Ctrl + F`)**:
   - Search current chapter or entire multi-chapter works with match count and jump navigation (`◀` / `▶`).
 - **Bookmarks & Annotations**:
@@ -95,12 +119,15 @@ This project was conceived as an exploration into building high-performance, low
 
 | Shortcut | Action |
 | :--- | :--- |
-| `[←]` or `[J]` | Previous Chapter |
-| `[→]` or `[K]` | Next Chapter |
+| `[→]`, `[PageDown]`, `[Space]`, `[K]` | Turn to Next Page / Spread (in Paged mode) |
+| `[←]`, `[PageUp]`, `[Shift+Space]`, `[J]` | Turn to Previous Page / Spread (in Paged mode) |
+| `[Ctrl + →]` / `[Ctrl + ←]` | Skip to Next / Previous Chapter |
+| `[Home]` / `[End]` | First Page / Last Page of Chapter |
+| `[F11]` | Toggle Zen Mode (Border-free fullscreen immersion) |
 | `[Ctrl + F]` | Open / Close Search in Work |
 | `[Ctrl + B]` | Bookmark current chapter |
 | `[A+]` / `[A-]` | Quick increase / decrease font size |
-| `[Esc]` | Close search bar, Table of Contents, or dialogs |
+| `[Esc]` | Close search bar, Table of Contents, or appearance drawers |
 
 ---
 
@@ -111,6 +138,7 @@ This project was conceived as an exploration into building high-performance, low
 - **Memory Allocator**: [`mimalloc`](https://github.com/microsoft/mimalloc) for minimal heap fragmentation and rapid page reclamation.
 - **Networking & Sessions**: [`reqwest`](https://github.com/seanmonstar/reqwest) with cookie jar persistence for AO3 authentication and adult content cookies.
 - **HTML Parsing**: [`scraper`](https://github.com/causal-agent/scraper) for extracting metadata, chapters, paragraphs, and styling.
+- **Font Parsing**: [`ttf-parser`](https://github.com/RazrFalcon/ttf-parser) for zero-panic font validation and system font scanning.
 - **Async Runtime**: [`tokio`](https://tokio.rs/) multi-threaded runtime with bounded workers so network operations never block UI rendering.
 - **Data Persistence**: [`serde`](https://serde.rs/) + [`directories`](https://github.com/dirs-dev/directories-rs) storing local configuration and library cache in the standard OS AppData folder.
 
@@ -120,7 +148,7 @@ This project was conceived as an exploration into building high-performance, low
 
 ### Download Binary (Windows)
 Pre-compiled standalone binaries are available on the [Releases](https://github.com/AgastyaShenoy/ao3reader/releases) page:
-1. Download `ao3reader-v1.0.0-windows-x64.zip` or `ao3reader.exe`.
+1. Download `ao3reader-v1.1.0-windows-x64.zip` or `ao3reader.exe`.
 2. Extract and run `ao3reader.exe` directly (no installer required).
 
 ### Building from Source

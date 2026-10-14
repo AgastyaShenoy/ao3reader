@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "ao3reader"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "arboard",
  "chrono",
@@ -188,6 +188,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "ttf-parser",
  "url",
  "webbrowser",
  "wgpu",

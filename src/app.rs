@@ -12,7 +12,7 @@ use crate::ui::library_view::{ExportFormat, LibraryAction, LibraryView};
 use crate::ui::settings_view::{SettingsAction, SettingsView};
 use crate::updater::{check_for_updates, UpdateInfo, UpdateStatus};
 use egui::{
-    Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, Stroke, Ui,
+    Color32, CornerRadius, Frame, Margin, RichText, Stroke, Ui,
 };
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -52,6 +52,7 @@ pub struct AO3ReaderApp {
     pub last_theme: Option<crate::reader::theme::ReaderThemeType>,
     pub update_status: UpdateStatus,
     pub update_available: bool,
+    pub active_font_path: Option<std::path::PathBuf>,
 }
 
 impl AO3ReaderApp {
@@ -68,6 +69,13 @@ impl AO3ReaderApp {
         visuals.panel_fill = colors.bg;
         visuals.window_fill = colors.surface;
         cc.egui_ctx.set_visuals(visuals);
+
+        crate::reader::font_manager::FontManager::init_fonts(
+            &cc.egui_ctx,
+            config.typography.custom_font_path.as_deref(),
+            config.typography.custom_font_name.as_deref(),
+        );
+        let active_font_path = config.typography.custom_font_path.clone();
 
         let library = LibraryManager::new();
         let client = Ao3Client::new(Some(&config.session));
@@ -90,6 +98,7 @@ impl AO3ReaderApp {
             status_toast: None,
             update_status: UpdateStatus::Idle,
             update_available: false,
+            active_font_path,
         };
 
         if app.config.check_updates_on_startup {
@@ -207,6 +216,25 @@ impl eframe::App for AO3ReaderApp {
             visuals.window_fill = colors.surface;
             ctx.set_visuals(visuals);
             self.last_theme = Some(self.config.theme);
+        }
+
+        // Apply custom font dynamically when setting changes!
+        if self.active_font_path != self.config.typography.custom_font_path {
+            if let Some(ref path) = self.config.typography.custom_font_path {
+                let name = self.config.typography.custom_font_name.as_deref().unwrap_or("CustomFont");
+                if let Err(e) = crate::reader::font_manager::FontManager::apply_font_to_ctx(ctx, path, name) {
+                    self.set_toast(format!("Failed to load font: {e}"));
+                } else {
+                    self.set_toast(format!("Applied font '{name}'"));
+                }
+            } else {
+                crate::reader::font_manager::FontManager::reset_fonts(ctx);
+                self.set_toast("Reset to standard fonts");
+            }
+            self.active_font_path = self.config.typography.custom_font_path.clone();
+            if let Some(reader) = &mut self.reader_view {
+                reader.last_pagination_key = None;
+            }
         }
 
         egui::CentralPanel::default()
@@ -473,7 +501,7 @@ impl AO3ReaderApp {
             .stroke(Stroke::new(1.0, colors.border))
             .inner_margin(Margin::symmetric(20, 10))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     // Logo / Brand
                     Frame::NONE
                         .fill(colors.accent)
@@ -485,9 +513,9 @@ impl AO3ReaderApp {
 
                     ui.label(RichText::new("Reader").strong().size(16.0).color(colors.text));
 
-                    ui.add_space(16.0);
+                    ui.add_space(12.0);
                     ui.separator();
-                    ui.add_space(16.0);
+                    ui.add_space(12.0);
 
                     // Nav tabs
                     let lib_count = self.library.entries().len();
@@ -536,22 +564,25 @@ impl AO3ReaderApp {
                         }
                     }
 
-                    // Quick Theme Selector on the right
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let cur_theme = self.config.theme;
-                        egui::ComboBox::from_id_salt("header_theme_picker")
-                            .selected_text(cur_theme.display_name())
-                            .width(115.0)
-                            .show_ui(ui, |ui| {
-                                for theme in crate::reader::theme::ReaderThemeType::all() {
-                                    if ui.selectable_value(&mut self.config.theme, *theme, theme.display_name()).clicked() {
-                                        let _ = self.config.save();
-                                    }
-                                }
-                            });
+                    // Push theme selector right if there is space, otherwise wrap cleanly
+                    let avail = ui.available_width();
+                    let theme_w = 190.0;
+                    if avail > theme_w {
+                        ui.add_space(avail - theme_w);
+                    }
 
-                        ui.label(RichText::new("Theme:").color(colors.text_muted).size(12.0));
-                    });
+                    ui.label(RichText::new("Theme:").color(colors.text_muted).size(12.0));
+                    let cur_theme = self.config.theme;
+                    egui::ComboBox::from_id_salt("header_theme_picker")
+                        .selected_text(cur_theme.display_name())
+                        .width(115.0)
+                        .show_ui(ui, |ui| {
+                            for theme in crate::reader::theme::ReaderThemeType::all() {
+                                if ui.selectable_value(&mut self.config.theme, *theme, theme.display_name()).clicked() {
+                                    let _ = self.config.save();
+                                }
+                            }
+                        });
                 });
             });
     }

@@ -92,13 +92,16 @@ impl UiComponents {
                 lines.truncate(max_lines);
             }
             let truncated = lines.join(" ");
-            let clean = if truncated.len() > 240 {
-                format!("{}...", &truncated[..237])
+            let char_count = truncated.chars().count();
+            let max_chars = 450;
+            let clean = if char_count > max_chars {
+                let s: String = truncated.chars().take(max_chars - 3).collect();
+                format!("{s}...")
             } else {
                 truncated
             };
 
-            ui.label(RichText::new(clean).color(colors.text_muted).size(12.0).italics());
+            ui.add(egui::Label::new(RichText::new(clean).color(colors.text_muted).size(12.0).italics()).wrap());
         }
     }
 }

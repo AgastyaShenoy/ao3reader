@@ -1,6 +1,6 @@
 [package]
 name = "ao3reader"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 
 [dependencies]
@@ -21,3 +21,4 @@ tokio = { version = "1.53.3", default-features = false, features = ["rt-multi-th
 rfd = "0.15"
 url = "2.5.8"
 webbrowser = "1.2.4"
+ttf-parser = "0.25"
