@@ -47,21 +47,31 @@ pub struct AO3ReaderApp {
     pub event_tx: Sender<AppEvent>,
     pub event_rx: Receiver<AppEvent>,
     pub status_toast: Option<(String, chrono::DateTime<chrono::Utc>)>,
+    pub last_theme: Option<crate::reader::theme::ReaderThemeType>,
 }
 
 impl AO3ReaderApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let mut visuals = egui::Visuals::dark();
+        let config = AppConfig::load();
+        let colors = config.theme.colors();
+
+        let mut visuals = if colors.is_dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        };
         visuals.window_corner_radius = CornerRadius::same(8);
+        visuals.panel_fill = colors.bg;
+        visuals.window_fill = colors.surface;
         cc.egui_ctx.set_visuals(visuals);
 
-        let config = AppConfig::load();
         let library = LibraryManager::new();
         let client = Ao3Client::new(Some(&config.session));
 
         let (event_tx, event_rx) = channel();
 
         Self {
+            last_theme: Some(config.theme),
             config,
             library,
             client,
@@ -150,11 +160,18 @@ impl eframe::App for AO3ReaderApp {
 
         let colors = self.config.theme.colors();
 
-        // Apply dark or light mode based on theme
-        if colors.is_dark {
-            ctx.set_visuals(egui::Visuals::dark());
-        } else {
-            ctx.set_visuals(egui::Visuals::light());
+        // Apply dark or light mode ONLY when theme changes!
+        if self.last_theme != Some(self.config.theme) {
+            let mut visuals = if colors.is_dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            };
+            visuals.window_corner_radius = CornerRadius::same(8);
+            visuals.panel_fill = colors.bg;
+            visuals.window_fill = colors.surface;
+            ctx.set_visuals(visuals);
+            self.last_theme = Some(self.config.theme);
         }
 
         egui::CentralPanel::default()
@@ -238,6 +255,8 @@ impl eframe::App for AO3ReaderApp {
                             match action {
                                 ReaderAction::None => {}
                                 ReaderAction::CloseReader => {
+                                    let p = reader.calculate_progress();
+                                    self.library.update_progress(&work_id, p);
                                     self.active_tab = ActiveTab::Library;
                                 }
                                 ReaderAction::UpdateProgress(progress) => {

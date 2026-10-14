@@ -185,7 +185,7 @@ impl ReaderView {
 
         // Bottom Progress Bar
         if config.typography.show_reading_progress_bar {
-            self.render_bottom_progress(ui, &colors, config, &mut action);
+            self.render_bottom_progress(ui, &colors, config);
         }
 
         action
@@ -232,7 +232,8 @@ impl ReaderView {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     // Back to Library button
-                    if ui.add(Button::new(RichText::new("⬅ Library").color(colors.text).size(13.0))).clicked() {
+                    let back_btn = Button::new(RichText::new("⬅ Library").color(colors.text).size(13.5).strong());
+                    if ui.add(back_btn).clicked() {
                         *action = ReaderAction::CloseReader;
                     }
 
@@ -240,20 +241,21 @@ impl ReaderView {
 
                     // Table of Contents toggle
                     let toc_label = format!("📖 Chapters ({}/{})", self.current_chapter_idx, self.total_chapters());
-                    if ui.add(Button::new(RichText::new(toc_label).color(colors.text).size(13.0))).clicked() {
+                    let toc_btn = Button::new(RichText::new(toc_label).color(colors.text).size(13.0));
+                    if ui.add(toc_btn).clicked() {
                         self.show_toc = !self.show_toc;
                     }
 
+                    ui.separator();
+
                     // Title truncated
-                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        let title = &self.work.meta.title;
-                        let display_title = if title.len() > 40 {
-                            format!("{}...", &title[..37])
-                        } else {
-                            title.clone()
-                        };
-                        ui.label(RichText::new(display_title).strong().color(colors.text).size(13.0));
-                    });
+                    let title = &self.work.meta.title;
+                    let display_title = if title.len() > 28 {
+                        format!("{}...", &title[..25])
+                    } else {
+                        title.clone()
+                    };
+                    ui.label(RichText::new(display_title).strong().color(colors.text).size(13.0));
 
                     // Right side controls
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -805,7 +807,6 @@ impl ReaderView {
         ui: &mut Ui,
         colors: &ReaderColors,
         config: &AppConfig,
-        action: &mut ReaderAction,
     ) {
         Frame::NONE
             .fill(colors.surface)
@@ -842,8 +843,5 @@ impl ReaderView {
                     });
                 });
             });
-
-        // Trigger progress save
-        *action = ReaderAction::UpdateProgress(self.calculate_progress());
     }
 }

@@ -14,7 +14,9 @@ async fn main() -> Result<(), eframe::Error> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1120.0, 800.0])
             .with_min_inner_size([680.0, 520.0])
-            .with_title("AO3 Reader — Archive of Our Own Desktop E-Reader"),
+            .with_title("AO3 Reader — Archive of Our Own Desktop E-Reader")
+            .with_transparent(false),
+        vsync: true,
         ..Default::default()
     };
 

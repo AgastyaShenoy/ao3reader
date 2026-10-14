@@ -95,6 +95,12 @@ impl LibraryManager {
     /// Update reading progress for a work
     pub fn update_progress(&mut self, work_id: &str, progress: ReadingProgress) {
         if let Some(entry) = self.data.entries.get_mut(work_id) {
+            if entry.progress.current_chapter == progress.current_chapter
+                && (entry.progress.percentage - progress.percentage).abs() < 0.1
+                && entry.progress.completed == progress.completed
+            {
+                return;
+            }
             entry.progress = progress;
             if entry.progress.percentage >= 99.0 || entry.progress.completed {
                 entry.shelf = ShelfStatus::Completed;
