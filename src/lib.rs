@@ -6,5 +6,6 @@ pub mod app;
 pub mod reader;
 pub mod storage;
 pub mod ui;
+pub mod updater;
 
 pub use app::AO3ReaderApp;

@@ -10,6 +10,7 @@ use crate::ui::account_view::{AccountAction, AccountView};
 use crate::ui::fetch_view::{FetchAction, FetchView};
 use crate::ui::library_view::{ExportFormat, LibraryAction, LibraryView};
 use crate::ui::settings_view::{SettingsAction, SettingsView};
+use crate::updater::{check_for_updates, UpdateInfo, UpdateStatus};
 use egui::{
     Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, Stroke, Ui,
 };
@@ -32,6 +33,7 @@ pub enum AppEvent {
     KudosResult(String),
     EpubReady { work_id: String, bytes: Vec<u8> },
     EpubFailed(String),
+    UpdateCheckResult(Result<Option<UpdateInfo>, String>),
 }
 
 pub struct AO3ReaderApp {
@@ -48,6 +50,8 @@ pub struct AO3ReaderApp {
     pub event_rx: Receiver<AppEvent>,
     pub status_toast: Option<(String, chrono::DateTime<chrono::Utc>)>,
     pub last_theme: Option<crate::reader::theme::ReaderThemeType>,
+    pub update_status: UpdateStatus,
+    pub update_available: bool,
 }
 
 impl AO3ReaderApp {
@@ -70,7 +74,7 @@ impl AO3ReaderApp {
 
         let (event_tx, event_rx) = channel();
 
-        Self {
+        let mut app = Self {
             last_theme: Some(config.theme),
             config,
             library,
@@ -81,10 +85,23 @@ impl AO3ReaderApp {
             account_view: AccountView::new(),
             settings_view: SettingsView::new(),
             reader_view: None,
-            event_tx,
+            event_tx: event_tx.clone(),
             event_rx,
             status_toast: None,
+            update_status: UpdateStatus::Idle,
+            update_available: false,
+        };
+
+        if app.config.check_updates_on_startup {
+            app.update_status = UpdateStatus::Checking;
+            let tx = event_tx;
+            tokio::spawn(async move {
+                let res = check_for_updates().await;
+                let _ = tx.send(AppEvent::UpdateCheckResult(res));
+            });
         }
+
+        app
     }
 
     pub fn set_toast(&mut self, msg: impl Into<String>) {
@@ -147,6 +164,24 @@ impl AO3ReaderApp {
                 }
                 AppEvent::EpubFailed(err) => {
                     self.fetch_view.set_error(err);
+                    ctx.request_repaint();
+                }
+                AppEvent::UpdateCheckResult(res) => {
+                    match res {
+                        Ok(Some(info)) => {
+                            self.set_toast(format!("🚀 New version {} available!", info.latest_version));
+                            self.update_available = true;
+                            self.update_status = UpdateStatus::UpdateAvailable(Box::new(info));
+                        }
+                        Ok(None) => {
+                            self.update_status = UpdateStatus::UpToDate {
+                                checked_version: crate::updater::CURRENT_VERSION.to_string(),
+                            };
+                        }
+                        Err(err) => {
+                            self.update_status = UpdateStatus::Error(err);
+                        }
+                    }
                     ctx.request_repaint();
                 }
             }
@@ -398,7 +433,7 @@ impl eframe::App for AO3ReaderApp {
                         }
                     }
                     ActiveTab::Settings => {
-                        let action = self.settings_view.ui(ui, &mut self.config);
+                        let action = self.settings_view.ui(ui, &mut self.config, &self.update_status);
                         match action {
                             SettingsAction::None => {}
                             SettingsAction::OpenStorageFolder => {
@@ -412,6 +447,17 @@ impl eframe::App for AO3ReaderApp {
                                 let _ = std::fs::create_dir_all(&works_dir);
                                 self.library = LibraryManager::new();
                                 self.set_toast("Offline cache cleared.");
+                            }
+                            SettingsAction::CheckForUpdates => {
+                                self.update_status = UpdateStatus::Checking;
+                                let tx = self.event_tx.clone();
+                                tokio::spawn(async move {
+                                    let res = check_for_updates().await;
+                                    let _ = tx.send(AppEvent::UpdateCheckResult(res));
+                                });
+                            }
+                            SettingsAction::OpenUrl(url) => {
+                                let _ = webbrowser::open(&url);
                             }
                         }
                     }
@@ -474,8 +520,20 @@ impl AO3ReaderApp {
                     }
 
                     let settings_tab = self.active_tab == ActiveTab::Settings;
-                    if ui.selectable_label(settings_tab, "⚙ Settings").clicked() {
+                    let settings_label = if self.update_available {
+                        "⚙ Settings 🚀"
+                    } else {
+                        "⚙ Settings"
+                    };
+                    if ui.selectable_label(settings_tab, settings_label).clicked() {
                         self.active_tab = ActiveTab::Settings;
+                    }
+
+                    if self.update_available {
+                        ui.add_space(4.0);
+                        if ui.button(RichText::new("🚀 Update Available!").strong().color(Color32::from_rgb(250, 204, 21))).clicked() {
+                            self.active_tab = ActiveTab::Settings;
+                        }
                     }
 
                     // Quick Theme Selector on the right

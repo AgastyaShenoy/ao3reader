@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub theme: ReaderThemeType,
@@ -16,6 +20,8 @@ pub struct AppConfig {
     pub auto_next_chapter: bool,
     pub confirm_adult_content: bool,
     pub custom_download_dir: Option<PathBuf>,
+    #[serde(default = "default_true")]
+    pub check_updates_on_startup: bool,
 }
 
 impl Default for AppConfig {
@@ -29,6 +35,7 @@ impl Default for AppConfig {
             auto_next_chapter: true,
             confirm_adult_content: true,
             custom_download_dir: None,
+            check_updates_on_startup: true,
         }
     }
 }
