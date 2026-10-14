@@ -7,7 +7,7 @@ edition = "2024"
 arboard = "3.6.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 directories = "6.0.0"
-eframe = "0.33.3"
+eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "wgpu", "accesskit"] }
 egui = "0.33.3"
 egui_extras = "0.33.3"
 regex = "1.13.1"
