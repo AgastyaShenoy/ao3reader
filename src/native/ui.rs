@@ -113,6 +113,17 @@ pub struct ScrollState {
     drag_grab: Option<f32>,
 }
 
+/// An open dropdown menu, drawn above everything at the end of the frame.
+#[derive(Clone)]
+pub struct MenuState {
+    pub id: Id,
+    pub anchor: Rect,
+    pub rect: Rect,
+    /// (label, danger)
+    pub items: Vec<(String, bool)>,
+    pub selected: Option<usize>,
+}
+
 /// State that persists between frames.
 pub struct Memory {
     pub active: Option<Id>,
@@ -123,6 +134,9 @@ pub struct Memory {
     next_ctrl_id: i32,
     pub edit_font: HFONT,
     pub started: Instant,
+    pub menu: Option<MenuState>,
+    /// Item picked from a menu, delivered to its button on the next frame.
+    pub menu_pick: Option<(Id, usize)>,
 }
 
 impl Memory {
@@ -136,6 +150,8 @@ impl Memory {
             next_ctrl_id: 100,
             edit_font,
             started: Instant::now(),
+            menu: None,
+            menu_pick: None,
         }
     }
 }
@@ -183,6 +199,7 @@ pub struct Ui<'a> {
     in_overlay: bool,
     /// Layout-only pass: nothing is drawn and widgets do not react.
     dry: bool,
+    menu_seen: bool,
     repaint: bool,
     wake_ms: Option<u32>,
     hand: bool,
@@ -198,11 +215,16 @@ impl<'a> Ui<'a> {
         for e in mem.edits.values_mut() {
             e.seen = false;
         }
-        Self { g, input, mem, c, hwnd, size, hot_now: None, wheel_used: false, blockers: Vec::new(), in_overlay: false, dry: false, repaint: false, wake_ms: None, hand: false }
+        let menu_rect = mem.menu.as_ref().map(|m| m.rect);
+        let mut ui = Self { g, input, mem, c, hwnd, size, hot_now: None, wheel_used: false, blockers: Vec::new(), in_overlay: false, dry: false, menu_seen: false, repaint: false, wake_ms: None, hand: false };
+        ui.blockers.extend(menu_rect);
+        ui
     }
 
-    /// Finishes the frame: retires edit controls that were not shown, tracks hover changes.
-    pub fn finish(self) -> FrameOut {
+    /// Finishes the frame: draws an open menu, retires edit controls that were not shown,
+    /// tracks hover changes.
+    pub fn finish(mut self) -> FrameOut {
+        self.menu_overlay();
         let gone: Vec<Id> = self.mem.edits.iter().filter(|(_, e)| !e.seen).map(|(k, _)| *k).collect();
         for k in gone {
             if let Some(e) = self.mem.edits.remove(&k) {
@@ -407,6 +429,83 @@ impl<'a> Ui<'a> {
         let tw = if label.is_empty() { 0.0 } else { self.measure(label, &TextStyle::ui(BODY), TextOpts::default()).w };
         let iw = if icon.is_some() { 16.0 + if label.is_empty() { 0.0 } else { 8.0 } } else { 0.0 };
         tw + iw + 28.0
+    }
+
+    /// Button that opens a dropdown menu. Returns the item picked (one frame later).
+    pub fn menu_button(&mut self, id: Id, r: Rect, label: &str, icon: Option<&str>, items: &[(&str, bool)], selected: Option<usize>) -> Option<usize> {
+        let picked = match self.mem.menu_pick {
+            Some((mid, i)) if mid == id => {
+                self.mem.menu_pick = None;
+                Some(i)
+            }
+            _ => None,
+        };
+        let open = self.mem.menu.as_ref().is_some_and(|m| m.id == id);
+        if open {
+            self.menu_seen = true;
+            if let Some(m) = &mut self.mem.menu {
+                m.anchor = r;
+            }
+        }
+        if self.button_ex(id, r, label, icon, ButtonKind::Secondary, true) {
+            if open {
+                self.mem.menu = None;
+            } else {
+                let w = items
+                    .iter()
+                    .map(|(l, _)| self.g.layout(l, &TextStyle::ui(13.5), TextOpts::default()).w + 40.0)
+                    .fold(r.w.max(180.0), f32::max);
+                let h = items.len() as f32 * 34.0 + 8.0;
+                let x = (r.right() - w).max(4.0).min(self.size.0 - w - 4.0);
+                let y = if r.bottom() + 4.0 + h > self.size.1 - 4.0 { (r.y - 4.0 - h).max(4.0) } else { r.bottom() + 4.0 };
+                self.mem.menu = Some(MenuState {
+                    id,
+                    anchor: r,
+                    rect: Rect::new(x, y, w, h),
+                    items: items.iter().map(|(l, d)| (l.to_string(), *d)).collect(),
+                    selected,
+                });
+                self.menu_seen = true;
+            }
+            self.repaint = true;
+        }
+        picked
+    }
+
+    fn menu_overlay(&mut self) {
+        let Some(m) = self.mem.menu.clone() else { return };
+        if !self.menu_seen {
+            // The button that owns the menu is gone (screen changed).
+            self.mem.menu = None;
+            return;
+        }
+        let c = self.c;
+        self.in_overlay = true;
+        self.g.fill_round(Rect::new(m.rect.x + 1.0, m.rect.y + 3.0, m.rect.w, m.rect.h), 8.0, Color::from_u8(0, 0, 0).alpha(0.18));
+        self.g.fill_round(m.rect, 8.0, c.surface);
+        self.g.stroke_round(m.rect, 8.0, 1.0, c.border);
+        for (i, (label, danger)) in m.items.iter().enumerate() {
+            let row = Rect::new(m.rect.x + 4.0, m.rect.y + 4.0 + i as f32 * 34.0, m.rect.w - 8.0, 34.0);
+            let resp = self.interact(id2(m.id, ("menu-item", i)), row);
+            if resp.hovered {
+                self.g.fill_round(row, 5.0, c.hover());
+            }
+            let color = if *danger { c.danger } else { c.text };
+            self.text_in(label, &TextStyle::ui(13.5), Rect::new(row.x + 12.0, row.y, row.w - 40.0, row.h), Align::Left, color);
+            if m.selected == Some(i) {
+                self.text_in("\u{E73E}", &TextStyle::icons(12.0), Rect::new(row.right() - 28.0, row.y, 16.0, row.h), Align::Center, c.accent);
+            }
+            if resp.clicked {
+                self.mem.menu_pick = Some((m.id, i));
+                self.mem.menu = None;
+                self.repaint = true;
+            }
+        }
+        if self.input.pressed && !m.rect.contains(self.input.mouse) && !m.anchor.contains(self.input.mouse) {
+            self.mem.menu = None;
+            self.repaint = true;
+        }
+        self.in_overlay = false;
     }
 
     /// Square icon-only ghost button.

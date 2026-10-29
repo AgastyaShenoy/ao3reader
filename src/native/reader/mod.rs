@@ -3,7 +3,7 @@
 //! position tracking that survives font, window and mode changes.
 
 mod layout;
-mod preface;
+pub mod preface;
 
 use crate::ao3::models::{Bookmark, ReadingProgress, Work};
 use crate::native::app::{reader_family, reader_font_label};

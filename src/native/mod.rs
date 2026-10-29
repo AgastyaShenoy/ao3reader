@@ -6,8 +6,10 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
+mod account;
 pub mod app;
 mod edit;
+mod fetch;
 mod gfx;
 mod icons;
 mod library;
@@ -346,6 +348,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
     }
 }
 
+/// Applies a dialog result to the app and runs a frame so it shows.
+fn with_host(f: impl FnOnce(&mut Host)) {
+    HOST.with(|h| {
+        if let Some(host) = h.borrow_mut().as_mut() {
+            f(host);
+            host.input_frame();
+        }
+    });
+}
+
 /// Runs dialogs and shell calls requested during a frame, outside the host borrow.
 fn run_deferred() {
     loop {
@@ -359,6 +371,22 @@ fn run_deferred() {
                 let _ = SetWindowTextW(hwnd, &HSTRING::from(title));
             },
             Deferred::Fullscreen(on) => set_fullscreen(hwnd, on),
+            Deferred::ImportFile => {
+                let picked = rfd::FileDialog::new()
+                    .set_title("Import a work")
+                    .add_filter("AO3 download or saved work (*.html, *.json)", &["html", "htm", "json"])
+                    .pick_file();
+                if let Some(path) = picked {
+                    with_host(|host| host.app.import_file(path));
+                }
+            }
+            Deferred::SaveFile { name, filter, ext, data } => {
+                let picked = rfd::FileDialog::new().set_file_name(&name).add_filter(filter, &[ext]).save_file();
+                if let Some(path) = picked {
+                    let result = std::fs::write(&path, &data).map(|_| path).map_err(|e| e.to_string());
+                    with_host(|host| host.app.on_saved(result));
+                }
+            }
             Deferred::PickFontFile => {
                 let picked = rfd::FileDialog::new()
                     .set_title("Choose a font file")

@@ -174,6 +174,9 @@ pub struct Chapter {
     pub pre_notes: Option<String>,
     pub post_notes: Option<String>,
     pub paragraphs: Vec<String>, // Parsed text paragraphs
+    /// Source HTML of the chapter body. No longer filled in; always written (empty) because
+    /// v1.x requires the field when it reads a saved work.
+    #[serde(default)]
     pub raw_html: String,
     pub word_count: usize,
 }

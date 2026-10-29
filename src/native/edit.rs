@@ -116,6 +116,13 @@ impl EditBox {
         }
     }
 
+    /// Pastes the clipboard into the control, as Ctrl+V would.
+    pub fn paste(&self) {
+        unsafe {
+            SendMessageW(self.hwnd, WM_PASTE, None, None);
+        }
+    }
+
     pub fn focus(&self) {
         unsafe {
             let _ = SetFocus(Some(self.hwnd));

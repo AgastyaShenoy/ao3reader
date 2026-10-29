@@ -1,13 +1,18 @@
 //! Application state and the window shell (header, navigation, toasts).
 
 use super::gfx::*;
+use super::account::{AccountAction, AccountScreen};
+use super::fetch::{FetchAction, FetchScreen};
 use super::icons;
-use super::library;
+use super::library::{ExportFormat, LibraryAction, LibraryScreen};
 use super::reader::{ReaderAction, ReaderScreen};
 use super::settings::{SettingsAction, SettingsCtx, SettingsScreen};
 use super::ui::*;
 use super::worker::Worker;
 use crate::ao3::client::Ao3Client;
+use crate::ao3::models::{UserSession, Work};
+use crate::ao3::parser::Ao3Parser;
+use crate::storage::export::WorkExporter;
 use crate::reader::typography::{FontFamilyChoice, TypographySettings};
 use crate::storage::config::AppConfig;
 use crate::storage::library::LibraryManager;
@@ -26,12 +31,18 @@ const PROGRESS_SAVE_DELAY: Duration = Duration::from_secs(3);
 pub enum AppEvent {
     UpdateChecked(Result<Option<UpdateInfo>, String>),
     Kudos(Result<String, String>),
+    Fetched { result: Result<Work, String>, open: bool },
+    Epub { name: String, result: Result<Vec<u8>, String> },
+    Login(Result<UserSession, String>),
+    SessionUser(Result<Option<String>, String>),
 }
 
 /// Work the window host runs after the frame, outside any borrow of the app
 /// (modal dialogs pump their own messages).
 pub enum Deferred {
     PickFontFile,
+    ImportFile,
+    SaveFile { name: String, filter: &'static str, ext: &'static str, data: Vec<u8> },
     Open(String),
     Fullscreen(bool),
     SetTitle(String),
@@ -60,6 +71,26 @@ pub struct App {
     font_families: Option<Vec<String>>,
     reader: Option<ReaderScreen>,
     last_progress_save: Instant,
+    library_screen: LibraryScreen,
+    fetch: FetchScreen,
+    account: AccountScreen,
+    /// Cookie being verified with AO3 before it is saved.
+    pending_cookie: Option<String>,
+}
+
+/// A file name that Windows accepts, from a work title.
+fn file_name(title: &str, ext: &str) -> String {
+    let clean: String = title
+        .chars()
+        .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() { '_' } else { c })
+        .take(120)
+        .collect();
+    let clean = clean.trim().trim_end_matches('.');
+    format!("{}.{ext}", if clean.is_empty() { "work" } else { clean })
+}
+
+fn signed_in(s: &UserSession) -> bool {
+    s.is_logged_in && (s.session_cookie.is_some() || s.remember_token.is_some())
 }
 
 /// The font family the reader uses for the given typography settings.
@@ -101,6 +132,10 @@ impl App {
             font_families: None,
             reader: None,
             last_progress_save: Instant::now(),
+            library_screen: LibraryScreen::default(),
+            fetch: FetchScreen::default(),
+            account: AccountScreen::default(),
+            pending_cookie: None,
         }
     }
 
@@ -137,21 +172,117 @@ impl App {
             }
             AppEvent::Kudos(Ok(msg)) => self.set_toast(msg),
             AppEvent::Kudos(Err(e)) => self.set_toast(format!("Couldn't leave kudos: {e}")),
+            AppEvent::Fetched { result: Ok(work), open } => {
+                if let Err(e) = self.library.save_work(&work) {
+                    self.fetch.set_error(format!("Downloaded, but couldn't save it: {e}"));
+                    return;
+                }
+                self.fetch.set_done(Some(work.meta.clone()));
+                self.set_toast(format!("Saved “{}”", work.meta.title));
+                if open {
+                    self.open_loaded(work);
+                }
+            }
+            AppEvent::Fetched { result: Err(e), .. } => self.fetch.set_error(e),
+            AppEvent::Epub { name, result: Ok(data) } => {
+                self.fetch.set_done(None);
+                self.deferred.push(Deferred::SaveFile { name, filter: "EPUB e-book", ext: "epub", data });
+            }
+            AppEvent::Epub { result: Err(e), .. } => self.fetch.set_error(e),
+            AppEvent::Login(Ok(session)) => {
+                let name = session.username.clone().unwrap_or_default();
+                self.config.session = session;
+                let _ = self.config.save();
+                self.account.set_message(format!("Signed in as {name}."), false);
+                self.set_toast("Signed in to AO3");
+            }
+            AppEvent::Login(Err(e)) => self.account.set_message(e, true),
+            AppEvent::SessionUser(result) => {
+                let cookie = self.pending_cookie.take();
+                match (result, cookie) {
+                    (Ok(Some(name)), Some(cookie)) => {
+                        self.config.session = UserSession { username: Some(name.clone()), session_cookie: None, remember_token: Some(cookie), is_logged_in: true };
+                        let _ = self.config.save();
+                        self.account.set_message(format!("Signed in as {name}."), false);
+                        self.set_toast("Signed in to AO3");
+                    }
+                    (Ok(_), _) => {
+                        self.client = Ao3Client::new(Some(&self.config.session));
+                        self.account.set_message("AO3 didn't recognise that cookie as signed in. Copy it again from a browser where you're signed in.", true);
+                    }
+                    (Err(e), _) => {
+                        self.client = Ao3Client::new(Some(&self.config.session));
+                        self.account.set_message(e, true);
+                    }
+                }
+            }
         }
+    }
+
+    fn run_job(&self, job: impl FnOnce() -> AppEvent + Send + 'static) {
+        if let Some(w) = &self.worker {
+            w.run(job);
+        }
+    }
+
+    fn start_fetch(&mut self, work_id: String, open: bool) {
+        let client = self.client.clone();
+        self.run_job(move || AppEvent::Fetched { result: client.fetch_work(&work_id), open });
+    }
+
+    /// Reads and parses a saved .json or AO3 .html download off the UI thread.
+    pub fn import_file(&mut self, path: std::path::PathBuf) {
+        self.fetch.start_import();
+        self.tab = Tab::Fetch;
+        self.run_job(move || {
+            let result = std::fs::read_to_string(&path).map_err(|e| format!("Couldn't read the file: {e}")).and_then(|content| {
+                let is_json = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"));
+                if is_json {
+                    serde_json::from_str::<Work>(&content).map_err(|e| format!("Not a saved AO3 Reader work: {e}"))
+                } else {
+                    // AO3 downloads link back to the work; otherwise derive a stable local id.
+                    let id = Ao3Parser::extract_work_id(&content).unwrap_or_else(|| {
+                        use std::hash::{Hash, Hasher};
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        content.hash(&mut h);
+                        format!("local-{:x}", h.finish())
+                    });
+                    Ao3Parser::parse_work(&content, &id)
+                }
+            });
+            AppEvent::Fetched { result, open: true }
+        });
+    }
+
+    pub fn on_saved(&mut self, result: Result<std::path::PathBuf, String>) {
+        match result {
+            Ok(path) => self.set_toast(format!("Saved {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())),
+            Err(e) => self.set_toast(format!("Couldn't save the file: {e}")),
+        }
+    }
+
+    fn open_loaded(&mut self, work: Work) {
+        self.close_reader();
+        let id = work.meta.id.clone();
+        let progress = self.library.get_entry(&id).map(|e| e.progress.clone());
+        let title = work.meta.title.clone();
+        self.reader = Some(ReaderScreen::new(work, progress.as_ref()));
+        self.library.touch_history(&id);
+        self.tab = Tab::Reader;
+        self.deferred.push(Deferred::SetTitle(format!("{title} — AO3 Reader")));
     }
 
     pub fn open_work(&mut self, work_id: &str) {
         match self.library.load_work(work_id) {
-            Some(work) => {
-                self.close_reader();
-                let progress = self.library.get_entry(work_id).map(|e| e.progress.clone());
-                let title = work.meta.title.clone();
-                self.reader = Some(ReaderScreen::new(work, progress.as_ref()));
-                self.library.touch_history(work_id);
-                self.tab = Tab::Reader;
-                self.deferred.push(Deferred::SetTitle(format!("{title} — AO3 Reader")));
+            Some(work) => self.open_loaded(work),
+            None if work_id.chars().all(|c| c.is_ascii_digit()) => {
+                // The text was cleared from disk; the library entry still knows the work.
+                self.set_toast("Downloading this work again…");
+                self.tab = Tab::Fetch;
+                self.fetch.busy = Some(super::fetch::Busy::Work);
+                self.start_fetch(work_id.to_string(), true);
             }
-            None => self.set_toast("This work's text isn't on disk any more. Download it again to read it."),
+            None => self.set_toast("This work's text isn't on disk any more."),
         }
     }
 
@@ -275,13 +406,9 @@ impl App {
             let body = Rect::new(0.0, HEADER_H, w, (h - HEADER_H).max(0.0));
             match self.tab {
                 Tab::Settings => self.settings_frame(ui, body),
-                Tab::Library => {
-                    if let Some(id) = library::frame(ui, body, &self.library) {
-                        self.open_work(&id);
-                    }
-                }
-                Tab::Fetch => self.placeholder(ui, body, icons::DOWNLOAD, "Fetch"),
-                Tab::Account => self.placeholder(ui, body, icons::CONTACT, "Account"),
+                Tab::Library => self.library_frame(ui, body),
+                Tab::Fetch => self.fetch_frame(ui, body),
+                Tab::Account => self.account_frame(ui, body),
                 Tab::Reader => {}
             }
             // Drawn last so it sits on top of the scrolled content.
@@ -311,7 +438,7 @@ impl App {
         ui.text_in("Reader", &TextStyle::ui(16.0).semibold(), Rect::new(70.0, r.y, 70.0, r.h), Align::Left, c.text);
 
         let lib_label = format!("Library ({})", self.library.entries().len());
-        let account_label = self.config.session.username.clone().unwrap_or_else(|| "Guest".into());
+        let account_label = if signed_in(&self.config.session) { self.config.session.username.clone().unwrap_or_else(|| "Account".into()) } else { "Guest".into() };
         let mut items = vec![
             (icons::LIBRARY, lib_label.as_str()),
             (icons::DOWNLOAD, "Fetch"),
@@ -343,19 +470,79 @@ impl App {
         }
     }
 
-    fn placeholder(&mut self, ui: &mut Ui, body: Rect, icon: &str, name: &str) {
-        let c = ui.c;
-        let w = body.w.min(520.0) - 32.0;
-        let r = Rect::new(body.x + (body.w - w) / 2.0, body.y + 64.0, w, 190.0);
-        ui.card(r);
-        let it = ui.measure(icon, &TextStyle::icons(30.0), TextOpts::default());
-        ui.g.draw_text(it, r.x + (r.w - it.w) / 2.0, r.y + 28.0, c.accent);
-        let title = format!("{name} is moving to the new engine");
-        let t = ui.measure(&title, &TextStyle::ui(17.0).semibold(), TextOpts::wrap(r.w - 48.0).align(Align::Center));
-        ui.g.draw_text(t, r.x + 24.0, r.y + 76.0, c.text);
-        let msg = "This screen is being rebuilt on the native renderer. Until it lands, use the classic build (ao3reader.exe) for it.";
-        let m = ui.measure(msg, &TextStyle::ui(13.0), TextOpts::wrap(r.w - 48.0).align(Align::Center));
-        ui.g.draw_text(m, r.x + 24.0, r.y + 84.0 + t.h, c.muted);
+    fn library_frame(&mut self, ui: &mut Ui, body: Rect) {
+        for a in self.library_screen.frame(ui, body, &self.library) {
+            match a {
+                LibraryAction::Open(id) => self.open_work(&id),
+                LibraryAction::ToggleFavorite(id) => self.library.toggle_favorite(&id),
+                LibraryAction::SetShelf(id, shelf) => self.library.set_shelf(&id, shelf),
+                LibraryAction::GoFetch => self.tab = Tab::Fetch,
+                LibraryAction::Delete(id) => {
+                    if self.reader.as_ref().is_some_and(|r| r.work_id() == id) {
+                        self.reader = None;
+                        self.deferred.push(Deferred::SetTitle("AO3 Reader".into()));
+                    }
+                    let title = self.library.get_entry(&id).map(|e| e.meta.title.clone()).unwrap_or_default();
+                    self.library.delete_work(&id);
+                    self.set_toast(format!("Removed “{title}”"));
+                }
+                LibraryAction::Export(id, format) => match self.library.load_work(&id) {
+                    Some(work) => {
+                        let (text, filter, ext) = match format {
+                            ExportFormat::Html => (WorkExporter::to_html(&work), "Web page", "html"),
+                            ExportFormat::Markdown => (WorkExporter::to_markdown(&work), "Markdown", "md"),
+                            ExportFormat::Text => (WorkExporter::to_txt(&work), "Plain text", "txt"),
+                        };
+                        let name = file_name(&work.meta.title, ext);
+                        self.deferred.push(Deferred::SaveFile { name, filter, ext, data: text.into_bytes() });
+                    }
+                    None => self.set_toast("This work's text isn't on disk. Open it to download it again first."),
+                },
+            }
+        }
+    }
+
+    fn fetch_frame(&mut self, ui: &mut Ui, body: Rect) {
+        let logged_in = signed_in(&self.config.session);
+        for a in self.fetch.frame(ui, body, logged_in) {
+            match a {
+                FetchAction::Fetch { id, open } => self.start_fetch(id, open),
+                FetchAction::Epub(work_id) => {
+                    let client = self.client.clone();
+                    let title = self.library.get_entry(&work_id).map(|e| e.meta.title.clone()).unwrap_or_else(|| format!("ao3_{work_id}"));
+                    let name = file_name(&title, "epub");
+                    self.run_job(move || AppEvent::Epub { name, result: client.download_epub(&work_id) });
+                }
+                FetchAction::Import => self.deferred.push(Deferred::ImportFile),
+                FetchAction::Open(id) => self.open_work(&id),
+                FetchAction::GoAccount => self.tab = Tab::Account,
+            }
+        }
+    }
+
+    fn account_frame(&mut self, ui: &mut Ui, body: Rect) {
+        let session = self.config.session.clone();
+        for a in self.account.frame(ui, body, &session) {
+            match a {
+                AccountAction::Login { username, password } => {
+                    let client = self.client.clone();
+                    self.run_job(move || AppEvent::Login(client.login(&username, &password)));
+                }
+                AccountAction::ApplyCookie(cookie) => {
+                    self.client.set_cookie("_otw_remember_me", &cookie);
+                    self.pending_cookie = Some(cookie);
+                    let client = self.client.clone();
+                    self.run_job(move || AppEvent::SessionUser(client.current_user()));
+                }
+                AccountAction::Logout => {
+                    self.config.session = UserSession::default();
+                    let _ = self.config.save();
+                    self.client = Ao3Client::new(None);
+                    self.account.set_message("Signed out. You're reading as a guest.", false);
+                    self.set_toast("Signed out");
+                }
+            }
+        }
     }
 
     fn settings_frame(&mut self, ui: &mut Ui, body: Rect) {

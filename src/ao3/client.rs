@@ -13,6 +13,16 @@ const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 const SESSION_COOKIE: &str = "_otw_session";
 const REMEMBER_COOKIE: &str = "_otw_remember_me";
 
+/// Explains an unexpected AO3 response in reader terms.
+fn unavailable_message(status: u16) -> String {
+    match status {
+        418 | 500..=599 => format!(
+            "AO3 isn't answering requests right now (HTTP {status}). It may be down for maintenance; check archiveofourown.org in a browser and try again later."
+        ),
+        _ => format!("AO3 returned an unexpected response (HTTP {status})."),
+    }
+}
+
 /// Blocking AO3 client. Call it from a worker thread, never from the UI thread.
 /// Clones share one connection pool and cookie jar.
 #[derive(Clone)]
@@ -148,6 +158,16 @@ impl Ao3Client {
         }
     }
 
+    /// Which AO3 user the current cookies belong to (None for a guest session).
+    pub fn current_user(&self) -> Result<Option<String>, String> {
+        let (status, _, body) = self.get_page(AO3_BASE_URL).map_err(|e| format!("Couldn't reach AO3: {e}"))?;
+        if !(200..300).contains(&status) {
+            return Err(unavailable_message(status));
+        }
+        let doc = scraper::Html::parse_document(&body);
+        Ok(Ao3Parser::logged_in_user(&doc))
+    }
+
     /// Fetch a full work by ID or URL
     pub fn fetch_work(&self, work_id_or_url: &str) -> Result<Work, String> {
         let work_id = Ao3Parser::extract_work_id(work_id_or_url)
@@ -164,7 +184,7 @@ impl Ao3Client {
         } else if status == 429 {
             return Err("AO3 rate limit reached (HTTP 429). Please wait a few moments before trying again.".to_string());
         } else if !(200..300).contains(&status) {
-            return Err(format!("AO3 server returned status {status}"));
+            return Err(unavailable_message(status));
         }
 
         Ao3Parser::parse_work(&body, &work_id)

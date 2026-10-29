@@ -56,7 +56,8 @@ impl LibraryManager {
         let work_id = work.meta.id.clone();
         let file_path = self.work_file_path(&work_id);
 
-        let json = serde_json::to_string_pretty(work).map_err(|e| e.to_string())?;
+        // Compact JSON: work files are read by the app only, and can be several MB.
+        let json = serde_json::to_string(work).map_err(|e| e.to_string())?;
         fs::write(&file_path, json).map_err(|e| e.to_string())?;
 
         // Update or insert library entry

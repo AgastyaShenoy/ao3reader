@@ -58,6 +58,17 @@ impl Ao3Parser {
     }
 
     /// Extract authenticity token (CSRF) from page
+    /// Username from AO3's page header greeting, or None when the page is for a guest.
+    pub fn logged_in_user(document: &Html) -> Option<String> {
+        let sel = Selector::parse("#greeting a[href^='/users/']").ok()?;
+        document
+            .select(&sel)
+            .filter_map(|a| a.value().attr("href"))
+            .filter_map(|h| h.strip_prefix("/users/"))
+            .map(|rest| rest.split('/').next().unwrap_or(rest).to_string())
+            .find(|name| !name.is_empty() && name != "login")
+    }
+
     pub fn extract_authenticity_token(document: &Html) -> Option<String> {
         let csrf_meta_sel = Selector::parse("meta[name='csrf-token']").unwrap();
         if let Some(meta) = document.select(&csrf_meta_sel).next() {
@@ -351,7 +362,6 @@ impl Ao3Parser {
                 // Body content: div[role="article"] or div.userstuff
                 let body_sel = Selector::parse("div[role='article'] div.userstuff, div.userstuff.module, div.userstuff").unwrap();
                 if let Some(body_el) = ch_node.select(&body_sel).next() {
-                    chapter.raw_html = body_el.inner_html();
                     chapter.paragraphs = Self::extract_paragraphs(body_el);
                 }
 
@@ -383,7 +393,6 @@ impl Ao3Parser {
             // Body content
             let body_sel = Selector::parse("#chapters div.userstuff, #workskin div.userstuff, div.userstuff").unwrap();
             if let Some(body_el) = document.select(&body_sel).next() {
-                chapter.raw_html = body_el.inner_html();
                 chapter.paragraphs = Self::extract_paragraphs(body_el);
             }
 
@@ -511,6 +520,14 @@ mod tests {
         let sel = Selector::parse("div.userstuff").unwrap();
         let paras = Ao3Parser::extract_paragraphs(doc.select(&sel).next().unwrap());
         assert_eq!(paras, vec!["I *really* mean it.".to_string(), "> Quoted line.".to_string()]);
+    }
+
+    #[test]
+    fn test_logged_in_user_from_greeting() {
+        let signed_in = Html::parse_document(r#"<ul id="greeting"><li class="dropdown"><a href="/users/reader42">Hi, reader42!</a><ul><li><a href="/users/reader42/pseuds/reader42">My Works</a></li></ul></li></ul>"#);
+        assert_eq!(Ao3Parser::logged_in_user(&signed_in), Some("reader42".to_string()));
+        let guest = Html::parse_document(r#"<div id="login"><form action="/users/login"></form></div>"#);
+        assert_eq!(Ao3Parser::logged_in_user(&guest), None);
     }
 
     #[test]
