@@ -97,6 +97,7 @@ impl LibraryManager {
         if let Some(entry) = self.data.entries.get_mut(work_id) {
             if entry.progress.current_chapter == progress.current_chapter
                 && (entry.progress.percentage - progress.percentage).abs() < 0.1
+                && (entry.progress.position - progress.position).abs() < 0.01
                 && entry.progress.completed == progress.completed
             {
                 return;

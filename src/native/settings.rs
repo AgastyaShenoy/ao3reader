@@ -69,6 +69,10 @@ impl SettingsScreen {
         self.tab = TAB_STORAGE;
     }
 
+    pub fn show_typography(&mut self) {
+        self.tab = TAB_TYPOGRAPHY;
+    }
+
     pub fn frame(&mut self, ui: &mut Ui, body: Rect, ctx: &mut SettingsCtx) -> Vec<SettingsAction> {
         let mut out = Vec::new();
         let c = ui.c;

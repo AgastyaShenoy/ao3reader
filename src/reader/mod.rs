@@ -2,6 +2,7 @@
 
 pub mod font_manager;
 pub mod paginator;
+pub mod rich_text;
 pub mod search;
 pub mod theme;
 pub mod typography;

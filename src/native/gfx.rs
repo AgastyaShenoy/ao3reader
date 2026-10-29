@@ -4,6 +4,7 @@
 //! into the process. Everything here works in DIPs (1/96 inch); the render target's DPI does
 //! the scaling, so callers never deal with physical pixels.
 
+use crate::reader::rich_text::{InlineStyle, Span};
 use crate::reader::theme::Rgb;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -374,8 +375,14 @@ impl Gfx {
 
     /// Lays out `text` (cached across frames) and returns its size.
     pub fn layout(&mut self, text: &str, style: &TextStyle, opts: TextOpts) -> Text {
+        self.layout_rich(text, &[], style, opts)
+    }
+
+    /// Like `layout`, with italic/bold/strikethrough spans (byte ranges into `text`).
+    pub fn layout_rich(&mut self, text: &str, spans: &[Span], style: &TextStyle, opts: TextOpts) -> Text {
         let key = hash_of(&(
             text,
+            spans,
             &style.family,
             style.size.to_bits(),
             style.bold,
@@ -394,7 +401,7 @@ impl Gfx {
         let Some(fmt) = self.format(style) else {
             return Text { key: 0, w: 0.0, h: style.size };
         };
-        let built = unsafe { self.build_layout(&fmt, text, style, &opts) };
+        let built = unsafe { self.build_layout(&fmt, text, spans, style, &opts) };
         match built {
             Ok((layout, w, h)) => {
                 self.layouts.insert(key, CachedLayout { layout, w, h, last_used: self.frame });
@@ -404,10 +411,42 @@ impl Gfx {
         }
     }
 
+    /// Measures without caching: (height, bottom of each line). Used to paginate whole
+    /// chapters without filling the layout cache with off-screen paragraphs.
+    pub fn measure_lines(&mut self, text: &str, spans: &[Span], style: &TextStyle, opts: TextOpts) -> (f32, Vec<f32>) {
+        let Some(fmt) = self.format(style) else { return (style.size, vec![style.size]) };
+        match unsafe { self.build_layout(&fmt, text, spans, style, &opts) } {
+            Ok((layout, _, h)) => (h, unsafe { line_bottoms(&layout) }),
+            Err(_) => (style.size, vec![style.size]),
+        }
+    }
+
+    /// Rectangles (relative to the layout origin) covering a byte range of the laid-out text.
+    pub fn range_rects(&self, t: Text, text: &str, start: usize, end: usize) -> Vec<Rect> {
+        let Some(c) = self.layouts.get(&t.key) else { return Vec::new() };
+        let start = start.min(text.len());
+        let end = end.clamp(start, text.len());
+        let pos = utf16_len(&text[..start]);
+        let len = utf16_len(&text[start..end]);
+        unsafe {
+            let mut count = 0u32;
+            let _ = c.layout.HitTestTextRange(pos, len, 0.0, 0.0, None, &mut count);
+            if count == 0 {
+                return Vec::new();
+            }
+            let mut buf = vec![DWRITE_HIT_TEST_METRICS::default(); count as usize];
+            if c.layout.HitTestTextRange(pos, len, 0.0, 0.0, Some(&mut buf), &mut count).is_err() {
+                return Vec::new();
+            }
+            buf.iter().take(count as usize).map(|m| Rect::new(m.left, m.top, m.width, m.height)).collect()
+        }
+    }
+
     unsafe fn build_layout(
         &self,
         fmt: &IDWriteTextFormat,
         text: &str,
+        spans: &[Span],
         style: &TextStyle,
         opts: &TextOpts,
     ) -> Result<(IDWriteTextLayout, f32, f32)> {
@@ -438,6 +477,16 @@ impl Gfx {
             let sign = self.dw.CreateEllipsisTrimmingSign(fmt)?;
             let trimming = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, delimiter: 0, delimiterCount: 0 };
             layout.SetTrimming(&trimming, &sign)?;
+        }
+        for span in spans {
+            let start = span.start.min(text.len());
+            let end = span.end.clamp(start, text.len());
+            let range = DWRITE_TEXT_RANGE { startPosition: utf16_len(&text[..start]), length: utf16_len(&text[start..end]) };
+            match span.style {
+                InlineStyle::Italic => layout.SetFontStyle(DWRITE_FONT_STYLE_ITALIC, range)?,
+                InlineStyle::Bold => layout.SetFontWeight(DWRITE_FONT_WEIGHT_BOLD, range)?,
+                InlineStyle::Strike => layout.SetStrikethrough(true, range)?,
+            }
         }
         let mut m = DWRITE_TEXT_METRICS::default();
         layout.GetMetrics(&mut m)?;
@@ -581,6 +630,28 @@ impl Gfx {
     pub fn clip(&self) -> Option<Rect> {
         self.clips.last().copied()
     }
+}
+
+fn utf16_len(s: &str) -> u32 {
+    s.encode_utf16().count() as u32
+}
+
+/// Cumulative bottom edge of every line in a layout.
+unsafe fn line_bottoms(layout: &IDWriteTextLayout) -> Vec<f32> {
+    let mut count = 0u32;
+    let _ = layout.GetLineMetrics(None, &mut count);
+    let mut buf = vec![DWRITE_LINE_METRICS::default(); count as usize];
+    if count == 0 || layout.GetLineMetrics(Some(&mut buf), &mut count).is_err() {
+        return Vec::new();
+    }
+    let mut y = 0.0;
+    buf.iter()
+        .take(count as usize)
+        .map(|l| {
+            y += l.height;
+            y
+        })
+        .collect()
 }
 
 unsafe fn localized_name(names: &IDWriteLocalizedStrings) -> Option<String> {

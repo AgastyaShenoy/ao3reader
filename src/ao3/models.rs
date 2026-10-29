@@ -253,6 +253,10 @@ pub struct Bookmark {
 pub struct ReadingProgress {
     pub current_chapter: usize, // 1-based index
     pub scroll_offset: f32,
+    /// Position inside the current chapter as paragraph index + fraction through that
+    /// paragraph (e.g. 12.4). Independent of font size, window size and reading mode.
+    #[serde(default)]
+    pub position: f32,
     pub percentage: f32, // 0.0 - 100.0
     pub last_read: DateTime<Utc>,
     pub completed: bool,
@@ -263,6 +267,7 @@ impl Default for ReadingProgress {
         Self {
             current_chapter: 1,
             scroll_offset: 0.0,
+            position: 0.0,
             percentage: 0.0,
             last_read: Utc::now(),
             completed: false,

@@ -402,13 +402,23 @@ impl Ao3Parser {
         let mut paragraphs = Vec::new();
 
         for child in element.select(&p_sel) {
+            // A <p> inside a <blockquote> or list is already part of that block's text.
+            let nested = child
+                .ancestors()
+                .take_while(|a| a.id() != element.id())
+                .filter_map(scraper::ElementRef::wrap)
+                .any(|a| p_sel.matches(&a));
+            // AO3's screen-reader landmark ("Chapter Text") is not part of the work.
+            if nested || child.value().classes().any(|c| c == "landmark") {
+                continue;
+            }
             let tag_name = child.value().name();
             if tag_name == "hr" {
                 paragraphs.push("---".to_string());
                 continue;
             }
 
-            let text = Self::clean_element_text(child);
+            let text = Self::collapse_whitespace(&Self::clean_element_text(child));
             let trimmed = text.trim();
             if !trimmed.is_empty() {
                 if tag_name == "blockquote" {
@@ -433,31 +443,50 @@ impl Ao3Parser {
         paragraphs
     }
 
+    /// Collapses runs of spaces like a browser does and drops spaces around line breaks.
+    fn collapse_whitespace(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            if c == ' ' && (out.ends_with(' ') || out.ends_with('\n')) {
+                continue;
+            }
+            if c == '\n' && out.ends_with(' ') {
+                out.pop();
+            }
+            out.push(c);
+        }
+        out
+    }
+
     /// Clean inner text of an element, preserving inline formatting cues if needed
     fn clean_element_text(element: scraper::ElementRef) -> String {
         let mut result = String::new();
         for node in element.children() {
             if let Some(text) = node.value().as_text() {
-                result.push_str(text);
+                // Source line breaks are just whitespace in HTML; only <br> breaks a line.
+                result.extend(text.chars().map(|c| if c.is_ascii_whitespace() { ' ' } else { c }));
             } else if let Some(el) = scraper::ElementRef::wrap(node) {
                 let name = el.value().name();
                 let inner = Self::clean_element_text(el);
+                // Markers hug the text; whitespace inside the tag moves outside them.
+                let wrap = |result: &mut String, marker: &str| {
+                    let core = inner.trim();
+                    if core.is_empty() {
+                        result.push_str(&inner);
+                        return;
+                    }
+                    let lead = &inner[..inner.len() - inner.trim_start().len()];
+                    let trail = &inner[inner.trim_end().len()..];
+                    result.push_str(lead);
+                    result.push_str(marker);
+                    result.push_str(core);
+                    result.push_str(marker);
+                    result.push_str(trail);
+                };
                 match name {
-                    "em" | "i" => {
-                        result.push('*');
-                        result.push_str(inner.trim());
-                        result.push('*');
-                    }
-                    "strong" | "b" => {
-                        result.push_str("**");
-                        result.push_str(inner.trim());
-                        result.push_str("**");
-                    }
-                    "s" | "strike" | "del" => {
-                        result.push_str("~~");
-                        result.push_str(inner.trim());
-                        result.push_str("~~");
-                    }
+                    "em" | "i" => wrap(&mut result, "*"),
+                    "strong" | "b" => wrap(&mut result, "**"),
+                    "s" | "strike" | "del" => wrap(&mut result, "~~"),
                     "br" => {
                         result.push('\n');
                     }
@@ -474,6 +503,15 @@ impl Ao3Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_paragraphs_keep_spacing_and_skip_nested_blocks() {
+        let html = r#"<div class="userstuff"><h3 class="landmark heading">Chapter Text</h3><p>I <em> really </em>mean it.</p><blockquote><p>Quoted line.</p></blockquote></div>"#;
+        let doc = Html::parse_fragment(html);
+        let sel = Selector::parse("div.userstuff").unwrap();
+        let paras = Ao3Parser::extract_paragraphs(doc.select(&sel).next().unwrap());
+        assert_eq!(paras, vec!["I *really* mean it.".to_string(), "> Quoted line.".to_string()]);
+    }
 
     #[test]
     fn test_extract_work_id() {

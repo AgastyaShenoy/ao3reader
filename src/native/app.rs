@@ -2,6 +2,8 @@
 
 use super::gfx::*;
 use super::icons;
+use super::library;
+use super::reader::{ReaderAction, ReaderScreen};
 use super::settings::{SettingsAction, SettingsCtx, SettingsScreen};
 use super::ui::*;
 use super::worker::Worker;
@@ -18,9 +20,12 @@ const HEADER_H: f32 = 56.0;
 const TOAST_SECS: u64 = 4;
 /// Settings are written to disk this long after the last change, not on every slider step.
 const CONFIG_SAVE_DELAY: Duration = Duration::from_millis(600);
+/// Reading position is written at most this often while reading (and always on close).
+const PROGRESS_SAVE_DELAY: Duration = Duration::from_secs(3);
 
 pub enum AppEvent {
     UpdateChecked(Result<Option<UpdateInfo>, String>),
+    Kudos(Result<String, String>),
 }
 
 /// Work the window host runs after the frame, outside any borrow of the app
@@ -28,10 +33,13 @@ pub enum AppEvent {
 pub enum Deferred {
     PickFontFile,
     Open(String),
+    Fullscreen(bool),
+    SetTitle(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
+    Reader,
     Library,
     Fetch,
     Account,
@@ -50,6 +58,8 @@ pub struct App {
     config_dirty_since: Option<Instant>,
     pub deferred: Vec<Deferred>,
     font_families: Option<Vec<String>>,
+    reader: Option<ReaderScreen>,
+    last_progress_save: Instant,
 }
 
 /// The font family the reader uses for the given typography settings.
@@ -81,7 +91,7 @@ impl App {
             config,
             library: LibraryManager::new(),
             client,
-            tab: Tab::Settings,
+            tab: Tab::Library,
             settings: SettingsScreen::default(),
             toast: None,
             update_status: UpdateStatus::Idle,
@@ -89,6 +99,8 @@ impl App {
             config_dirty_since: None,
             deferred: Vec::new(),
             font_families: None,
+            reader: None,
+            last_progress_save: Instant::now(),
         }
     }
 
@@ -123,6 +135,101 @@ impl App {
                     Err(e) => UpdateStatus::Error(e),
                 };
             }
+            AppEvent::Kudos(Ok(msg)) => self.set_toast(msg),
+            AppEvent::Kudos(Err(e)) => self.set_toast(format!("Couldn't leave kudos: {e}")),
+        }
+    }
+
+    pub fn open_work(&mut self, work_id: &str) {
+        match self.library.load_work(work_id) {
+            Some(work) => {
+                self.close_reader();
+                let progress = self.library.get_entry(work_id).map(|e| e.progress.clone());
+                let title = work.meta.title.clone();
+                self.reader = Some(ReaderScreen::new(work, progress.as_ref()));
+                self.library.touch_history(work_id);
+                self.tab = Tab::Reader;
+                self.deferred.push(Deferred::SetTitle(format!("{title} — AO3 Reader")));
+            }
+            None => self.set_toast("This work's text isn't on disk any more. Download it again to read it."),
+        }
+    }
+
+    fn save_progress(&mut self) {
+        if let Some(r) = &mut self.reader {
+            if r.progress_dirty {
+                r.progress_dirty = false;
+                let id = r.work_id().to_string();
+                self.library.update_progress(&id, r.progress());
+            }
+        }
+        self.last_progress_save = Instant::now();
+    }
+
+    fn close_reader(&mut self) {
+        self.save_progress();
+        if let Some(r) = self.reader.take() {
+            if r.fullscreen {
+                self.deferred.push(Deferred::Fullscreen(false));
+            }
+            self.deferred.push(Deferred::SetTitle("AO3 Reader".into()));
+        }
+        if self.tab == Tab::Reader {
+            self.tab = Tab::Library;
+        }
+    }
+
+    fn reader_frame(&mut self, ui: &mut Ui, r: Rect) {
+        let Some(reader) = &mut self.reader else {
+            self.tab = Tab::Library;
+            return;
+        };
+        let bookmarks = self.library.get_entry(reader.work_id()).map(|e| e.bookmarks.clone()).unwrap_or_default();
+        let actions = reader.frame(ui, r, &mut self.config, &bookmarks);
+        let work_id = reader.work_id().to_string();
+        for a in actions {
+            match a {
+                ReaderAction::Close => {
+                    self.close_reader();
+                    return;
+                }
+                ReaderAction::Kudos => {
+                    if let Some(w) = &self.worker {
+                        let client = self.client.clone();
+                        let id = work_id.clone();
+                        w.run(move || AppEvent::Kudos(client.leave_kudos(&id)));
+                        self.set_toast("Sending kudos…");
+                    }
+                }
+                ReaderAction::AddBookmark(b) => {
+                    self.library.add_bookmark(&work_id, b);
+                    self.set_toast("Bookmark added");
+                }
+                ReaderAction::RemoveBookmark(bid) => self.library.remove_bookmark(&work_id, &bid),
+                ReaderAction::ConfigChanged => self.mark_config_dirty(),
+                ReaderAction::ToggleFullscreen => {
+                    if let Some(r) = &mut self.reader {
+                        r.fullscreen = !r.fullscreen;
+                        let on = r.fullscreen;
+                        self.deferred.push(Deferred::Fullscreen(on));
+                        if on {
+                            self.set_toast("Full screen: press Esc or F11 to leave");
+                        }
+                    }
+                }
+                ReaderAction::OpenTypographySettings => {
+                    self.tab = Tab::Settings;
+                    self.settings.show_typography();
+                }
+            }
+        }
+        if self.reader.as_ref().is_some_and(|r| r.progress_dirty) {
+            let since = self.last_progress_save.elapsed();
+            if since >= PROGRESS_SAVE_DELAY {
+                self.save_progress();
+            } else {
+                ui.wake_after((PROGRESS_SAVE_DELAY - since).as_millis() as u32 + 1);
+            }
         }
     }
 
@@ -135,6 +242,7 @@ impl App {
     }
 
     pub fn on_close(&mut self) {
+        self.save_progress();
         if self.config_dirty_since.take().is_some() {
             let _ = self.config.save();
         }
@@ -160,16 +268,25 @@ impl App {
         let c = ui.c;
         ui.g.clear(c.bg);
 
-        let body = Rect::new(0.0, HEADER_H, w, (h - HEADER_H).max(0.0));
-        match self.tab {
-            Tab::Settings => self.settings_frame(ui, body),
-            Tab::Library => self.placeholder(ui, body, icons::LIBRARY, "Library"),
-            Tab::Fetch => self.placeholder(ui, body, icons::DOWNLOAD, "Fetch"),
-            Tab::Account => self.placeholder(ui, body, icons::CONTACT, "Account"),
+        if self.tab == Tab::Reader {
+            self.reader_frame(ui, Rect::new(0.0, 0.0, w, h));
         }
-
-        // Drawn last so it sits on top of the scrolled content.
-        self.header(ui, Rect::new(0.0, 0.0, w, HEADER_H));
+        if self.tab != Tab::Reader {
+            let body = Rect::new(0.0, HEADER_H, w, (h - HEADER_H).max(0.0));
+            match self.tab {
+                Tab::Settings => self.settings_frame(ui, body),
+                Tab::Library => {
+                    if let Some(id) = library::frame(ui, body, &self.library) {
+                        self.open_work(&id);
+                    }
+                }
+                Tab::Fetch => self.placeholder(ui, body, icons::DOWNLOAD, "Fetch"),
+                Tab::Account => self.placeholder(ui, body, icons::CONTACT, "Account"),
+                Tab::Reader => {}
+            }
+            // Drawn last so it sits on top of the scrolled content.
+            self.header(ui, Rect::new(0.0, 0.0, w, HEADER_H));
+        }
         self.toast_overlay(ui);
 
         if let Some(since) = self.config_dirty_since {
@@ -195,13 +312,17 @@ impl App {
 
         let lib_label = format!("Library ({})", self.library.entries().len());
         let account_label = self.config.session.username.clone().unwrap_or_else(|| "Guest".into());
-        let items = [
+        let mut items = vec![
             (icons::LIBRARY, lib_label.as_str()),
             (icons::DOWNLOAD, "Fetch"),
             (icons::CONTACT, account_label.as_str()),
             (icons::SETTINGS, "Settings"),
         ];
-        let tabs = [Tab::Library, Tab::Fetch, Tab::Account, Tab::Settings];
+        let mut tabs = vec![Tab::Library, Tab::Fetch, Tab::Account, Tab::Settings];
+        if self.reader.is_some() {
+            items.insert(0, (icons::READING, "Reading"));
+            tabs.insert(0, Tab::Reader);
+        }
         let mut sel = tabs.iter().position(|t| *t == self.tab).unwrap_or(0);
 
         let has_update = matches!(self.update_status, UpdateStatus::UpdateAvailable(_));

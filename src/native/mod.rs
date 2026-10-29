@@ -10,6 +10,8 @@ pub mod app;
 mod edit;
 mod gfx;
 mod icons;
+mod library;
+mod reader;
 mod settings;
 mod ui;
 mod worker;
@@ -353,6 +355,10 @@ fn run_deferred() {
             Deferred::Open(target) => unsafe {
                 ShellExecuteW(Some(hwnd), w!("open"), &HSTRING::from(target), None, None, SW_SHOWNORMAL);
             },
+            Deferred::SetTitle(title) => unsafe {
+                let _ = SetWindowTextW(hwnd, &HSTRING::from(title));
+            },
+            Deferred::Fullscreen(on) => set_fullscreen(hwnd, on),
             Deferred::PickFontFile => {
                 let picked = rfd::FileDialog::new()
                     .set_title("Choose a font file")
@@ -368,6 +374,32 @@ fn run_deferred() {
                     });
                 }
             }
+        }
+    }
+}
+
+thread_local! {
+    /// Window placement saved while the reader is full screen.
+    static SAVED_PLACEMENT: std::cell::Cell<Option<WINDOWPLACEMENT>> = const { std::cell::Cell::new(None) };
+}
+
+/// Borderless full screen on the window's current monitor, restoring the old placement after.
+fn set_fullscreen(hwnd: HWND, on: bool) {
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        if on {
+            let mut wp = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+            let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if GetWindowPlacement(hwnd, &mut wp).is_ok() && GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
+                SAVED_PLACEMENT.with(|p| p.set(Some(wp)));
+                SetWindowLongPtrW(hwnd, GWL_STYLE, style & !(WS_OVERLAPPEDWINDOW.0 as isize));
+                let m = mi.rcMonitor;
+                let _ = SetWindowPos(hwnd, Some(HWND_TOP), m.left, m.top, m.right - m.left, m.bottom - m.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+            }
+        } else if let Some(wp) = SAVED_PLACEMENT.with(|p| p.take()) {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW.0 as isize);
+            let _ = SetWindowPlacement(hwnd, &wp);
+            let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
         }
     }
 }

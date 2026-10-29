@@ -178,6 +178,11 @@ pub struct Ui<'a> {
     hot_now: Option<Id>,
     /// Set once a scroll area has consumed this frame's wheel input (innermost first).
     wheel_used: bool,
+    /// Regions covered by overlays; content underneath gets no hover or clicks.
+    blockers: Vec<Rect>,
+    in_overlay: bool,
+    /// Layout-only pass: nothing is drawn and widgets do not react.
+    dry: bool,
     repaint: bool,
     wake_ms: Option<u32>,
     hand: bool,
@@ -193,7 +198,7 @@ impl<'a> Ui<'a> {
         for e in mem.edits.values_mut() {
             e.seen = false;
         }
-        Self { g, input, mem, c, hwnd, size, hot_now: None, wheel_used: false, repaint: false, wake_ms: None, hand: false }
+        Self { g, input, mem, c, hwnd, size, hot_now: None, wheel_used: false, blockers: Vec::new(), in_overlay: false, dry: false, repaint: false, wake_ms: None, hand: false }
     }
 
     /// Finishes the frame: retires edit controls that were not shown, tracks hover changes.
@@ -202,6 +207,11 @@ impl<'a> Ui<'a> {
         for k in gone {
             if let Some(e) = self.mem.edits.remove(&k) {
                 self.mem.edit_ids.remove(&e.ctrl_id);
+                if unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == e.hwnd {
+                    unsafe {
+                        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(self.hwnd));
+                    }
+                }
                 e.destroy();
             }
         }
@@ -232,7 +242,40 @@ impl<'a> Ui<'a> {
     }
 
     pub fn hit(&self, r: Rect) -> bool {
-        self.input.mouse_in && r.contains(self.input.mouse) && self.g.clip().is_none_or(|c| c.contains(self.input.mouse))
+        let m = self.input.mouse;
+        self.input.mouse_in
+            && !self.dry
+            && r.contains(m)
+            && self.g.clip().is_none_or(|c| c.contains(m))
+            && (self.in_overlay || !self.blockers.iter().any(|b| b.contains(m)))
+    }
+
+    /// Marks a region as covered by an overlay drawn later in the frame.
+    pub fn block(&mut self, r: Rect) {
+        self.blockers.push(r);
+    }
+
+    /// Runs `f` as overlay content, which is not blocked by `block`ed regions.
+    pub fn overlay<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let prev = std::mem::replace(&mut self.in_overlay, true);
+        let r = f(self);
+        self.in_overlay = prev;
+        r
+    }
+
+    /// Runs `f` for its layout only: nothing is drawn and no widget reacts.
+    pub fn measure_only<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let drawing = std::mem::replace(&mut self.g.drawing, false);
+        let dry = std::mem::replace(&mut self.dry, true);
+        let r = f(self);
+        self.g.drawing = drawing;
+        self.dry = dry;
+        r
+    }
+
+    /// A key pressed this frame with exactly these modifiers.
+    pub fn key_combo(&self, vk: u16, ctrl: bool, shift: bool) -> bool {
+        self.input.keys.iter().any(|k| k.vk == vk && k.ctrl == ctrl && k.shift == shift && !k.alt)
     }
 
     pub fn interact(&mut self, id: Id, r: Rect) -> Resp {
@@ -364,6 +407,15 @@ impl<'a> Ui<'a> {
         let tw = if label.is_empty() { 0.0 } else { self.measure(label, &TextStyle::ui(BODY), TextOpts::default()).w };
         let iw = if icon.is_some() { 16.0 + if label.is_empty() { 0.0 } else { 8.0 } } else { 0.0 };
         tw + iw + 28.0
+    }
+
+    /// Square icon-only ghost button.
+    pub fn icon_button(&mut self, id: Id, r: Rect, icon: &str, active: bool) -> bool {
+        if active {
+            let c = self.c.accent.alpha(0.18);
+            self.g.fill_round(r, RADIUS, c);
+        }
+        self.button_ex(id, r, "", Some(icon), ButtonKind::Ghost, true)
     }
 
     pub fn button(&mut self, id: Id, r: Rect, label: &str) -> bool {

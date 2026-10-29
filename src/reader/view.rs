@@ -94,6 +94,7 @@ impl ReaderView {
         ReadingProgress {
             current_chapter: self.current_chapter_idx,
             scroll_offset: self.current_page_idx as f32,
+            position: 0.0,
             percentage: pct,
             last_read: Utc::now(),
             completed: self.current_chapter_idx >= total && (!self.cached_pages.is_empty() && self.current_page_idx >= self.cached_pages.len()),
