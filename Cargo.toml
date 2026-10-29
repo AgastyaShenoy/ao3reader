@@ -4,7 +4,9 @@ version = "1.1.0"
 edition = "2024"
 
 [features]
-default = ["legacy-ui"]
+default = ["legacy-ui", "native-ui"]
+# The native Win32 interface: Direct2D software rendering + DirectWrite, no GPU driver.
+native-ui = ["dep:windows", "dep:windows-numerics"]
 # The original eframe/egui (wgpu DX12) interface. Kept building until the native
 # Win32 interface reaches feature parity, then removed together with this feature.
 legacy-ui = ["dep:eframe", "dep:egui", "dep:wgpu", "dep:arboard", "dep:webbrowser", "dep:ttf-parser"]
@@ -13,6 +15,11 @@ legacy-ui = ["dep:eframe", "dep:egui", "dep:wgpu", "dep:arboard", "dep:webbrowse
 name = "ao3reader"
 path = "src/main.rs"
 required-features = ["legacy-ui"]
+
+[[bin]]
+name = "ao3reader-native"
+path = "src/bin/ao3reader-native.rs"
+required-features = ["native-ui"]
 
 [dependencies]
 chrono = { version = "0.4.45", features = ["serde"] }
@@ -32,6 +39,29 @@ egui = { version = "0.33.3", optional = true }
 ttf-parser = { version = "0.25", optional = true }
 webbrowser = { version = "1.2.4", optional = true }
 wgpu = { version = "27.0.1", optional = true, default-features = false, features = ["dx12"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-numerics = { version = "0.2", optional = true }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.61.3"
+optional = true
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
 
 [target.'cfg(windows)'.dev-dependencies.windows-sys]
 version = "0.59"

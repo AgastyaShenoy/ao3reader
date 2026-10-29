@@ -189,6 +189,8 @@ dependencies = [
  "ureq",
  "webbrowser",
  "wgpu",
+ "windows 0.61.3",
+ "windows-numerics",
  "windows-sys 0.59.0",
 ]
 

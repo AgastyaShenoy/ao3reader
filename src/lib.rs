@@ -6,6 +6,9 @@ pub mod reader;
 pub mod storage;
 pub mod updater;
 
+#[cfg(all(windows, feature = "native-ui"))]
+pub mod native;
+
 #[cfg(feature = "legacy-ui")]
 pub mod app;
 #[cfg(feature = "legacy-ui")]
