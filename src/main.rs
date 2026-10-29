@@ -1,29 +1,10 @@
-#![allow(dead_code)]
-
-mod ao3;
-mod app;
-mod reader;
-mod storage;
-mod ui;
-mod updater;
-
-use app::AO3ReaderApp;
+use ao3reader::AO3ReaderApp;
 use mimalloc::MiMalloc;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> Result<(), eframe::Error> {
-    // Lightweight async runtime with 2 worker threads (avoids 32-thread default overhead)
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .thread_name("ao3-async-worker")
-        .enable_all()
-        .build()
-        .expect("Failed to initialize Tokio runtime");
-
-    let _guard = rt.enter();
-
     // Configure wgpu to specifically use DX12 and prefer LowPower (integrated GPU if available)
     let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
     wgpu_options.wgpu_setup = eframe::egui_wgpu::WgpuSetup::CreateNew(

@@ -66,26 +66,34 @@ pub fn is_newer_version(latest_tag: &str, current_ver: &str) -> bool {
     }
 }
 
-pub async fn check_for_updates() -> Result<Option<UpdateInfo>, String> {
+/// Blocking; call from a worker thread.
+pub fn check_for_updates() -> Result<Option<UpdateInfo>, String> {
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
-    let client = reqwest::Client::builder()
+    let agent: ureq::Agent = ureq::Agent::config_builder()
         .user_agent("AO3Reader-Desktop/1.0 (Windows; Rust; +https://github.com/AgastyaShenoy/ao3reader)")
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout_global(Some(std::time::Duration::from_secs(10)))
+        .http_status_as_error(false)
         .build()
-        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+        .into();
 
-    let res = client.get(&url).send().await.map_err(|e| format!("Network request failed: {e}"))?;
+    let mut res = agent.get(&url).call().map_err(|e| format!("Network request failed: {e}"))?;
 
-    if res.status() == reqwest::StatusCode::NOT_FOUND {
+    let status = res.status();
+    if status.as_u16() == 404 {
         // No releases published yet
         return Ok(None);
     }
 
-    if !res.status().is_success() {
-        return Err(format!("GitHub API returned HTTP status {}", res.status()));
+    if !status.is_success() {
+        return Err(format!("GitHub API returned HTTP status {status}"));
     }
 
-    let release = res.json::<GitHubRelease>().await.map_err(|e| format!("Failed to parse release metadata: {e}"))?;
+    let body = res
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("Failed to read release metadata: {e}"))?;
+    let release: GitHubRelease =
+        serde_json::from_str(&body).map_err(|e| format!("Failed to parse release metadata: {e}"))?;
 
     if release.draft {
         return Ok(None);

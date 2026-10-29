@@ -3,25 +3,35 @@ name = "ao3reader"
 version = "1.1.0"
 edition = "2024"
 
+[features]
+default = ["legacy-ui"]
+# The original eframe/egui (wgpu DX12) interface. Kept building until the native
+# Win32 interface reaches feature parity, then removed together with this feature.
+legacy-ui = ["dep:eframe", "dep:egui", "dep:wgpu", "dep:arboard", "dep:webbrowser", "dep:ttf-parser"]
+
+[[bin]]
+name = "ao3reader"
+path = "src/main.rs"
+required-features = ["legacy-ui"]
+
 [dependencies]
-arboard = "3.6.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 directories = "6.0.0"
-eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "wgpu", "accesskit"] }
-wgpu = { version = "27.0.1", default-features = false, features = ["dx12"] }
 mimalloc = { version = "0.1", default-features = false }
-egui = "0.33.3"
-egui_extras = "0.33.3"
 regex = "1.13.1"
-reqwest = { version = "0.13.5", features = ["cookies", "json", "form"] }
+rfd = "0.15"
 scraper = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-tokio = { version = "1.53.3", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time"] }
-rfd = "0.15"
-url = "2.5.8"
-webbrowser = "1.2.4"
-ttf-parser = "0.25"
+ureq = { version = "3.5", features = ["cookies"] }
+
+# legacy-ui only
+arboard = { version = "3.6.1", optional = true }
+eframe = { version = "0.33.3", optional = true, default-features = false, features = ["default_fonts", "wgpu", "accesskit"] }
+egui = { version = "0.33.3", optional = true }
+ttf-parser = { version = "0.25", optional = true }
+webbrowser = { version = "1.2.4", optional = true }
+wgpu = { version = "27.0.1", optional = true, default-features = false, features = ["dx12"] }
 
 [target.'cfg(windows)'.dev-dependencies.windows-sys]
 version = "0.59"
@@ -34,4 +44,3 @@ features = [
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
 ]
-

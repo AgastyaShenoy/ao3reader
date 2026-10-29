@@ -199,7 +199,7 @@ impl FontManager {
 
     /// Curated popular e-reader and reading fonts if installed on the system.
     pub fn get_curated_reading_fonts() -> Vec<SystemFont> {
-        let all_fonts = Self::scan_installed_fonts();
+        let all_fonts = Self::cached_system_fonts();
         let preferred = [
             "Georgia",
             "Palatino Linotype",
@@ -258,7 +258,10 @@ impl FontManager {
 
         Some((font_name, picked))
     }
+}
 
+#[cfg(feature = "legacy-ui")]
+impl FontManager {
     /// Constructs FontDefinitions ensuring ReaderBookFont is always bound to avoid epaint panics.
     pub fn get_font_definitions(
         custom_font_path: Option<&Path>,

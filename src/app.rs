@@ -53,6 +53,7 @@ pub struct AO3ReaderApp {
     pub update_status: UpdateStatus,
     pub update_available: bool,
     pub active_font_path: Option<std::path::PathBuf>,
+    egui_ctx: egui::Context,
 }
 
 impl AO3ReaderApp {
@@ -99,18 +100,26 @@ impl AO3ReaderApp {
             update_status: UpdateStatus::Idle,
             update_available: false,
             active_font_path,
+            egui_ctx: cc.egui_ctx.clone(),
         };
 
         if app.config.check_updates_on_startup {
             app.update_status = UpdateStatus::Checking;
-            let tx = event_tx;
-            tokio::spawn(async move {
-                let res = check_for_updates().await;
-                let _ = tx.send(AppEvent::UpdateCheckResult(res));
-            });
+            app.spawn_job(|| AppEvent::UpdateCheckResult(check_for_updates()));
         }
 
         app
+    }
+
+    /// Runs blocking work (network, parsing) off the UI thread, then wakes the UI so the
+    /// result is handled immediately instead of on the next incidental repaint.
+    fn spawn_job(&self, job: impl FnOnce() -> AppEvent + Send + 'static) {
+        let tx = self.event_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(job());
+            ctx.request_repaint();
+        });
     }
 
     pub fn set_toast(&mut self, msg: impl Into<String>) {
@@ -139,7 +148,6 @@ impl AO3ReaderApp {
                 AppEvent::LoginSuccess(session) => {
                     self.config.session = session.clone();
                     let _ = self.config.save();
-                    self.client = Ao3Client::new(Some(&session));
                     let uname = session.username.unwrap_or_else(|| "User".to_string());
                     self.account_view.set_success(format!("Successfully signed in as {uname}!"));
                     self.set_toast("Logged in to AO3");
@@ -332,13 +340,9 @@ impl eframe::App for AO3ReaderApp {
                                 }
                                 ReaderAction::LeaveKudos(id) => {
                                     let client = self.client.clone();
-                                    let tx = self.event_tx.clone();
-                                    tokio::spawn(async move {
-                                        let res = client.leave_kudos(&id).await;
-                                        match res {
-                                            Ok(msg) => { let _ = tx.send(AppEvent::KudosResult(msg)); }
-                                            Err(e) => { let _ = tx.send(AppEvent::KudosResult(format!("Kudos error: {e}"))); }
-                                        }
+                                    self.spawn_job(move || match client.leave_kudos(&id) {
+                                        Ok(msg) => AppEvent::KudosResult(msg),
+                                        Err(e) => AppEvent::KudosResult(format!("Kudos error: {e}")),
                                     });
                                 }
                                 ReaderAction::ChangeChapter(idx) => {
@@ -358,16 +362,9 @@ impl eframe::App for AO3ReaderApp {
                             FetchAction::StartFetch { input, auto_open } => {
                                 self.fetch_view.set_fetching(true);
                                 let client = self.client.clone();
-                                let tx = self.event_tx.clone();
-                                tokio::spawn(async move {
-                                    match client.fetch_work(&input).await {
-                                        Ok(work) => {
-                                            let _ = tx.send(AppEvent::WorkFetched { work, auto_open });
-                                        }
-                                        Err(err) => {
-                                            let _ = tx.send(AppEvent::FetchFailed(err));
-                                        }
-                                    }
+                                self.spawn_job(move || match client.fetch_work(&input) {
+                                    Ok(work) => AppEvent::WorkFetched { work, auto_open },
+                                    Err(err) => AppEvent::FetchFailed(err),
                                 });
                             }
                             FetchAction::OpenWork(work) => {
@@ -377,17 +374,10 @@ impl eframe::App for AO3ReaderApp {
                             }
                             FetchAction::DownloadEpub(input) => {
                                 let client = self.client.clone();
-                                let tx = self.event_tx.clone();
                                 if let Some(work_id) = Ao3Parser::extract_work_id(&input) {
-                                    tokio::spawn(async move {
-                                        match client.download_epub(&work_id).await {
-                                            Ok(bytes) => {
-                                                let _ = tx.send(AppEvent::EpubReady { work_id, bytes });
-                                            }
-                                            Err(err) => {
-                                                let _ = tx.send(AppEvent::EpubFailed(err));
-                                            }
-                                        }
+                                    self.spawn_job(move || match client.download_epub(&work_id) {
+                                        Ok(bytes) => AppEvent::EpubReady { work_id, bytes },
+                                        Err(err) => AppEvent::EpubFailed(err),
                                     });
                                 } else {
                                     self.fetch_view.set_error("Invalid AO3 URL or Work ID".to_string());
@@ -431,16 +421,9 @@ impl eframe::App for AO3ReaderApp {
                             AccountAction::LoginWithCredentials { username, password } => {
                                 self.account_view.set_logging_in(true);
                                 let client = self.client.clone();
-                                let tx = self.event_tx.clone();
-                                tokio::spawn(async move {
-                                    match client.login(&username, &password).await {
-                                        Ok(sess) => {
-                                            let _ = tx.send(AppEvent::LoginSuccess(sess));
-                                        }
-                                        Err(err) => {
-                                            let _ = tx.send(AppEvent::LoginFailed(err));
-                                        }
-                                    }
+                                self.spawn_job(move || match client.login(&username, &password) {
+                                    Ok(sess) => AppEvent::LoginSuccess(sess),
+                                    Err(err) => AppEvent::LoginFailed(err),
                                 });
                             }
                             AccountAction::SetCookie(cookie) => {
@@ -478,11 +461,7 @@ impl eframe::App for AO3ReaderApp {
                             }
                             SettingsAction::CheckForUpdates => {
                                 self.update_status = UpdateStatus::Checking;
-                                let tx = self.event_tx.clone();
-                                tokio::spawn(async move {
-                                    let res = check_for_updates().await;
-                                    let _ = tx.send(AppEvent::UpdateCheckResult(res));
-                                });
+                                self.spawn_job(|| AppEvent::UpdateCheckResult(check_for_updates()));
                             }
                             SettingsAction::OpenUrl(url) => {
                                 let _ = webbrowser::open(&url);
