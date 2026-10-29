@@ -42,6 +42,12 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn get_app_dir() -> PathBuf {
+        // A separate data folder (portable installs, demos, testing) without touching the real one.
+        if let Some(dir) = std::env::var_os("AO3READER_DATA_DIR").filter(|d| !d.is_empty()) {
+            let path = PathBuf::from(dir);
+            let _ = fs::create_dir_all(&path);
+            return path;
+        }
         if let Some(dirs) = ProjectDirs::from("org", "ao3reader", "ao3reader") {
             let path = dirs.data_dir().to_path_buf();
             let _ = fs::create_dir_all(&path);
