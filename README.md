@@ -1,177 +1,160 @@
-# AO3 Desktop Reader 📚
+# AO3 Reader 📚
 
-[![Release](https://img.shields.io/github/v/release/AgastyaShenoy/ao3reader?color=red&label=version)](https://github.com/AgastyaShenoy/ao3reader/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/Rust-100%25-orange.svg)](https://www.rust-lang.org/)
-[![GUI: egui](https://img.shields.io/badge/GUI-eframe%20%2F%20egui-blueviolet.svg)](https://github.com/emilk/egui)
+[![Release](https://img.shields.io/github/v/release/AgastyaShenoy/ao3reader?include_prereleases&color=red&label=version)](https://github.com/AgastyaShenoy/ao3reader/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/core-Rust-orange.svg)](https://www.rust-lang.org/)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Android-informational.svg)](https://github.com/AgastyaShenoy/ao3reader/releases)
 
-A fast, lightweight, native desktop ebook reader for **Archive of Our Own (AO3)** built in 100% Rust with GPU-accelerated immediate-mode graphics (`eframe` / `egui`).
+A lightweight, unofficial reader for **Archive of Our Own**, for Windows and Android.
 
-Designed for pure performance, privacy, and long, comfortable reading sessions:
-- **Zero Webview / Zero Chromium bloat**: Standalone native Windows binary (~19.5 MB binary, ~7.7 MB zip distribution).
-- **GPU-Accelerated**: Silky smooth 60/120+ FPS scrolling powered natively by DirectX 12.
-- **Low Memory Overhead**: Utilizes the high-efficiency `mimalloc` allocator and bounded thread pools.
-- **100% Offline Capability**: Download and cache your favorite works locally as structured JSON for distraction-free offline reading.
-- **Real E-Reader Page Flipping**: Read like an e-book or paper novel with automatic single and dual-page spreads.
-- **Universal Font Support**: Read using any font installed on your PC, search installed fonts, or load any `.ttf` / `.otf` file.
-- **Built-in Auto-Update**: Automated GitHub Releases checker with release note previews and one-click downloads.
+Find works on AO3 and save them to read offline. Turn pages like a book or scroll. Choose your own fonts and themes, and follow the authors and tags you love. It's small and quick, and your library stays on your own device.
 
----
+- **Small:** the Windows app is a single 7 MB exe (a 2.7 MB download) and uses about 9 MB of memory. The Android app uses around 30 MB, most of it what Android gives every app.
+- **Native:** no web view, no Electron, no GPU driver. Windows draws with Direct2D and DirectWrite on the CPU; Android uses its own built-in views.
+- **Offline:** downloaded works are saved on your device and open without internet.
+- **Private:** your password goes only to archiveofourown.org, and your library is never uploaded anywhere.
 
-## 🤖 Attribution & Origin
+> **v2.1 is in beta.** AO3 is down for maintenance, so searching, following and downloading haven't been tested against the live site yet. [v1.1.0](https://github.com/AgastyaShenoy/ao3reader/releases/tag/v1.1.0) is the last stable release.
 
-> **💡 Ideated, prompted, and guided by:** [Agastya Shenoy](https://github.com/AgastyaShenoy)  
-> **🤖 Developed majorly by AI:** Google **Gemini 3.8 Flash** via Antigravity  
+<p>
+<img src="docs/screenshots/2.1/windows/library.png" width="49%" alt="Library on Windows">
+<img src="docs/screenshots/2.1/windows/reader.png" width="49%" alt="Reader with a two-page spread">
+</p>
 
-This project was conceived as an exploration into building high-performance, low-level native desktop readers using modern AI pair-programming.
+*Screenshots use public-domain novels by Jane Austen (Project Gutenberg) as sample works.*
 
 ---
 
-## 🌟 What's New in v1.1.0 🚀
+## Features
 
-- 📖 **Real E-Reader Page Flipping**: Experience distraction-free e-book reading with page spreads! Supports single-page and automatic dual-page layouts on wide displays, edge turn indicators (`‹ / ›`), and mouse scroll wheel page flipping.
-- 🔤 **Universal Font Support**: Select and read in any font installed on your system! Includes real-time font search, curated book-optimized typefaces, and custom `.ttf` / `.otf` font file loading with safe proportional fallback.
-- 📱 **Responsive Adaptive Work Cards**: Work cards in the library now dynamically adjust on window resize, positioning buttons on the right on wide displays and stacking cleanly on the bottom on narrow screens without icon overlap or text clipping.
-- ⚙ **Organized Tabbed Settings Hub**: Brand-new categorized Preferences interface with tabs for Reading & Ergonomics, Typography & Fonts, Theme Palettes, Keyboard Shortcuts, Storage & Updates, and About.
-- 📏 **Enhanced Text Wrapping & Metrics**: Multiline summary previews with safe character boundary truncation and perfectly aligned typography sliders.
+### Library
+- **Shelves:** Reading, Completed, For later and Favorites, each with a small count.
+- **Find and sort:** search your library by title, author, fandom or tag, and sort by recently read, title, date added or author.
+- **Work cards:** rating, category and warning markers, relationship tags (romantic ones get a heart), summary, and your progress.
+- **Export:** save any work as a web page, Markdown or plain text.
 
----
+### Search AO3
+- **Search and filter:** search by keyword, or filter by fandom, relationship, character, tags, title, author, rating, status, crossovers, categories, word count, language and one-shots.
+- **Sort:** by best match, date, kudos, hits, bookmarks, comments, word count, title or author.
+- **Paste a link:** paste a link to a work, or any of its chapters, into the search box to see the work before downloading. Then **Read**, **Save**, get **AO3's EPUB file** or open it on AO3.
 
-## 🌟 Key Features
+<p>
+<img src="docs/screenshots/2.1/windows/search-link.png" width="49%" alt="A pasted work link">
+<img src="docs/screenshots/2.1/windows/following.png" width="49%" alt="Following with new works">
+</p>
 
-### 📖 Comprehensive E-Reader Experience
-- **Two Reading Modes**:
-  - **📖 E-Reader Mode (Paged / Flip)**: Reads like an authentic Kindle or paper novel. Flip pages using `Arrow Keys`, `PageUp / PageDown`, `Space / Shift+Space`, `J / K`, or the mouse wheel.
-  - **📜 Continuous Scroll**: Classic web reading with smooth vertical scrolling.
-- **Adaptive Page Spreads**:
-  - **Auto**: Automatically switches between single-page on compact screens and side-by-side dual-page book spreads on wider windows ($\ge 1100\text{px}$).
-  - **Single Page**: Dedicated clean single-column view.
-  - **Dual Page**: Classic open book two-page spread.
-- **Universal Custom Font Support**:
-  - Choose from standard presets (**Modern Sans**, **Code Monospace**), curated book fonts (**Georgia**, **Palatino**, **Baskerville**, **Garamond**, **Calibri**, etc.), or search across all installed system fonts.
-  - Load any downloaded `.ttf` or `.otf` font file directly from your computer.
-  - Font customization applies strictly to the reading canvas, leaving app navigation and UI clean and proportional.
-- **Distraction-Free Canvas & Zen Mode**:
-  - Center-aligned reading column (adjustable width from 450px to 1400px).
-  - Press `F11` for Zen Mode (fullscreen borderless immersion).
-- **Eye-Care Color Themes**:
-  - **Dark Slate** (default modern dark mode)
-  - **OLED Black** (pitch-black background, high contrast for OLED displays)
-  - **Paper Light** (clean crisp white reading page)
-  - **Warm Sepia** (parchment tint for daytime eye-strain reduction)
-  - **Nord Arctic** (cool arctic blue palette)
-  - **Solarized Light** (calm low-contrast daylight palette)
-- **Typography & Ergonomics Controls**:
-  - Granular font sizing slider (12 pt to 36 pt) with quick hotkey toggles (`A+` / `A-`).
-  - Adjustable line height multiplier (1.1x to 2.6x).
-  - Paragraph spacing adjustments and optional first-line book indentation (4 spaces).
-  - Collapsible author preface notes and post-chapter end notes.
-- **Chapter Navigation & Table of Contents**:
-  - Slide-out Table of Contents drawer with word counts per chapter and instant jumping.
-  - Previous / Next Chapter buttons with keyboard shortcuts (`Ctrl + Left / Right Arrow`).
-  - Auto-scroll to chapter top and persistent position tracking.
-- **Reading Metrics & Progress**:
-  - Real-time progress bar showing Chapter X of Y and reading percentage.
-  - Estimated reading time remaining per chapter and total work (calculated using customizable Words-Per-Minute reading speed).
-- **In-Work Search (`Ctrl + F`)**:
-  - Search current chapter or entire multi-chapter works with match count and jump navigation (`◀` / `▶`).
-- **Bookmarks & Annotations**:
-  - Add bookmarks at any chapter with custom personal notes.
+### Following
+- **Follow** authors, tags (fandoms, ships, characters) and collections.
+- **New and updated works** are marked, and a badge on Following shows how many are unread.
+- **Gentle on AO3:** feeds are checked at most every 30 minutes, one at a time.
+- **Suggestions:** authors and tags from your library are suggested, but nothing is followed unless you choose it.
 
-### 🌐 Archive of Our Own (AO3) Integration
-- **Guest or Logged In**:
-  - Read freely as a **Guest** without an AO3 account for all public works.
-  - Log in with your **AO3 Username & Password** or paste your **Session Cookie** (`_otw_remember_me`) to access restricted works (locked works with the padlock icon).
-  - Credentials and session cookies are stored strictly in your local OS AppData directory and are sent only directly to `archiveofourown.org`.
-- **Automatic Adult Confirmation**: Bypasses the AO3 adult content splash screen automatically (`view_adult=true`).
-- **Rich Work Metadata & Badges**:
-  - Official color-coded rating badges (General = Green, Teen = Gold, Mature = Orange, Explicit = Red, Not Rated = Gray).
-  - Category orientation badges (M/M, F/M, F/F, Gen, Multi).
-  - Warning badges (violence, character death, or green for "No Archive Warnings Apply").
-  - Fandom chips, relationship / ship pills (`♥`), character tags, and freeform tags.
-  - Formatted author summaries and blockquotes.
-- **Leave Kudos**: Send kudos to the author directly from inside the app with a single click.
-- **Download EPUB**: Direct one-click EPUB download from AO3.
+### Reader
+- **Pages or scroll:** turn pages like a book, with two pages side by side on wide windows, or scroll through each chapter.
+- **Navigation:** contents, bookmarks with notes, and search across the whole work.
+- **Progress:** chapter, page and time left. Your reading speed is learned from how fast you turn pages, or you can set it yourself.
+- **Typography:** text size, line height, paragraph spacing, justified text and indents. Fonts: any installed font or a font file on Windows; sans, serif or mono on Android.
+- **The work's header:** title, author, tags, summary and stats before chapter 1, with author notes and chapter summaries you can hide.
+- **Kudos:** leave kudos without leaving the app.
 
-### 🔄 In-App Auto-Update Checker
-- **GitHub Release Integration**: Directly checks the latest releases from the official repository (`AgastyaShenoy/ao3reader`).
-- **Automatic Startup Check**: Configurable in Settings to run silently in the background when the app launches.
-- **Update Notification Badge**: Displays a visual indicator when a newer version is available.
-- **In-App Changelog Preview**: View release titles, publication dates, and release notes inside the application.
-- **One-Click Downloads**: Direct links to open release notes or download the updated binary package.
+### Themes and settings
+- **Seven themes:** Dark Slate, OLED Black, Paper Light, Warm Sepia, Nord Arctic, Midnight Blue and High Contrast. Every theme is tested for readable contrast.
+- **Interface font:** change the font of the app itself under Typography → Advanced. The default is the system font.
+- **Import:** open EPUB books (including AO3's), AO3 web pages and works saved by the app, from Settings → Import.
+- **Account:** sign in with your AO3 username and password, or a session cookie, to read works for registered users.
+- **Updates:** the Windows app can check GitHub for new releases.
 
-### 📚 Local Library Management
-- **Offline Caching**: Works and chapters are saved as structured JSON on your disk so you can read anytime without internet access.
-- **Shelf Organization**:
-  - *Currently Reading*
-  - *Completed*
-  - *Marked for Later*
-  - *Favorites*
-- **Library Search & Filtering**: Real-time search across titles, authors, fandoms, pairings, and tags.
-- **Multi-Format Export**:
-  - **Standalone HTML (.html)**: Self-contained HTML file with embedded responsive CSS styling.
-  - **Clean Markdown (.md)**: Formatted markdown document with headers, notes, and blockquotes.
-  - **Plain Text (.txt)**: Clean reader text format.
+<p>
+<img src="docs/screenshots/2.1/windows/themes.png" width="70%" alt="Themes, including High Contrast">
+</p>
+
+### Android
+The Android app has the same library, search, following, reader and themes, built on the same Rust core.
+
+<p>
+<img src="docs/screenshots/2.1/android/library.png" width="24%" alt="Library on Android">
+<img src="docs/screenshots/2.1/android/search-link.png" width="24%" alt="A pasted work link on Android">
+<img src="docs/screenshots/2.1/android/reader.png" width="24%" alt="Reader on Android">
+<img src="docs/screenshots/2.1/android/settings.png" width="24%" alt="Settings on Android">
+</p>
 
 ---
 
-## ⌨ Keyboard Shortcuts
+## Install
 
-| Shortcut | Action |
+**Windows**
+1. Download `ao3reader-…-windows-x64.zip` from [Releases](https://github.com/AgastyaShenoy/ao3reader/releases).
+2. Extract it and run `AO3Reader.exe`. There's no installer.
+
+Requires 64-bit Windows 10 or 11. The exe isn't code-signed, so SmartScreen may ask you to confirm the first time.
+
+**Android**
+1. Download `ao3reader-…-android.apk` from [Releases](https://github.com/AgastyaShenoy/ao3reader/releases) on your phone.
+2. Open it. If Android asks, allow your browser or file manager to install apps.
+
+Requires Android 8.0 or newer on a 64-bit phone. The app isn't on the Play Store, so Play Protect may ask you to confirm.
+
+---
+
+## Keyboard shortcuts (Windows)
+
+| Keys | Action |
 | :--- | :--- |
-| `[→]`, `[PageDown]`, `[Space]`, `[K]` | Turn to Next Page / Spread (in Paged mode) |
-| `[←]`, `[PageUp]`, `[Shift+Space]`, `[J]` | Turn to Previous Page / Spread (in Paged mode) |
-| `[Ctrl + →]` / `[Ctrl + ←]` | Skip to Next / Previous Chapter |
-| `[Home]` / `[End]` | First Page / Last Page of Chapter |
-| `[F11]` | Toggle Zen Mode (Border-free fullscreen immersion) |
-| `[Ctrl + F]` | Open / Close Search in Work |
-| `[Ctrl + B]` | Bookmark current chapter |
-| `[A+]` / `[A-]` | Quick increase / decrease font size |
-| `[Esc]` | Close search bar, Table of Contents, or appearance drawers |
+| `→` `PgDn` `Space` | Next page |
+| `←` `PgUp` `Shift+Space` | Previous page |
+| `Home` / `End` | First / last page of the chapter |
+| `Ctrl+→` / `Ctrl+←` | Next / previous chapter |
+| `Ctrl+F` | Search in the work |
+| `Ctrl+B` | Bookmark this page |
+| `Ctrl+=` / `Ctrl+-` | Larger / smaller text |
+| `F11` | Full screen |
+| `Esc` | Close a panel or leave full screen |
 
 ---
 
-## 🏗 Architecture & Technologies
+## Where your data is kept
 
-- **Language**: 100% Rust (Edition 2024).
-- **GUI Engine**: [`eframe`](https://github.com/emilk/egui/tree/master/crates/eframe) & [`egui`](https://github.com/emilk/egui) (immediate-mode GPU accelerated via native DirectX 12).
-- **Memory Allocator**: [`mimalloc`](https://github.com/microsoft/mimalloc) for minimal heap fragmentation and rapid page reclamation.
-- **Networking & Sessions**: [`reqwest`](https://github.com/seanmonstar/reqwest) with cookie jar persistence for AO3 authentication and adult content cookies.
-- **HTML Parsing**: [`scraper`](https://github.com/causal-agent/scraper) for extracting metadata, chapters, paragraphs, and styling.
-- **Font Parsing**: [`ttf-parser`](https://github.com/RazrFalcon/ttf-parser) for zero-panic font validation and system font scanning.
-- **Async Runtime**: [`tokio`](https://tokio.rs/) multi-threaded runtime with bounded workers so network operations never block UI rendering.
-- **Data Persistence**: [`serde`](https://serde.rs/) + [`directories`](https://github.com/dirs-dev/directories-rs) storing local configuration and library cache in the standard OS AppData folder.
+Everything is plain JSON in one folder: `%APPDATA%\ao3reader\ao3reader\data` on Windows, and the app's private storage on Android. To use another folder (for a portable copy, say), set the `AO3READER_DATA_DIR` environment variable.
+
+| File | What it holds |
+| :--- | :--- |
+| `library.json` | Your library: each work's details, shelf, favourite, progress and bookmarks |
+| `works/<id>.json` | The text of each downloaded or imported work |
+| `follows.json` | Followed authors, tags and collections, and which works are new |
+| `config.json` | Settings, theme, your AO3 sign-in and your learned reading speed |
+
+Saves are crash-safe. Each file is written to a temporary file first and then swapped in, so it's never left half-written. A `.bak` copy is kept from when the app last started. If a file can't be read, it's set aside and the last good copy is used.
 
 ---
 
-## 🚀 Installation & Running
+## How it's built
 
-### Download Binary (Windows)
-Pre-compiled standalone binaries are available on the [Releases](https://github.com/AgastyaShenoy/ao3reader/releases) page:
-1. Download `ao3reader-v1.1.0-windows-x64.zip` or `ao3reader.exe`.
-2. Extract and run `ao3reader.exe` directly (no installer required).
+- **Shared core (Rust):** AO3 client (`ureq`), HTML parsing (`scraper`), EPUB import, search and follow feeds, library storage, and theme colours. It's shared by both apps.
+- **Windows:** plain Win32 with Direct2D rendering on the CPU and DirectWrite text. Text boxes are native edit controls. No GPU driver is loaded.
+- **Android:** Kotlin with the platform's own views and no AndroidX. It talks to the Rust core through one JNI call that passes JSON. See [android/README.md](android/README.md).
 
-### Building from Source
+### Build from source
 
-#### Prerequisites
-- [Rust](https://www.rust-lang.org/) 1.80+ (toolchain installed).
+Requires [Rust](https://www.rust-lang.org/) 1.85 or newer.
 
 ```bash
-# Clone the repository
 git clone https://github.com/AgastyaShenoy/ao3reader.git
 cd ao3reader
-
-# Run in development mode
-cargo run
-
-# Build optimized release binary
-cargo build --release
+cargo build --release --features native-ui --bin ao3reader-native
 ```
 
-The optimized single binary will be generated at `target/release/ao3reader.exe`.
+The Windows app is `target/release/ao3reader-native.exe` (released as `AO3Reader.exe`). For Android, see [android/README.md](android/README.md). The original egui-based v1 interface still builds as `--bin ao3reader` while v2 is in beta.
 
 ---
 
-## 📄 License
+## Attribution
 
-This project is licensed under the [MIT License](LICENSE) - Copyright (c) 2026 Agastya Shenoy.
+> **Ideated, prompted and guided by:** [Agastya Shenoy](https://github.com/AgastyaShenoy)
+> **v1 developed majorly by AI:** Google **Gemini 3.8 Flash** via Antigravity
+> **v2 (native Windows rewrite, Android app) and v2.1:** developed with **Claude** (Anthropic) in Claude Code
+
+AO3 Reader is unofficial and isn't affiliated with the Organization for Transformative Works. The AO3 logo is the OTW's trademark; the artwork comes from Wikimedia Commons.
+
+## License
+
+[MIT](LICENSE). Copyright (c) 2026 Agastya Shenoy.
