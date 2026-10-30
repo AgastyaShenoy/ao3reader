@@ -59,9 +59,17 @@ pub fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
+/// True for pre-release versions such as `2.0.0-beta.2`.
+fn is_prerelease(v: &str) -> bool {
+    v.trim().contains('-')
+}
+
+/// A final release also counts as newer than its own pre-releases (2.0.0 over 2.0.0-beta.2).
 pub fn is_newer_version(latest_tag: &str, current_ver: &str) -> bool {
     match (parse_version(latest_tag), parse_version(current_ver)) {
-        (Some(latest), Some(curr)) => latest > curr,
+        (Some(latest), Some(curr)) => {
+            latest > curr || (latest == curr && is_prerelease(current_ver) && !is_prerelease(latest_tag))
+        }
         _ => false,
     }
 }
@@ -142,5 +150,10 @@ mod tests {
         assert!(is_newer_version("v2.0.0", "1.9.9"));
         assert!(!is_newer_version("v1.0.0", "1.0.0"));
         assert!(!is_newer_version("v0.9.9", "1.0.0"));
+
+        assert!(is_newer_version("v2.0.0", "2.0.0-beta.2"));
+        assert!(!is_newer_version("v2.0.0-beta.2", "2.0.0"));
+        assert!(!is_newer_version("v2.0.0-beta.2", "2.0.0-beta.2"));
+        assert!(!is_newer_version("v1.1.0", "2.0.0-beta.2"));
     }
 }
