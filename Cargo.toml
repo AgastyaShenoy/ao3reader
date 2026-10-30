@@ -26,13 +26,16 @@ chrono = { version = "0.4.45", features = ["serde"] }
 # Already used by ureq for gzip; also unpacks EPUB (ZIP) files.
 flate2 = "1"
 directories = "6.0.0"
-mimalloc = { version = "0.1", default-features = false }
 regex = "1.13.1"
-rfd = "0.15"
 scraper = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 ureq = { version = "3.5", features = ["cookies"] }
+
+# Desktop only: native file dialogs and the mimalloc allocator.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+rfd = "0.15"
 
 # legacy-ui only
 arboard = { version = "3.6.1", optional = true }

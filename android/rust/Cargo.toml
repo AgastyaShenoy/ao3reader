@@ -1,0 +1,25 @@
+[package]
+name = "ao3core"
+version = "2.0.0-beta.1"
+edition = "2021"
+description = "Bridge between the Android app and the AO3 Reader core library"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ao3reader = { path = "../..", default-features = false }
+chrono = "0.4"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.21", default-features = false }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

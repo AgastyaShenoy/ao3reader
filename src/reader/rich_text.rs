@@ -137,6 +137,45 @@ pub fn parse_inline(src: &str) -> RichText {
     RichText { text, spans }
 }
 
+/// How a stored paragraph is displayed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParagraphKind {
+    Text,
+    Quote,
+    Divider,
+}
+
+/// Display text of a stored paragraph. Search runs over exactly this text, so match offsets
+/// line up with what is drawn.
+pub fn paragraph_display(p: &str) -> (ParagraphKind, RichText) {
+    let p = p.trim();
+    if p == "---" || p == "***" || p == "* * *" {
+        return (ParagraphKind::Divider, RichText::default());
+    }
+    if let Some(q) = p.strip_prefix("> ") {
+        let text: Vec<&str> = q.split('\n').map(|l| l.strip_prefix("> ").unwrap_or(l)).collect();
+        return (ParagraphKind::Quote, parse_inline(&text.join("\n")));
+    }
+    (ParagraphKind::Text, parse_inline(p))
+}
+
+/// Works saved by older versions start chapters with AO3's hidden "Chapter Text" landmark.
+pub fn is_landmark(index: usize, p: &str) -> bool {
+    index == 0 && matches!(p.trim(), "Chapter Text" | "Work Text")
+}
+
+/// First-line indent, as a prefix that keeps inline styles aligned.
+pub const INDENT: &str = "\u{2003}\u{2003}";
+
+pub fn with_prefix(prefix: &str, mut rich: RichText) -> RichText {
+    rich.text.insert_str(0, prefix);
+    for s in &mut rich.spans {
+        s.start += prefix.len();
+        s.end += prefix.len();
+    }
+    rich
+}
+
 pub fn word_count(s: &str) -> usize {
     s.split_whitespace().count()
 }

@@ -7,7 +7,8 @@ use super::preface;
 use crate::ao3::models::Work;
 use crate::native::gfx::*;
 use crate::native::ui::Ui;
-use crate::reader::rich_text::{parse_inline, word_count, RichText};
+use crate::reader::rich_text::{paragraph_display, parse_inline, with_prefix, word_count, ParagraphKind, RichText};
+pub use crate::reader::rich_text::{is_landmark, INDENT};
 use crate::reader::typography::{TextAlignment, TypographySettings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,34 +85,12 @@ pub struct ChapterLayout {
 }
 
 /// Display text of a stored paragraph: `None` for scene dividers, `Quote` for block quotes.
-/// Search runs over exactly this text, so match offsets line up with what is drawn.
 pub fn paragraph_rich(p: &str) -> Option<(Kind, RichText)> {
-    let p = p.trim();
-    if p == "---" || p == "***" || p == "* * *" {
-        return None;
+    match paragraph_display(p) {
+        (ParagraphKind::Divider, _) => None,
+        (ParagraphKind::Quote, rich) => Some((Kind::Quote, rich)),
+        (ParagraphKind::Text, rich) => Some((Kind::Para, rich)),
     }
-    if let Some(q) = p.strip_prefix("> ") {
-        let text: Vec<&str> = q.split('\n').map(|l| l.strip_prefix("> ").unwrap_or(l)).collect();
-        return Some((Kind::Quote, parse_inline(&text.join("\n"))));
-    }
-    Some((Kind::Para, parse_inline(p)))
-}
-
-/// Works saved by older versions start chapters with AO3's hidden "Chapter Text" landmark.
-pub fn is_landmark(index: usize, p: &str) -> bool {
-    index == 0 && matches!(p.trim(), "Chapter Text" | "Work Text")
-}
-
-/// Paragraph indent, as a prefix that keeps the inline styles aligned.
-pub const INDENT: &str = "\u{2003}\u{2003}";
-
-fn with_prefix(prefix: &str, mut rich: RichText) -> RichText {
-    rich.text.insert_str(0, prefix);
-    for s in &mut rich.spans {
-        s.start += prefix.len();
-        s.end += prefix.len();
-    }
-    rich
 }
 
 /// Words per paragraph of a chapter, after inline markers are removed.

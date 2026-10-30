@@ -1,0 +1,9 @@
+# Cross-compiling the bridge for Android needs the NDK's clang as linker and C compiler
+# (ring, used by rustls, has C/assembly parts). Built by android/build-rust.ps1, which points
+# these at the installed NDK through environment variables; the values below are only used
+# when building by hand with ANDROID_NDK_BIN set the same way.
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android26-clang.cmd"
+
+[target.x86_64-linux-android]
+linker = "x86_64-linux-android26-clang.cmd"

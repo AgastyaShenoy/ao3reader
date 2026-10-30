@@ -94,8 +94,9 @@ impl FontManager {
         candidate_name
     }
 
-    /// Returns standard font directories on Windows, macOS, or Linux.
+    /// Returns standard font directories on Windows, macOS, or Linux (none elsewhere).
     pub fn get_system_font_dirs() -> Vec<PathBuf> {
+        #[allow(unused_mut)]
         let mut dirs = Vec::new();
 
         #[cfg(target_os = "windows")]
@@ -240,6 +241,7 @@ impl FontManager {
     }
 
     /// Prompts the user with an OS open file dialog to choose a .ttf or .otf font file.
+    #[cfg(not(target_os = "android"))]
     pub fn pick_custom_font_file() -> Option<(String, PathBuf)> {
         let picked = rfd::FileDialog::new()
             .set_title("Select Font File")
