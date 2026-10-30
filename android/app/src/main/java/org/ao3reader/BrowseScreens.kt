@@ -683,7 +683,6 @@ fun followingScreen(a: MainActivity): View {
     val info = Core.obj("follows")
     val all = info.getJSONArray("follows").objects()
     val byKind = info.getJSONObject("unread_by_kind")
-    val unread = info.getInt("unread")
     val hasCollections = all.any { it.getString("kind") == "collection" }
     if (st.kind == "collection" && !hasCollections) st.kind = "author"
     val follows = all.filter { it.getString("kind") == st.kind }
@@ -692,7 +691,7 @@ fun followingScreen(a: MainActivity): View {
     val plural = KINDS.first { it.first == st.kind }.second.lowercase()
 
     val box = a.column()
-    box.addView(a.header("Following", if (unread > 0) "$unread new" else if (all.isNotEmpty()) "${all.size} followed" else null))
+    box.addView(a.header("Following"))
 
     // Authors | Tags (| Collections, once any are followed), each with its unread count.
     val kinds = KINDS.filter { it.first != "collection" || hasCollections }
@@ -735,13 +734,13 @@ fun followingScreen(a: MainActivity): View {
 
     val chips = a.row().apply { setPadding(a.dp(16), a.dp(12), a.dp(16), a.dp(6)) }
     val tabUnread = byKind.optInt(st.kind)
-    chips.addView(chip(a, if (tabUnread > 0) "All $plural · $tabUnread" else "All $plural", st.selected == null) {
+    chips.addView(a.countChip("All $plural", tabUnread, st.selected == null, new = true) {
         st.selected = null; st.more.clear(); st.scroll = 0; a.rebuild()
     }, chipLp(a))
     for (f in follows) {
         val id = f.getString("id")
         val n = f.getInt("unread")
-        chips.addView(chip(a, f.getString("name") + if (n > 0) " · $n" else "", id == st.selected) {
+        chips.addView(a.countChip(f.getString("name"), n, id == st.selected, new = true) {
             st.selected = id; st.more.clear(); st.morePage = 1; st.moreNext = true; st.scroll = 0
             a.rebuild()
         }, chipLp(a))

@@ -109,12 +109,22 @@ pub struct SearchScreen {
     pub error: Option<String>,
 }
 
-/// A rounded, clickable chip. Returns true when clicked.
-fn chip(ui: &mut Ui, key: Id, x: f32, y: f32, label: &str, selected: bool) -> (f32, bool) {
+fn chip_style(selected: bool) -> TextStyle {
+    if selected { TextStyle::ui(13.0).semibold() } else { TextStyle::ui(13.0) }
+}
+
+/// Width of a `chip`, for wrapping rows of them.
+fn chip_width(ui: &mut Ui, label: &str, new: usize, selected: bool) -> f32 {
+    let t = ui.measure(label, &chip_style(selected), TextOpts::default());
+    t.w + 26.0 + if new > 0 { ui.badge_width(new) + 6.0 } else { 0.0 }
+}
+
+/// A rounded, clickable chip, with a badge for `new` unread works (none for 0). Returns its
+/// width and whether it was clicked.
+fn chip(ui: &mut Ui, key: Id, x: f32, y: f32, label: &str, new: usize, selected: bool) -> (f32, bool) {
     let c = ui.c;
-    let style = if selected { TextStyle::ui(13.0).semibold() } else { TextStyle::ui(13.0) };
-    let t = ui.measure(label, &style, TextOpts::default());
-    let r = Rect::new(x, y, t.w + 26.0, 30.0);
+    let t = ui.measure(label, &chip_style(selected), TextOpts::default());
+    let r = Rect::new(x, y, chip_width(ui, label, new, selected), 30.0);
     let resp = ui.interact(key, r);
     if selected {
         ui.g.fill_round(r, 15.0, c.selected());
@@ -125,6 +135,7 @@ fn chip(ui: &mut Ui, key: Id, x: f32, y: f32, label: &str, selected: bool) -> (f
         }
     }
     ui.g.draw_text(t, r.x + 13.0, r.y + (30.0 - t.h) / 2.0, c.text);
+    ui.badge(r.x + 19.0 + t.w, r.y + 15.0, new, Badge::New, selected);
     (r.w, resp.clicked)
 }
 
@@ -772,7 +783,7 @@ fn suggestion_chips(ui: &mut Ui, x: f32, y: f32, w: f32, kind: FeedKind, names: 
             cx = x;
             cy += 36.0;
         }
-        let (cw, clicked) = chip(ui, id2(id("fol-suggest"), (kind.label(), i)), cx, cy, &label, false);
+        let (cw, clicked) = chip(ui, id2(id("fol-suggest"), (kind.label(), i)), cx, cy, &label, 0, false);
         if clicked {
             out.push(BrowseAction::Follow(Feed { kind, name: n.clone() }));
         }
@@ -796,10 +807,7 @@ impl FollowingScreen {
             Some(s) => Scope::One(s.as_str()),
             None => Scope::Kind(kind),
         };
-        let unread = follows.unread_total();
         let t = ui.text("Following", &TextStyle::ui(26.0).semibold(), x, body.y + 22.0, c.text);
-        let sub = if unread > 0 { format!("{unread} new") } else { format!("{} followed", follows.list().len()) };
-        ui.text(&sub, &TextStyle::ui(SMALL), x + t.w + 14.0, body.y + 22.0 + t.h - 18.0, c.muted);
 
         // Actions on the right of the title.
         let mine: Vec<_> = follows.list().iter().filter(|f| f.feed.kind == kind).collect();
@@ -831,20 +839,16 @@ impl FollowingScreen {
             out.push(BrowseAction::Check(Target::Stale));
         }
 
-        // Authors / Tags (/ Collections, once there are any) with their unread counts.
+        // Authors / Tags (/ Collections, once there are any), each with a badge for its new works.
         let mut y = body.y + 22.0 + t.h + 14.0;
         let show_collections = self.tab == 2 || follows.list().iter().any(|f| f.feed.kind == FeedKind::Collection);
-        let tabs: Vec<String> = KINDS
+        let tabs: Vec<(&str, usize)> = KINDS
             .iter()
             .take(if show_collections { 3 } else { 2 })
-            .map(|(k, label, _, _)| match follows.unread_count(Scope::Kind(*k)) {
-                0 => label.to_string(),
-                n => format!("{label} · {n}"),
-            })
+            .map(|(k, label, _, _)| (*label, follows.unread_count(Scope::Kind(*k))))
             .collect();
-        let tab_refs: Vec<&str> = tabs.iter().map(String::as_str).collect();
         let mut tab = self.tab;
-        if ui.segmented(id("fol-tabs"), Rect::new(x, y, 140.0 * tab_refs.len() as f32, 34.0), &tab_refs, &mut tab) {
+        if ui.segmented_counts(id("fol-tabs"), Rect::new(x, y, 150.0 * tabs.len() as f32, 34.0), &tabs, &mut tab, Badge::New) {
             self.tab = tab;
             self.select(None, ui);
             return out;
@@ -904,21 +908,19 @@ impl FollowingScreen {
         // This tab's feeds.
         let mut cx = x;
         let tab_unread = follows.unread_count(Scope::Kind(kind));
-        let all_label = if tab_unread > 0 { format!("All {plural} · {tab_unread}") } else { format!("All {plural}") };
-        let (cw, clicked) = chip(ui, id("fol-all"), cx, y, &all_label, self.selected.is_none());
+        let (cw, clicked) = chip(ui, id("fol-all"), cx, y, &format!("All {plural}"), tab_unread, self.selected.is_none());
         if clicked {
             self.select(None, ui);
         }
         cx += cw + 6.0;
         for f in &mine {
             let fid = f.id();
-            let label = if f.unread.is_empty() { f.feed.name.clone() } else { format!("{} · {}", f.feed.name, f.unread.len()) };
-            let tw = ui.measure(&label, &TextStyle::ui(13.0), TextOpts::default()).w + 26.0;
-            if cx + tw > x + w {
+            let on = self.selected.as_deref() == Some(fid.as_str());
+            if cx + chip_width(ui, &f.feed.name, f.unread.len(), on) > x + w {
                 cx = x;
                 y += 36.0;
             }
-            let (cw, clicked) = chip(ui, id2(id("fol-chip"), &fid), cx, y, &label, self.selected.as_deref() == Some(fid.as_str()));
+            let (cw, clicked) = chip(ui, id2(id("fol-chip"), &fid), cx, y, &f.feed.name, f.unread.len(), on);
             if clicked {
                 self.select(Some(fid), ui);
             }

@@ -166,14 +166,14 @@ fun Context.countBadge(n: Int, new: Boolean = false, strong: Boolean = false): T
     }
 }
 
-/** A filter chip with a count badge (none for 0). */
-fun Context.countChip(text: String, n: Int, selected: Boolean, onClick: () -> Unit): View {
+/** A filter chip with a count badge (none for 0); `new` when the count is of new works. */
+fun Context.countChip(text: String, n: Int, selected: Boolean, new: Boolean = false, onClick: () -> Unit): View {
     val p = Settings.pal
     return row().apply {
         background = if (selected) rounded(p.selected, dpf(16)) else rounded(0, dpf(16), p.border, dp(1))
         setPadding(dp(14), dp(7), dp(if (n > 0) 10 else 14), dp(7))
         addView(label(text, 13.5f, p.text, bold = selected, lines = 1))
-        if (n > 0) addView(countBadge(n, strong = selected), lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(6) })
+        if (n > 0) addView(countBadge(n, new, strong = selected), lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(6) })
         setOnClickListener { onClick() }
     }
 }
