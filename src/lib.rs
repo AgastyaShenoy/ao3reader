@@ -2,10 +2,17 @@
 #![allow(unused_imports)]
 
 pub mod ao3;
-pub mod app;
 pub mod reader;
 pub mod storage;
-pub mod ui;
 pub mod updater;
 
+#[cfg(all(windows, feature = "native-ui"))]
+pub mod native;
+
+#[cfg(feature = "legacy-ui")]
+pub mod app;
+#[cfg(feature = "legacy-ui")]
+pub mod ui;
+
+#[cfg(feature = "legacy-ui")]
 pub use app::AO3ReaderApp;

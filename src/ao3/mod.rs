@@ -1,5 +1,6 @@
 #![allow(unused_imports)]
 pub mod client;
+pub mod epub;
 pub mod models;
 pub mod parser;
 

@@ -94,8 +94,9 @@ impl FontManager {
         candidate_name
     }
 
-    /// Returns standard font directories on Windows, macOS, or Linux.
+    /// Returns standard font directories on Windows, macOS, or Linux (none elsewhere).
     pub fn get_system_font_dirs() -> Vec<PathBuf> {
+        #[allow(unused_mut)]
         let mut dirs = Vec::new();
 
         #[cfg(target_os = "windows")]
@@ -199,7 +200,7 @@ impl FontManager {
 
     /// Curated popular e-reader and reading fonts if installed on the system.
     pub fn get_curated_reading_fonts() -> Vec<SystemFont> {
-        let all_fonts = Self::scan_installed_fonts();
+        let all_fonts = Self::cached_system_fonts();
         let preferred = [
             "Georgia",
             "Palatino Linotype",
@@ -240,6 +241,7 @@ impl FontManager {
     }
 
     /// Prompts the user with an OS open file dialog to choose a .ttf or .otf font file.
+    #[cfg(not(target_os = "android"))]
     pub fn pick_custom_font_file() -> Option<(String, PathBuf)> {
         let picked = rfd::FileDialog::new()
             .set_title("Select Font File")
@@ -258,7 +260,10 @@ impl FontManager {
 
         Some((font_name, picked))
     }
+}
 
+#[cfg(feature = "legacy-ui")]
+impl FontManager {
     /// Constructs FontDefinitions ensuring ReaderBookFont is always bound to avoid epaint panics.
     pub fn get_font_definitions(
         custom_font_path: Option<&Path>,

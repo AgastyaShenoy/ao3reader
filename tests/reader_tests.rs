@@ -148,7 +148,7 @@ fn test_exporter_txt() {
 #[test]
 fn test_reader_themes() {
     for theme in ReaderThemeType::all() {
-        let colors = theme.colors();
+        let colors = theme.palette();
         assert!(!theme.display_name().is_empty());
         // Verify background and text have distinct components
         assert_ne!(colors.bg, colors.text);
@@ -203,6 +203,7 @@ fn test_in_reader_search() {
 }
 
 #[test]
+#[cfg(feature = "legacy-ui")]
 fn test_ereader_paged_mode_navigation() {
     use ao3reader::reader::paginator::Paginator;
     use ao3reader::reader::view::{ReaderAction, ReaderView};
@@ -242,6 +243,7 @@ fn test_ereader_paged_mode_navigation() {
 }
 
 #[test]
+#[cfg(feature = "legacy-ui")]
 fn test_two_page_spread_stepping() {
     use ao3reader::reader::paginator::Paginator;
     use ao3reader::reader::view::{ReaderAction, ReaderView};
@@ -269,6 +271,7 @@ fn test_two_page_spread_stepping() {
 }
 
 #[test]
+#[cfg(feature = "legacy-ui")]
 fn test_reader_ui_render() {
     use ao3reader::storage::config::AppConfig;
     use ao3reader::reader::view::ReaderView;
@@ -321,6 +324,7 @@ fn test_font_manager_caches() {
 }
 
 #[test]
+#[cfg(feature = "legacy-ui")]
 fn test_font_family_resolution() {
     use ao3reader::reader::typography::FontFamilyChoice;
 
@@ -355,6 +359,7 @@ fn test_font_family_resolution() {
 }
 
 #[test]
+#[cfg(feature = "legacy-ui")]
 fn test_custom_font_fic_rendering() {
     use ao3reader::storage::config::AppConfig;
     use ao3reader::reader::view::ReaderView;
@@ -394,6 +399,7 @@ fn test_custom_font_fic_rendering() {
 }
 
 #[test]
+#[cfg(feature = "legacy-ui")]
 fn test_invalid_font_bytes_handling() {
     let ctx = egui::Context::default();
     let dummy_path = std::path::PathBuf::from("non_existent_or_corrupt.ttf");

@@ -174,6 +174,9 @@ pub struct Chapter {
     pub pre_notes: Option<String>,
     pub post_notes: Option<String>,
     pub paragraphs: Vec<String>, // Parsed text paragraphs
+    /// Source HTML of the chapter body. No longer filled in; always written (empty) because
+    /// v1.x requires the field when it reads a saved work.
+    #[serde(default)]
     pub raw_html: String,
     pub word_count: usize,
 }
@@ -253,6 +256,10 @@ pub struct Bookmark {
 pub struct ReadingProgress {
     pub current_chapter: usize, // 1-based index
     pub scroll_offset: f32,
+    /// Position inside the current chapter as paragraph index + fraction through that
+    /// paragraph (e.g. 12.4). Independent of font size, window size and reading mode.
+    #[serde(default)]
+    pub position: f32,
     pub percentage: f32, // 0.0 - 100.0
     pub last_read: DateTime<Utc>,
     pub completed: bool,
@@ -263,6 +270,7 @@ impl Default for ReadingProgress {
         Self {
             current_chapter: 1,
             scroll_offset: 0.0,
+            position: 0.0,
             percentage: 0.0,
             last_read: Utc::now(),
             completed: false,

@@ -33,6 +33,7 @@ impl FontFamilyChoice {
         }
     }
 
+    #[cfg(feature = "legacy-ui")]
     pub fn to_egui_family(&self, ctx: &egui::Context) -> egui::FontFamily {
         match self {
             FontFamilyChoice::Monospace => egui::FontFamily::Monospace,
