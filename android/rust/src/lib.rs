@@ -3,15 +3,18 @@
 //! Kotlin calls one JNI function, `Core.call(method, json)`, and gets JSON back:
 //! `{"ok": ...}` or `{"err": "message"}`. A single coarse entry point keeps the native
 //! surface tiny and needs no binding generator or JNA at runtime. Network methods
-//! (`fetch`, `epub`, `login`, `cookie`, `kudos`) block, so Kotlin calls them off the UI thread;
+//! (`fetch`, `ao3.work`, `epub`, `login`, `cookie`, `kudos`) block, so Kotlin calls them off the UI thread;
 //! they do not hold the state lock while waiting on AO3.
 
 use ao3reader::ao3::client::Ao3Client;
 use ao3reader::ao3::models::{Bookmark, Category, LibraryEntry, ReadingProgress, ShelfStatus, UserSession, Work};
+use ao3reader::reader::pace::PaceTracker;
 use ao3reader::reader::rich_text::{is_landmark, paragraph_display, parse_inline, word_count, ParagraphKind, RichText};
 use ao3reader::reader::theme::{ReaderThemeType, Rgb};
 use ao3reader::storage::config::AppConfig;
+use ao3reader::ao3::search::{Blurb, Feed, FeedKind, Listing, SearchQuery};
 use ao3reader::storage::export::WorkExporter;
+use ao3reader::storage::follows::{FollowStore, Mark, Scope, STALE_MINUTES};
 use ao3reader::storage::library::LibraryManager;
 use serde_json::{json, Value};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -74,8 +77,12 @@ struct State {
     config: AppConfig,
     library: LibraryManager,
     client: Ao3Client,
+    follows: FollowStore,
     /// The work open in the reader.
     work: Option<Work>,
+    /// Learns the reading speed from how fast the reading position moves.
+    pace: PaceTracker,
+    started: std::time::Instant,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -155,6 +162,7 @@ fn meta_json(m: &ao3reader::ao3::models::WorkMeta) -> Value {
         "hits": m.stats.hits,
         "published": m.stats.published_date,
         "complete": m.is_complete,
+        "restricted": m.is_restricted,
     })
 }
 
@@ -178,6 +186,64 @@ fn entry_json(e: &LibraryEntry) -> Value {
         "completed": e.progress.completed,
         "last_read": e.progress.last_read.timestamp(),
         "added": e.downloaded_at.timestamp(),
+    })
+}
+
+fn blurb_json(b: &Blurb, lib: &LibraryManager) -> Value {
+    let mut v = meta_json(&b.meta);
+    v["updated"] = json!(b.updated);
+    v["comments"] = json!(b.meta.stats.comments);
+    v["language"] = json!(b.meta.language);
+    v["in_library"] = json!(lib.get_entry(&b.meta.id).is_some());
+    v
+}
+
+fn listing_json(l: &Listing, lib: &LibraryManager) -> Value {
+    json!({
+        "works": l.works.iter().map(|b| blurb_json(b, lib)).collect::<Vec<_>>(),
+        "total": l.total,
+        "page": l.page,
+        "has_next": l.has_next,
+    })
+}
+
+fn feed_kind(a: &Value) -> FeedKind {
+    match a.get("kind").and_then(Value::as_str) {
+        Some("author") => FeedKind::Author,
+        Some("collection") => FeedKind::Collection,
+        _ => FeedKind::Tag,
+    }
+}
+
+/// The feeds an argument names: one feed (`id`), one kind (`kind`), or all of them.
+fn scope_of(a: &Value) -> Scope<'_> {
+    match (a.get("id").and_then(Value::as_str), a.get("kind").and_then(Value::as_str)) {
+        (Some(id), _) => Scope::One(id),
+        (None, Some(_)) => Scope::Kind(feed_kind(a)),
+        _ => Scope::All,
+    }
+}
+
+fn follows_json(s: &State) -> Value {
+    let stale = s.follows.stale(STALE_MINUTES);
+    json!({
+        "unread": s.follows.unread_total(),
+        "unread_by_kind": {
+            "author": s.follows.unread_count(Scope::Kind(FeedKind::Author)),
+            "tag": s.follows.unread_count(Scope::Kind(FeedKind::Tag)),
+            "collection": s.follows.unread_count(Scope::Kind(FeedKind::Collection)),
+        },
+        "follows": s.follows.list().iter().map(|f| json!({
+            "id": f.id(),
+            "kind": f.feed.kind.label().to_lowercase(),
+            "name": f.feed.name,
+            "url": f.feed.url(1),
+            "unread": f.unread.len(),
+            "total": f.total,
+            "checked": f.checked.map(|c| c.timestamp()),
+            "stale": stale.contains(&f.id()),
+            "error": f.error,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -224,6 +290,8 @@ fn themes_json() -> Value {
                     "bg": hex(p.bg), "surface": hex(p.surface), "card": hex(p.card), "text": hex(p.text),
                     "muted": hex(p.text_muted), "accent": hex(p.accent), "border": hex(p.border),
                     "quote_bg": hex(p.quote_bg), "notes_bg": hex(p.notes_bg),
+                    "accent_text": hex(p.accent_text()), "accent_mark": hex(p.accent_mark()), "danger_text": hex(p.danger_text()),
+                    "warning_text": hex(p.warning_text()), "on_accent": hex(p.on_accent()), "romance": hex(p.romance()),
                 })
             })
             .collect(),
@@ -257,19 +325,31 @@ fn dispatch(method: &str, a: &Value) -> R {
             let client = Ao3Client::new(Some(&config.session));
             let library = LibraryManager::new();
             let mut guard = STATE.lock().map_err(|_| "state poisoned")?;
-            *guard = Some(State { config, library, client, work: None });
+            let follows = FollowStore::load();
+            *guard = Some(State { config, library, client, follows, work: None, pace: PaceTracker::default(), started: std::time::Instant::now() });
             Ok(json!({ "themes": themes_json() }))
         }
         "config.get" => with_state(|s| serde_json::to_value(&s.config).map_err(|e| e.to_string())),
         "config.set" => with_state(|s| {
             let mut cfg: AppConfig = serde_json::from_value(a.get("config").cloned().unwrap_or(Value::Null)).map_err(|e| e.to_string())?;
-            // The session is only changed by sign-in and sign-out.
+            // The session is only changed by sign-in and sign-out, and the measured reading speed
+            // only by reading (or `speed.reset`).
             cfg.session = s.config.session.clone();
+            cfg.reading_speed = s.config.reading_speed;
             s.config = cfg;
             s.config.save()?;
             Ok(Value::Null)
         }),
         "session" => with_state(|s| Ok(session_json(&s.config.session))),
+        "speed" => with_state(|s| {
+            let sp = s.config.reading_speed;
+            Ok(json!({ "measured": sp.wpm(), "minutes": sp.minutes(), "wpm": s.config.wpm(), "has_data": sp.secs > 0.0 }))
+        }),
+        "speed.reset" => with_state(|s| {
+            s.config.reading_speed = Default::default();
+            s.config.save()?;
+            Ok(Value::Null)
+        }),
         "library" => with_state(|s| {
             let mut list: Vec<&LibraryEntry> = s.library.entries().values().collect();
             list.sort_by(|x, y| y.progress.last_read.cmp(&x.progress.last_read));
@@ -316,6 +396,7 @@ fn dispatch(method: &str, a: &Value) -> R {
                 "bookmarks": bookmarks_json(entry),
             });
             s.work = Some(work);
+            s.pace.reset();
             Ok(out)
         }),
         "work.chapter" => with_state(|s| {
@@ -355,7 +436,14 @@ fn dispatch(method: &str, a: &Value) -> R {
             let ch = arg_u64(a, "chapter")? as usize;
             let pos = a.get("position").and_then(Value::as_f64).unwrap_or(0.0);
             let (pct, left_work, left_ch) = progress_stats(work, ch, pos);
-            Ok(json!({ "percentage": pct, "words_left": left_work, "chapter_words_left": left_ch }))
+            // Every move through the work teaches the reading speed (jumps and pauses are ignored).
+            let total: usize = (0..work.chapters.len()).map(|i| paragraph_words(work, i).iter().sum::<usize>()).sum();
+            let read = total.saturating_sub(left_work) as f64;
+            let t = s.started.elapsed().as_secs_f64();
+            if s.pace.observe(t, read, &mut s.config.reading_speed) {
+                s.config.save()?;
+            }
+            Ok(json!({ "percentage": pct, "words_left": left_work, "chapter_words_left": left_ch, "wpm": s.config.wpm() }))
         }),
         "progress.save" => with_state(|s| {
             let work = s.work.as_ref().ok_or("no work open")?;
@@ -443,6 +531,99 @@ fn dispatch(method: &str, a: &Value) -> R {
             };
             Ok(json!({ "title": work.meta.title, "text": text }))
         }),
+        "ao3.search" => {
+            let q: SearchQuery = serde_json::from_value(a.get("query").cloned().unwrap_or(Value::Null)).map_err(|e| e.to_string())?;
+            let page = a.get("page").and_then(Value::as_u64).unwrap_or(1) as u32;
+            let client = with_state(|s| Ok(s.client.clone()))?;
+            let listing = client.search(&q, page)?;
+            with_state(|s| Ok(listing_json(&listing, &s.library)))
+        }
+        "ao3.feed" => {
+            let feed = Feed::parse(arg_str(a, "name")?, feed_kind(a)).ok_or("Enter a name or an AO3 link.")?;
+            let page = a.get("page").and_then(Value::as_u64).unwrap_or(1) as u32;
+            let client = with_state(|s| Ok(s.client.clone()))?;
+            let listing = client.feed(&feed, page)?;
+            with_state(|s| Ok(listing_json(&listing, &s.library)))
+        }
+        "follows" => with_state(|s| Ok(follows_json(s))),
+        "follows.add" => with_state(|s| {
+            let feed = Feed::parse(arg_str(a, "name")?, feed_kind(a)).ok_or("Enter a name or an AO3 link.")?;
+            let name = feed.name.clone();
+            let id = s.follows.add(feed)?;
+            Ok(json!({ "id": id, "name": name }))
+        }),
+        "follows.remove" => with_state(|s| {
+            s.follows.remove(arg_str(a, "id")?)?;
+            Ok(Value::Null)
+        }),
+        "follows.read" => with_state(|s| {
+            match a.get("work").and_then(Value::as_str) {
+                Some(w) => s.follows.mark_work_read(w)?,
+                None => s.follows.mark_read(scope_of(a))?,
+            }
+            Ok(Value::Null)
+        }),
+        // Authors or tags from the user's own works, offered as one-tap follows (never followed
+        // automatically).
+        "follows.suggest" => with_state(|s| {
+            let names = s.follows.suggestions(s.library.entries().values().map(|e| &e.meta), feed_kind(a), 8);
+            Ok(json!(names))
+        }),
+        "follows.timeline" => with_state(|s| {
+            Ok(Value::Array(
+                s.follows
+                    .timeline(scope_of(a))
+                    .into_iter()
+                    .map(|(b, from, mark)| {
+                        let mut v = blurb_json(b, &s.library);
+                        v["unread"] = json!(mark != Mark::None);
+                        v["mark"] = json!(mark.label());
+                        v["from"] = json!(from.iter().map(|f| f.feed.name.clone()).collect::<Vec<_>>());
+                        v
+                    })
+                    .collect(),
+            ))
+        }),
+        "follows.check" => {
+            // Feeds are fetched one at a time with a pause between, to go easy on AO3.
+            let ids: Vec<String> = if a.get("stale").and_then(Value::as_bool) == Some(true) {
+                with_state(|s| Ok(s.follows.stale(STALE_MINUTES)))?
+            } else {
+                with_state(|s| {
+                    let scope = scope_of(a);
+                    Ok(s.follows
+                        .list()
+                        .iter()
+                        .filter(|f| match scope {
+                            Scope::All => true,
+                            Scope::Kind(k) => f.feed.kind == k,
+                            Scope::One(id) => f.id() == id,
+                        })
+                        .map(|f| f.id())
+                        .collect())
+                })?
+            };
+            let mut fresh = 0;
+            let mut errors = Vec::new();
+            for (i, id) in ids.iter().enumerate() {
+                if i > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(1200));
+                }
+                let Some((client, feed)) = with_state(|s| Ok(s.follows.get(id).map(|f| (s.client.clone(), f.feed.clone()))))? else { continue };
+                match client.feed(&feed, 1) {
+                    Ok(listing) => fresh += with_state(|s| s.follows.record(id, listing))?,
+                    Err(e) => {
+                        let rate_limited = e.contains("429");
+                        with_state(|s| s.follows.record_error(id, e.clone()))?;
+                        errors.push(format!("{}: {e}", feed.name));
+                        if rate_limited {
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(json!({ "checked": ids.len(), "new": fresh, "errors": errors }))
+        }
         "storage" => Ok(json!({ "dir": AppConfig::get_app_dir().to_string_lossy() })),
         "memory" => Ok(json!({ "live": RUST_LIVE.load(Relaxed), "peak": RUST_PEAK.load(Relaxed) })),
         "clear_cache" => with_state(|s| {
@@ -468,6 +649,13 @@ fn dispatch(method: &str, a: &Value) -> R {
                 s.library.save_work(&work)?;
                 Ok(json!({ "id": work.meta.id, "meta": meta_json(&work.meta) }))
             })
+        }
+        "ao3.work" => {
+            // A work's details for the pasted-link card, without downloading its text.
+            let input = arg_str(a, "input")?.to_string();
+            let client = with_state(|s| Ok(s.client.clone()))?;
+            let meta = client.work_meta(&input)?;
+            with_state(|s| Ok(json!({ "meta": meta_json(&meta), "in_library": s.library.get_entry(&meta.id).is_some() })))
         }
         "import" => {
             // Recognised by content: Android's picker often hides the real file name.

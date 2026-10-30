@@ -32,25 +32,82 @@ pub fn rating_color(meta: &WorkMeta) -> Color {
     Color::from_u8(r, g, b)
 }
 
+/// A tag pill. AO3's coloured markers (rating, category, warnings) keep their colour as a dot
+/// on a quiet pill, so a card with several of them doesn't become a row of bright blocks.
+pub enum Pill {
+    Marker(String, Color),
+    /// A relationship. Romantic ones ("A/B") get a heart on a rose tint, the one bit of colour a
+    /// reader looks for first; platonic ones ("A & B") a people sign on a plain outline.
+    Ship(String),
+    Tag(String),
+    Status(String),
+}
+
+/// AO3 writes romantic relationships with a slash and platonic ones with an ampersand.
+fn romantic(tag: &str) -> bool {
+    tag.contains('/')
+}
+
+const HEART: &str = "\u{EB52}";
+const PEOPLE: &str = "\u{E716}";
+
+/// Rating, categories, warnings (other than "none"), up to `rels` relationships and the
+/// complete/in-progress status: the pills on a work card.
+pub fn card_pills(m: &WorkMeta, rels: usize) -> Vec<Pill> {
+    let mut out = vec![Pill::Marker(m.rating.display_name().to_string(), rating_color(m))];
+    for cat in &m.categories {
+        out.push(Pill::Marker(cat.display_name().to_string(), category_color(cat)));
+    }
+    for wn in m.warnings.iter().filter(|w| !w.contains("No Archive Warnings")) {
+        out.push(Pill::Marker(wn.clone(), WARNING_RED));
+    }
+    out.extend(m.relationships.iter().take(rels).map(|r| Pill::Ship(r.clone())));
+    out.push(Pill::Status(if m.is_complete { "Complete" } else { "In progress" }.to_string()));
+    out
+}
+
+const WARNING_RED: Color = Color { r: 0.80, g: 0.22, b: 0.22, a: 1.0 };
+
 /// Lays out pills left to right, wrapping at `w`. Returns the height used.
-pub fn pills(ui: &mut Ui, x: f32, y: f32, w: f32, items: &[(String, Color, Color, bool)]) -> f32 {
+pub fn pills(ui: &mut Ui, x: f32, y: f32, w: f32, items: &[Pill]) -> f32 {
+    let c = ui.c;
     let style = TextStyle::ui(12.5);
     let (mut cx, mut cy) = (x, y);
     let h = 24.0;
-    for (label, fill, fg, outlined) in items {
-        let t = ui.measure(label, &style, TextOpts::ellipsize(w - 20.0));
-        let pw = t.w + 20.0;
+    for pill in items {
+        let (label, lead) = match pill {
+            Pill::Marker(l, _) => (l, 22.0),
+            Pill::Ship(l) => (l, 27.0),
+            Pill::Tag(l) | Pill::Status(l) => (l, 10.0),
+        };
+        let love = matches!(pill, Pill::Ship(l) if romantic(l));
+        let pstyle = if love { style.clone().semibold() } else { style.clone() };
+        let t = ui.measure(label, &pstyle, TextOpts::ellipsize(w - lead - 11.0));
+        let pw = t.w + lead + 11.0;
         if cx > x && cx + pw > x + w {
             cx = x;
             cy += h + 6.0;
         }
         let r = Rect::new(cx, cy, pw, h);
-        if *outlined {
-            ui.g.stroke_round(r, h / 2.0, 1.0, *fill);
-        } else {
-            ui.g.fill_round(r, h / 2.0, *fill);
+        match pill {
+            Pill::Marker(_, col) => {
+                ui.g.fill_round(r, h / 2.0, c.text.alpha(0.07));
+                ui.g.fill_circle(r.x + 12.0, r.y + h / 2.0, 3.5, *col);
+            }
+            Pill::Ship(_) => {
+                if love {
+                    ui.g.fill_round(r, h / 2.0, c.romance.alpha(0.14));
+                    ui.g.stroke_round(r, h / 2.0, 1.0, c.romance.alpha(0.45));
+                } else {
+                    ui.g.stroke_round(r, h / 2.0, 1.0, c.border);
+                }
+                let it = ui.measure(if love { HEART } else { PEOPLE }, &TextStyle::icons(11.0), TextOpts::default());
+                ui.g.draw_text(it, r.x + 10.0, r.y + (h - it.h) / 2.0, if love { c.romance } else { c.muted });
+            }
+            _ => ui.g.stroke_round(r, h / 2.0, 1.0, c.border),
         }
-        ui.g.draw_text(t, r.x + 10.0, r.y + (h - t.h) / 2.0, *fg);
+        let fg = if matches!(pill, Pill::Status(_)) { c.muted } else { c.text };
+        ui.g.draw_text(t, r.x + lead, r.y + (h - t.h) / 2.0, fg);
         cx += pw + 6.0;
     }
     if items.is_empty() { 0.0 } else { cy + h - y }
@@ -60,7 +117,6 @@ pub fn pills(ui: &mut Ui, x: f32, y: f32, w: f32, items: &[(String, Color, Color
 /// clamped so the header fits on one page.
 pub fn draw(ui: &mut Ui, m: &WorkMeta, x: f32, y: f32, w: f32, page_h: Option<f32>) -> f32 {
     let c = ui.c;
-    let white = Color::from_u8(255, 255, 255);
     let mut cy = y + 8.0;
 
     let t = ui.measure(&m.title, &TextStyle::ui(28.0).semibold(), TextOpts::wrap(w).line_height(1.25));
@@ -71,17 +127,16 @@ pub fn draw(ui: &mut Ui, m: &WorkMeta, x: f32, y: f32, w: f32, page_h: Option<f3
     ui.g.draw_text(t, x, cy, c.muted);
     cy += t.h + 16.0;
 
-    let mut badges: Vec<(String, Color, Color, bool)> = vec![(m.rating.display_name().to_string(), rating_color(m), white, false)];
+    let mut badges = vec![Pill::Marker(m.rating.display_name().to_string(), rating_color(m))];
     for cat in &m.categories {
-        badges.push((cat.display_name().to_string(), category_color(cat), white, false));
+        badges.push(Pill::Marker(cat.display_name().to_string(), category_color(cat)));
     }
     for wn in &m.warnings {
-        let green = wn.contains("No Archive Warnings");
-        let col = if green { Color::from_u8(34, 139, 34) } else { Color::from_u8(180, 40, 40) };
-        badges.push((wn.clone(), col, white, false));
+        let col = if wn.contains("No Archive Warnings") { Color::from_u8(34, 160, 84) } else { WARNING_RED };
+        badges.push(Pill::Marker(wn.clone(), col));
     }
     if m.is_complete {
-        badges.push(("Complete".into(), c.border, c.text, true));
+        badges.push(Pill::Status("Complete".into()));
     }
     cy += pills(ui, x, cy, w, &badges) + 14.0;
 
@@ -96,7 +151,7 @@ pub fn draw(ui: &mut Ui, m: &WorkMeta, x: f32, y: f32, w: f32, page_h: Option<f3
     };
     line(ui, &mut cy, "Fandoms", &m.fandoms);
     if !m.relationships.is_empty() {
-        let rel: Vec<_> = m.relationships.iter().take(8).map(|r| (r.clone(), c.accent, c.text, true)).collect();
+        let rel: Vec<_> = m.relationships.iter().take(8).map(|r| Pill::Ship(r.clone())).collect();
         cy += pills(ui, x, cy, w, &rel) + 10.0;
     }
     line(ui, &mut cy, "Characters", &m.characters);
@@ -112,7 +167,7 @@ pub fn draw(ui: &mut Ui, m: &WorkMeta, x: f32, y: f32, w: f32, page_h: Option<f3
         let card = Rect::new(x, cy, w, t.h + label.h + 44.0);
         ui.g.fill_round(card, 8.0, c.notes_bg);
         ui.g.stroke_round(card, 8.0, 1.0, c.border);
-        ui.g.draw_text(label, x + 18.0, cy + 14.0, c.accent);
+        ui.g.draw_text(label, x + 18.0, cy + 14.0, c.accent_text);
         ui.g.draw_text(t, x + 18.0, cy + 22.0 + label.h, c.text);
         cy += card.h + 14.0;
     }

@@ -16,8 +16,9 @@ use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
-use windows::Win32::Graphics::Gdi::HDC;
-use windows_numerics::Vector2;
+use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
+use windows_numerics::{Matrix3x2, Vector2};
 
 /// Layouts not used for this many frames are dropped from the cache.
 const LAYOUT_TTL_FRAMES: u64 = 4;
@@ -208,6 +209,14 @@ struct CachedLayout {
     last_used: u64,
 }
 
+/// One step of a vector outline, in the shape's own units.
+#[derive(Debug, Clone, Copy)]
+pub enum PathOp {
+    M(f32, f32),
+    C(f32, f32, f32, f32, f32, f32),
+    Z,
+}
+
 pub struct Gfx {
     dw: IDWriteFactory,
     rt: ID2D1DCRenderTarget,
@@ -216,7 +225,11 @@ pub struct Gfx {
     formats: HashMap<u64, IDWriteTextFormat>,
     layouts: HashMap<u64, CachedLayout>,
     collections: HashMap<PathBuf, IDWriteFontCollection>,
-    ui_family: &'static str,
+    /// Built path geometries, keyed by the address of their static path data.
+    paths: HashMap<usize, ID2D1PathGeometry>,
+    /// The interface face: the user's choice, or `default_ui_family`.
+    ui_family: String,
+    default_ui_family: &'static str,
     icon_family: &'static str,
     mono_family: &'static str,
     frame: u64,
@@ -250,7 +263,9 @@ impl Gfx {
                 formats: HashMap::new(),
                 layouts: HashMap::new(),
                 collections: HashMap::new(),
-                ui_family: "Segoe UI",
+                paths: HashMap::new(),
+                ui_family: String::new(),
+                default_ui_family: "Segoe UI",
                 icon_family: "Segoe MDL2 Assets",
                 mono_family: "Consolas",
                 frame: 0,
@@ -259,8 +274,9 @@ impl Gfx {
                 dpi,
             };
             if g.has_system_family("Segoe UI Variable Text") {
-                g.ui_family = "Segoe UI Variable Text";
+                g.default_ui_family = "Segoe UI Variable Text";
             }
+            g.ui_family = g.default_ui_family.to_string();
             if g.has_system_family("Segoe Fluent Icons") {
                 g.icon_family = "Segoe Fluent Icons";
             }
@@ -351,7 +367,7 @@ impl Gfx {
             return Some(f.clone());
         }
         let (family, coll) = match &style.family {
-            Family::Ui => (self.ui_family.to_string(), None),
+            Family::Ui => (self.ui_family.clone(), None),
             Family::Icons => (self.icon_family.to_string(), None),
             Family::Mono => (self.mono_family.to_string(), None),
             Family::Named { name, file } => (name.clone(), file.as_deref().and_then(|p| self.collection_for(p))),
@@ -534,6 +550,25 @@ impl Gfx {
         self.dpi = dpi;
     }
 
+    /// Switches the interface font (None, or a family that isn't installed, keeps the system
+    /// face). Returns true if it changed, so text boxes can follow.
+    pub fn set_ui_family(&mut self, name: Option<&str>) -> bool {
+        let want = name.filter(|n| !n.trim().is_empty() && self.has_system_family(n)).unwrap_or(self.default_ui_family);
+        if self.ui_family == want {
+            return false;
+        }
+        self.ui_family = want.to_string();
+        // Cached formats and layouts were built with the old face.
+        self.formats.clear();
+        self.layouts.clear();
+        true
+    }
+
+    /// The interface face in use.
+    pub fn ui_family(&self) -> &str {
+        &self.ui_family
+    }
+
     // ---- drawing primitives (no-ops while not drawing) ---------------------------------
 
     fn set_color(&self, c: Color) {
@@ -586,6 +621,92 @@ impl Gfx {
         }
     }
 
+    fn geometry(&mut self, ops: &'static [PathOp]) -> Option<ID2D1PathGeometry> {
+        let key = ops.as_ptr() as usize;
+        if let Some(g) = self.paths.get(&key) {
+            return Some(g.clone());
+        }
+        let g = unsafe { build_path(&self.d2d, ops) }.ok()?;
+        self.paths.insert(key, g.clone());
+        Some(g)
+    }
+
+    /// Fills a vector shape `size` units large, scaled to fit `r` and centred in it.
+    pub fn fill_path(&mut self, ops: &'static [PathOp], size: (f32, f32), r: Rect, c: Color) {
+        if !self.drawing {
+            return;
+        }
+        let Some(geo) = self.geometry(ops) else { return };
+        self.set_color(c);
+        unsafe { fill_scaled(&self.rt, &geo, &self.brush, size, r) };
+    }
+
+    /// A square icon `px` pixels wide: the shape in `mark` on a rounded `tile`.
+    pub fn icon(&mut self, ops: &'static [PathOp], size: (f32, f32), px: i32, tile: Color, mark: Color) -> Option<HICON> {
+        let geo = self.geometry(ops)?;
+        unsafe {
+            let props = D2D1_RENDER_TARGET_PROPERTIES {
+                r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                usage: D2D1_RENDER_TARGET_USAGE_NONE,
+                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+            };
+            let rt = self.d2d.CreateDCRenderTarget(&props).ok()?;
+            let brush = rt.CreateSolidColorBrush(&tile.d2d(), None).ok()?;
+            let bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: px,
+                    biHeight: -px,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits = std::ptr::null_mut();
+            let color = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
+            let dc = CreateCompatibleDC(None);
+            let old = SelectObject(dc, color.into());
+            let n = px as f32;
+            let drawn = rt.BindDC(dc, &RECT { left: 0, top: 0, right: px, bottom: px }).is_ok() && {
+                rt.BeginDraw();
+                rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+                let rr = D2D1_ROUNDED_RECT { rect: Rect::new(0.0, 0.0, n, n).d2d(), radiusX: n * 0.22, radiusY: n * 0.22 };
+                rt.FillRoundedRectangle(&rr, &brush);
+                brush.SetColor(&mark.d2d());
+                // The arms reach the top corners: keep a margin so they stay on the tile (less at
+                // title-bar sizes, where every pixel of the mark counts).
+                let pad = n * if px <= 24 { 0.08 } else { 0.14 };
+                fill_scaled(&rt, &geo, &brush, size, Rect::new(pad, pad * 1.1, n - 2.0 * pad, n - 2.0 * pad));
+                rt.EndDraw(None, None).is_ok()
+            };
+            SelectObject(dc, old);
+            let _ = DeleteDC(dc);
+            if drawn && !bits.is_null() {
+                // Icons take straight (not premultiplied) alpha.
+                let px_bytes = std::slice::from_raw_parts_mut(bits as *mut u8, (px * px * 4) as usize);
+                for p in px_bytes.chunks_exact_mut(4) {
+                    let a = p[3] as u32;
+                    if a > 0 && a < 255 {
+                        for ch in &mut p[..3] {
+                            *ch = ((*ch as u32 * 255 + a / 2) / a).min(255) as u8;
+                        }
+                    }
+                }
+            }
+            let mask = CreateBitmap(px, px, 1, 1, None);
+            let info = ICONINFO { fIcon: true.into(), xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
+            let icon = if drawn { CreateIconIndirect(&info).ok() } else { None };
+            let _ = DeleteObject(mask.into());
+            let _ = DeleteObject(color.into());
+            icon
+        }
+    }
+
     pub fn draw_text(&mut self, t: Text, x: f32, y: f32, c: Color) {
         if !self.drawing {
             return;
@@ -630,6 +751,49 @@ impl Gfx {
     pub fn clip(&self) -> Option<Rect> {
         self.clips.last().copied()
     }
+}
+
+unsafe fn build_path(d2d: &ID2D1Factory, ops: &[PathOp]) -> Result<ID2D1PathGeometry> {
+    let geo = d2d.CreatePathGeometry()?;
+    let sink = geo.Open()?;
+    sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+    let pt = |x: f32, y: f32| Vector2 { X: x, Y: y };
+    let mut open = false;
+    for op in ops {
+        match *op {
+            PathOp::M(x, y) => {
+                if open {
+                    sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                }
+                sink.BeginFigure(pt(x, y), D2D1_FIGURE_BEGIN_FILLED);
+                open = true;
+            }
+            PathOp::C(x1, y1, x2, y2, x, y) => {
+                sink.AddBezier(&D2D1_BEZIER_SEGMENT { point1: pt(x1, y1), point2: pt(x2, y2), point3: pt(x, y) });
+            }
+            PathOp::Z => {
+                if open {
+                    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                    open = false;
+                }
+            }
+        }
+    }
+    if open {
+        sink.EndFigure(D2D1_FIGURE_END_OPEN);
+    }
+    sink.Close()?;
+    Ok(geo)
+}
+
+/// Fills `geo` (drawn in a `size` box) scaled to fit `r`, centred.
+unsafe fn fill_scaled(rt: &ID2D1RenderTarget, geo: &ID2D1PathGeometry, brush: &ID2D1SolidColorBrush, size: (f32, f32), r: Rect) {
+    let s = (r.w / size.0).min(r.h / size.1);
+    let x = r.x + (r.w - size.0 * s) / 2.0;
+    let y = r.y + (r.h - size.1 * s) / 2.0;
+    rt.SetTransform(&Matrix3x2 { M11: s, M12: 0.0, M21: 0.0, M22: s, M31: x, M32: y });
+    rt.FillGeometry(geo, brush, None);
+    rt.SetTransform(&Matrix3x2 { M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: 0.0, M32: 0.0 });
 }
 
 fn utf16_len(s: &str) -> u32 {

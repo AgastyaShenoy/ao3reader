@@ -22,122 +22,85 @@ private fun scroll(a: MainActivity, title: String, sub: String? = null, body: (L
     return outer
 }
 
+/** "45 minutes", "3 h 20 min". */
+private fun readingTime(minutes: Int): String = when {
+    minutes <= 1 -> "a minute"
+    minutes < 60 -> "$minutes minutes"
+    minutes % 60 == 0 -> "${minutes / 60} h"
+    else -> "${minutes / 60} h ${minutes % 60} min"
+}
+
 private fun section(a: MainActivity, parent: LinearLayout, title: String) {
     parent.addView(a.label(title, 13.5f, Settings.pal.text, bold = true), lp(top = a.dp(18), bottom = a.dp(8)))
 }
 
-// ---- Fetch -----------------------------------------------------------------------------
+// ---- Import ---------------------------------------------------------------------------
 
-fun fetchScreen(a: MainActivity): View = scroll(a, "Fetch a work") { col ->
+fun importScreen(a: MainActivity): View = scroll(a, "Import") { col ->
     val p = Settings.pal
-    val st = a.fetch
+    val st = a.imports
     val card = a.card()
-    card.addView(a.label("AO3 link or work ID", 13f, p.text, bold = true))
-    val inputRow = a.row()
-    val input = a.input("archiveofourown.org/works/12345678")
-    input.setText(st.input)
-    input.imeOptions = EditorInfo.IME_ACTION_GO
-    inputRow.addView(input, LinearLayout.LayoutParams(0, -2, 1f))
-    inputRow.addView(a.button("Paste") {
-        val clip = (a.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
-        val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(a)?.toString()
-        if (!text.isNullOrBlank()) input.setText(text.trim())
-    }, lp(-2).apply { leftMargin = a.dp(8) })
-    card.addView(inputRow, lp(top = a.dp(8)))
-
-    fun go(open: Boolean) {
-        st.input = input.text.toString().trim()
-        if (st.input.isEmpty()) return
-        a.startFetch(st.input, open)
+    card.addView(a.label("Add a work you already have as a file. It goes into your library and reads like any downloaded work, offline.", 14f, p.muted).apply { setLineSpacing(0f, 1.15f) })
+    for ((name, what) in listOf(
+        "EPUB books" to "Including the EPUB files from AO3's Download button.",
+        "AO3 web pages" to "AO3's HTML downloads, or a work's page saved from a browser.",
+        "AO3 Reader works" to "Works saved by this app (.json).",
+    )) {
+        val r = a.row().apply { gravity = Gravity.TOP }
+        r.addView(a.icon(R.drawable.ic_check, p.success, 18), LinearLayout.LayoutParams(a.dp(18), a.dp(18)).apply { topMargin = a.dp(2); rightMargin = a.dp(12) })
+        val t = a.column()
+        t.addView(a.label(name, 15f, p.text, bold = true))
+        t.addView(a.label(what, 13f, p.muted))
+        r.addView(t)
+        card.addView(r, lp(top = a.dp(12)))
     }
-    input.setOnEditorActionListener { _, _, _ -> go(true); true }
-    val buttons = a.row()
-    val busy = st.busy != null
-    buttons.addView(a.button("Download & read", Kind.Primary) { if (!busy) go(true) })
-    buttons.addView(a.button("Save") { if (!busy) go(false) }, lp(-2).apply { leftMargin = a.dp(8) })
-    buttons.addView(a.button("EPUB") { if (!busy) epub(a, input.text.toString()) }, lp(-2).apply { leftMargin = a.dp(8) })
-    card.addView(buttons, lp(top = a.dp(12)))
-    card.addView(a.button("Import a file…", Kind.Ghost) { if (!busy) import(a) }, lp(-2, top = a.dp(6)))
-    if (busy) {
-        val r = a.row()
-        r.addView(ProgressBar(a), LinearLayout.LayoutParams(a.dp(22), a.dp(22)))
-        r.addView(a.label(st.busy ?: "", 13f, p.muted).apply { setPadding(a.dp(10), 0, 0, 0) })
-        card.addView(r, lp(top = a.dp(10)))
+    val pick = a.row()
+    pick.addView(a.button("Choose a file…", Kind.Primary, R.drawable.ic_import) { if (!st.busy) import(a) })
+    if (st.busy) {
+        pick.addView(ProgressBar(a), LinearLayout.LayoutParams(a.dp(22), a.dp(22)).apply { leftMargin = a.dp(14) })
+        pick.addView(a.label("Importing…", 13.5f, p.muted).apply { setPadding(a.dp(8), 0, 0, 0) })
     }
+    card.addView(pick, lp(top = a.dp(16)))
     col.addView(card, lp(top = a.dp(4)))
 
-    st.error?.let { err ->
-        val box = a.column().apply {
-            background = rounded(alpha(p.danger, 0.12f), a.dpf(12), alpha(p.danger, 0.6f), a.dp(1))
-            setPadding(a.dp(16), a.dp(12), a.dp(16), a.dp(12))
-        }
-        box.addView(a.label("Couldn't download", 14f, p.danger, bold = true))
-        box.addView(a.label(err, 13.5f, p.text), lp(top = a.dp(4)))
-        val restricted = err.lowercase().let { "restricted" in it || "log in" in it }
-        if (restricted) box.addView(a.button("Sign in to AO3") { a.show(2) }, lp(-2, top = a.dp(10)))
-        col.addView(box, lp(top = a.dp(12)))
-    }
-
-    st.preview?.let { m ->
+    st.error?.let { col.addView(a.notice("Couldn't import that file", it), lp(top = a.dp(12))) }
+    if (st.error == null) st.done?.let { m ->
         val c = a.card()
-        c.addView(a.label("Saved to your library", 12.5f, p.success, bold = true))
-        c.addView(a.label(m.getString("title"), 18f, p.text, bold = true, lines = 2), lp(top = a.dp(6)))
-        c.addView(a.label("by " + m.getJSONArray("authors").strings().joinToString(", "), 13.5f, p.muted), lp(top = a.dp(2)))
-        val summary = m.getString("summary").split(Regex("\\s+")).joinToString(" ").trim()
-        if (summary.isNotEmpty()) c.addView(a.label(summary, 13.5f, alpha(p.text, 0.85f), lines = 4), lp(top = a.dp(8)))
-        c.addView(a.label("${thousands(m.getLong("words"))} words  ·  ${m.getInt("chapters")} chapters", 12.5f, p.muted), lp(top = a.dp(8)))
-        c.addView(a.button("Open in reader", Kind.Primary) { a.openWork(m.getString("id")) }, lp(-2, top = a.dp(10)))
+        val r = a.row()
+        val t = a.column()
+        t.addView(a.label("Imported", 12.5f, p.success, bold = true))
+        t.addView(a.label(m.getString("title"), 15f, p.text, bold = true, lines = 2))
+        r.addView(t, LinearLayout.LayoutParams(0, -2, 1f))
+        r.addView(a.button("Open", Kind.Tonal, R.drawable.ic_book) { a.openWork(m.getString("id")) })
+        c.addView(r)
         col.addView(c, lp(top = a.dp(12)))
     }
 
-    val tips = a.card()
-    tips.addView(a.label("Tips", 12.5f, p.muted, bold = true))
-    tips.addView(a.label("Paste a link to any chapter or to the work itself; the whole work is downloaded. “Import a file” opens EPUB books (including AO3's EPUB downloads) and AO3 HTML downloads. Works for registered users only need you to sign in under Account. Downloads are saved on this phone, so you can read them offline.", 13f, p.muted), lp(top = a.dp(4)))
-    col.addView(tips, lp(top = a.dp(12)))
+    val export = a.card()
+    export.addView(a.label("Save a work as a file", 15f, p.text))
+    export.addView(a.label("Use ⋮ on a work in your Library to export it as a web page, Markdown or plain text.", 13f, p.muted), lp(top = a.dp(2)))
+    col.addView(export, lp(top = a.dp(18)))
 }
 
-private fun epub(a: MainActivity, input: String) {
-    val id = Regex("(\\d{3,})").find(input)?.value ?: return a.toast("That doesn't look like an AO3 work link or ID.")
-    val tmp = File(a.cacheDir, "ao3_$id.epub")
-    a.fetch.busy = "Downloading the EPUB from AO3…"
-    a.fetch.error = null
-    a.rebuild()
-    Core.background("epub", json("id" to id, "path" to tmp.absolutePath)) { r ->
-        a.fetch.busy = null
-        r.onFailure { a.fetch.error = it.message; a.rebuild() }.onSuccess {
-            a.rebuild()
-            a.onDocument = { _, data ->
-                data?.data?.let { uri -> a.contentResolver.openOutputStream(uri)?.use { out -> tmp.inputStream().use { it.copyTo(out) } } }
-                tmp.delete()
-                a.toast("EPUB saved")
-            }
-            @Suppress("DEPRECATION")
-            a.startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                addCategory(Intent.CATEGORY_OPENABLE)
-                type = "application/epub+zip"
-                putExtra(Intent.EXTRA_TITLE, "ao3_$id.epub")
-            }, 2)
-        }
-    }
-}
-
-/** Imports an AO3 .html download or a saved .json work picked with the system file picker. */
+/** Imports an EPUB, an AO3 .html download or a saved .json work picked with the system file picker. */
 private fun import(a: MainActivity) {
+    val st = a.imports
     a.onDocument = { _, data ->
         val uri = data?.data
         if (uri != null) {
             val tmp = File(a.cacheDir, "import.bin")
             a.contentResolver.openInputStream(uri)?.use { input -> tmp.outputStream().use { input.copyTo(it) } }
-            a.fetch.busy = "Importing the file…"
+            st.busy = true
+            st.error = null
             a.rebuild()
             Core.background("import", json("path" to tmp.absolutePath)) { r ->
-                a.fetch.busy = null
+                st.busy = false
                 tmp.delete()
                 r.onSuccess {
-                    val o = it as org.json.JSONObject
-                    a.fetch.preview = o.getJSONObject("meta")
-                    a.openWork(o.getString("id"))
-                }.onFailure { a.fetch.error = it.message; a.rebuild() }
+                    st.done = (it as org.json.JSONObject).getJSONObject("meta")
+                    a.toast("Imported “${st.done?.optString("title")}”")
+                }.onFailure { st.error = it.message }
+                if (a.currentTab == MainActivity.IMPORT) a.rebuild()
             }
         }
     }
@@ -180,13 +143,13 @@ fun accountScreen(a: MainActivity): View = scroll(a, "Account") { col ->
         val pass = a.input("Password", password = true)
         form.addView(user, lp(top = a.dp(12)))
         form.addView(pass, lp(top = a.dp(8)))
-        val msg = a.label("", 13f, p.danger)
+        val msg = a.label("", 13f, p.dangerText)
         fun login() {
             if (user.text.isBlank() || pass.text.isEmpty()) return
             msg.setTextColor(p.muted)
             msg.text = "Signing in…"
             Core.background("login", json("user" to user.text.toString().trim(), "pass" to pass.text.toString())) { r ->
-                r.onSuccess { a.toast("Signed in to AO3"); a.rebuild() }.onFailure { msg.setTextColor(p.danger); msg.text = it.message }
+                r.onSuccess { a.toast("Signed in to AO3"); a.rebuild() }.onFailure { msg.setTextColor(p.dangerText); msg.text = it.message }
             }
         }
         pass.imeOptions = EditorInfo.IME_ACTION_DONE
@@ -202,7 +165,7 @@ fun accountScreen(a: MainActivity): View = scroll(a, "Account") { col ->
             msg.setTextColor(p.muted)
             msg.text = "Checking the cookie with AO3…"
             Core.background("cookie", json("value" to cookie.text.toString())) { r ->
-                r.onSuccess { a.toast("Signed in to AO3"); a.rebuild() }.onFailure { msg.setTextColor(p.danger); msg.text = it.message }
+                r.onSuccess { a.toast("Signed in to AO3"); a.rebuild() }.onFailure { msg.setTextColor(p.dangerText); msg.text = it.message }
             }
         }, lp(-2, top = a.dp(8)))
         col.addView(form, lp(top = a.dp(12)))
@@ -243,9 +206,9 @@ private fun toggle(a: MainActivity, parent: LinearLayout, title: String, sub: St
     parent.addView(settingRow(a, title, sub, sw), lp(bottom = a.dp(6)))
 }
 
-private fun slider(a: MainActivity, parent: LinearLayout, title: String, key: String, min: Float, max: Float, step: Float, fmt: (Float) -> String) {
+private fun slider(a: MainActivity, parent: LinearLayout, title: String, key: String, min: Float, max: Float, step: Float, inTypo: Boolean = true, fmt: (Float) -> String) {
     val p = Settings.pal
-    val t = Settings.typo
+    val t = if (inTypo) Settings.typo else Settings.config
     val box = a.column().apply {
         background = rounded(p.card, a.dpf(10), p.border, a.dp(1))
         setPadding(a.dp(16), a.dp(12), a.dp(16), a.dp(8))
@@ -259,12 +222,12 @@ private fun slider(a: MainActivity, parent: LinearLayout, title: String, key: St
     box.addView(SeekBar(a).apply {
         this.max = steps
         progress = ((t.optDouble(key).toFloat() - min) / step).toInt().coerceIn(0, steps)
-        progressTintList = android.content.res.ColorStateList.valueOf(p.accent)
-        thumbTintList = android.content.res.ColorStateList.valueOf(p.accent)
+        progressTintList = android.content.res.ColorStateList.valueOf(p.accentMark)
+        thumbTintList = android.content.res.ColorStateList.valueOf(p.accentMark)
         setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(s: SeekBar?, v: Int, user: Boolean) {
                 val f = min + v * step
-                t.put(key, f.toDouble())
+                if (inTypo) t.put(key, f.toDouble()) else t.put(key, f.toInt())
                 value.text = fmt(f)
             }
             override fun onStartTrackingTouch(s: SeekBar?) {}
@@ -276,9 +239,14 @@ private fun slider(a: MainActivity, parent: LinearLayout, title: String, key: St
 
 fun settingsScreen(a: MainActivity): View {
     val version = a.packageManager.getPackageInfo(a.packageName, 0).versionName
-    return scroll(a, "Settings", "v$version") { col ->
+    return scroll(a, "Settings") { col ->
         val p = Settings.pal
         val t = Settings.typo
+
+        section(a, col, "Account")
+        val session = Core.obj("session")
+        val who = if (session.getBoolean("signed_in")) "Signed in as ${session.optString("username").ifEmpty { "an AO3 user" }}" else "Not signed in"
+        col.addView(settingRow(a, "AO3 account", who, a.button(if (session.getBoolean("signed_in")) "Manage" else "Sign in") { a.show(MainActivity.ACCOUNT) }), lp(bottom = a.dp(6)))
 
         section(a, col, "Theme")
         val themes = a.column()
@@ -287,7 +255,7 @@ fun settingsScreen(a: MainActivity): View {
             pair.forEach { th ->
                 val sel = th.id == Settings.pal.id
                 val c = a.column().apply {
-                    background = rounded(th.bg, a.dpf(12), if (sel) th.accent else p.border, a.dp(if (sel) 3 else 1))
+                    background = rounded(th.bg, a.dpf(12), if (sel) p.text else p.border, a.dp(if (sel) 2 else 1))
                     setPadding(a.dp(14), a.dp(12), a.dp(14), a.dp(12))
                     setOnClickListener {
                         Settings.config.put("theme", th.id)
@@ -312,6 +280,27 @@ fun settingsScreen(a: MainActivity): View {
         toggle(a, col, "Author notes before chapters", null, "show_chapter_pre_notes")
         toggle(a, col, "Author notes after chapters", null, "show_chapter_post_notes")
         toggle(a, col, "Progress bar", "Chapter, page and time left under the text.", "show_reading_progress_bar")
+        toggle(a, col, "Animations", "Page turns when you swipe, and screen and menu transitions. Tapping the sides always turns instantly.", "animations", inTypo = false)
+
+        section(a, col, "Reading speed")
+        val speed = Core.obj("speed")
+        val manual = Settings.config.optInt("words_per_minute", 230)
+        val learned = if (speed.isNull("measured")) null else speed.getInt("measured")
+        val speedSub = if (learned != null) "About $learned words a minute, learned from ${readingTime(speed.getInt("minutes"))} of your reading. Used for the time left in a work."
+        else "Learned from how fast you turn pages, after a few minutes of reading. Until then, $manual words a minute is used."
+        val auto = Settings.config.optBoolean("auto_reading_speed", true)
+        val autoSwitch = Switch(a).apply {
+            isChecked = auto
+            thumbTintList = android.content.res.ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()), intArrayOf(p.onAccent, p.muted))
+            trackTintList = android.content.res.ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()), intArrayOf(p.accent, p.border))
+            setOnCheckedChangeListener { _, v -> Settings.config.put("auto_reading_speed", v); Settings.save(); a.rebuild() }
+        }
+        col.addView(settingRow(a, "Work out my reading speed", speedSub, autoSwitch), lp(bottom = a.dp(6)))
+        if (!auto) slider(a, col, "Reading speed", "words_per_minute", 120f, 500f, 10f, inTypo = false) { "${it.toInt()} wpm" }
+        else if (speed.optBoolean("has_data")) col.addView(settingRow(a, "Start over", "Forget the reading measured so far, e.g. if someone else has been reading.", a.button("Reset") {
+            Core.req("speed.reset")
+            a.rebuild()
+        }), lp(bottom = a.dp(6)))
 
         section(a, col, "Text")
         val fonts = listOf("SansSerif" to "Sans", "Serif" to "Serif", "Monospace" to "Mono")
@@ -328,6 +317,24 @@ fun settingsScreen(a: MainActivity): View {
         }.apply { layoutParams = LinearLayout.LayoutParams(a.dp(190), -2) }), lp(bottom = a.dp(6)))
         toggle(a, col, "Indent first line of paragraphs", null, "indent_paragraphs")
 
+        // The app's own interface font; most people never change it.
+        section(a, col, "Advanced")
+        val faces = listOf<Pair<String?, String>>(null to "Default", "serif" to "Serif", "monospace" to "Mono", "sans-serif-condensed" to "Narrow")
+        val curFace = faces.indexOfFirst { it.first == Settings.uiFamily }.coerceAtLeast(0)
+        val faceBox = a.column().apply {
+            background = rounded(p.card, a.dpf(10), p.border, a.dp(1))
+            setPadding(a.dp(16), a.dp(12), a.dp(12), a.dp(12))
+        }
+        faceBox.addView(a.label("Interface font", 15f, p.text))
+        faceBox.addView(a.label("Menus, buttons and labels. Default keeps the phone's own font.", 12.5f, p.muted))
+        faceBox.addView(a.segmented(faces.map { it.second }, curFace) { i ->
+            t.put("ui_font", faces[i].first ?: org.json.JSONObject.NULL); Settings.save(); a.rebuild()
+        }, lp(top = a.dp(10)))
+        col.addView(faceBox, lp(bottom = a.dp(6)))
+
+        section(a, col, "Import")
+        col.addView(settingRow(a, "Import a file", "EPUB books, AO3 web pages and works saved by this app.", a.button("Open") { a.show(MainActivity.IMPORT) }), lp(bottom = a.dp(6)))
+
         section(a, col, "Storage")
         val dir = Core.obj("storage").getString("dir")
         col.addView(settingRow(a, "Library folder", dir, null), lp(bottom = a.dp(6)))
@@ -343,6 +350,6 @@ fun settingsScreen(a: MainActivity): View {
 
         section(a, col, "About")
         col.addView(settingRow(a, "AO3 Reader $version",
-            "A lightweight reader for Archive of Our Own: native Android views on top of the same Rust core as the desktop app.", null), lp(bottom = a.dp(6)))
+            "A lightweight, unofficial reader for Archive of Our Own. Find works and save them to read offline, turn pages like a book or scroll, choose your own fonts and themes, and follow the authors and tags you love. It's small and quick, and your library stays on this phone.\n\nNot affiliated with the Organization for Transformative Works. The AO3 logo is their trademark.", null), lp(bottom = a.dp(6)))
     }
 }

@@ -1,5 +1,5 @@
-//! Settings screen: reading behaviour, typography with live preview, themes, shortcuts,
-//! storage and updates, about.
+//! Settings screen: reading behaviour, typography with live preview, themes, importing files,
+//! shortcuts, storage and updates, about.
 
 use super::app::{reader_family, reader_font_label};
 use super::gfx::*;
@@ -19,6 +19,18 @@ pub enum SettingsAction {
     PickFontFile,
     Open(String),
     ClearCache,
+    /// Pick a file to import.
+    Import,
+    OpenWork(String),
+}
+
+/// The Import page's progress.
+#[derive(Default)]
+pub struct ImportState {
+    pub busy: bool,
+    pub error: Option<String>,
+    /// The work imported last: (id, title).
+    pub done: Option<(String, String)>,
 }
 
 pub struct SettingsCtx<'a> {
@@ -32,25 +44,50 @@ pub struct SettingsCtx<'a> {
 pub struct SettingsScreen {
     tab: usize,
     font_query: String,
+    /// The interface font list is open (Typography → Advanced).
+    ui_font_open: bool,
+    ui_font_query: String,
     confirm_clear: bool,
+    pub import: ImportState,
 }
 
-const TABS: [(&str, &str); 6] = [
+const TABS: [(&str, &str); 7] = [
     (icons::READING, "Reading"),
     (icons::FONT, "Typography"),
     (icons::COLOR, "Themes"),
+    (icons::IMPORT, "Import"),
     (icons::KEYBOARD, "Shortcuts"),
     (icons::STORAGE, "Storage & updates"),
     (icons::INFO, "About"),
 ];
 const TAB_TYPOGRAPHY: usize = 1;
-const TAB_STORAGE: usize = 4;
-const TAB_ABOUT: usize = 5;
+const TAB_IMPORT: usize = 3;
+const TAB_STORAGE: usize = 5;
 
 const PREVIEW_TEXT: [&str; 2] = [
     "The library was quiet in the way only old libraries are quiet: not silent, but hushed, as though the books themselves were holding their breath between pages.",
     "She ran a finger along the spines until one of them, bound in faded green cloth, seemed to lean out to meet her. “Well,” she said softly, “hello to you too.”",
 ];
+
+/// "45 minutes", "3 h 20 min".
+fn reading_time(minutes: u32) -> String {
+    match minutes {
+        0..=1 => "a minute".into(),
+        2..=59 => format!("{minutes} minutes"),
+        _ if minutes % 60 == 0 => format!("{} h", minutes / 60),
+        _ => format!("{} h {} min", minutes / 60, minutes % 60),
+    }
+}
+
+/// The face a font list entry is drawn in.
+fn choice_family(choice: &FontFamilyChoice) -> Family {
+    match choice {
+        FontFamilyChoice::Custom(n) => Family::Named { name: n.clone(), file: None },
+        FontFamilyChoice::Serif => Family::Named { name: "Georgia".into(), file: None },
+        FontFamilyChoice::Monospace => Family::Mono,
+        FontFamilyChoice::SansSerif => Family::Named { name: "Segoe UI".into(), file: None },
+    }
+}
 
 /// Keeps a whole char boundary when shortening text for display.
 fn truncate_chars(s: &str, max: usize) -> String {
@@ -73,6 +110,10 @@ impl SettingsScreen {
         self.tab = TAB_TYPOGRAPHY;
     }
 
+    pub fn show_import(&mut self) {
+        self.tab = TAB_IMPORT;
+    }
+
     pub fn frame(&mut self, ui: &mut Ui, body: Rect, ctx: &mut SettingsCtx) -> Vec<SettingsAction> {
         let mut out = Vec::new();
         let c = ui.c;
@@ -80,11 +121,9 @@ impl SettingsScreen {
         let x = body.x + (body.w - w) / 2.0;
 
         let title = ui.text("Settings", &TextStyle::ui(26.0).semibold(), x, body.y + 22.0, c.text);
-        let ver = format!("AO3 Reader v{CURRENT_VERSION} · native preview");
-        ui.text(&ver, &TextStyle::ui(SMALL), x + title.w + 14.0, body.y + 22.0 + title.h - 18.0, c.muted);
 
         let tabs_y = body.y + 22.0 + title.h + 14.0;
-        let (tabs_h, changed) = ui.tab_strip(id("settings-tabs"), x - 4.0, tabs_y, w + 8.0, &TABS, &mut self.tab);
+        let (tabs_h, changed) = ui.tab_strip(id("settings-tabs"), x - 4.0, tabs_y, w + 8.0, &TABS, &[], &mut self.tab);
         let scroll_id = id("settings-scroll");
         if changed {
             ui.scroll_to_top(scroll_id);
@@ -100,8 +139,9 @@ impl SettingsScreen {
                 0 => self.reading_tab(ui, &mut col, ctx, &mut out),
                 1 => self.typography_tab(ui, &mut col, ctx, &mut out),
                 2 => self.themes_tab(ui, &mut col, ctx, &mut out),
-                3 => self.shortcuts_tab(ui, &mut col),
-                4 => self.storage_tab(ui, &mut col, ctx, &mut out),
+                3 => self.import_tab(ui, &mut col, &mut out),
+                4 => self.shortcuts_tab(ui, &mut col),
+                5 => self.storage_tab(ui, &mut col, ctx, &mut out),
                 _ => self.about_tab(ui, &mut col, &mut out),
             }
             col.y + 32.0 - y0
@@ -193,11 +233,25 @@ impl SettingsScreen {
             &mut ctx.config.auto_next_chapter,
         );
 
-        Self::section(ui, col, "Pace");
-        let mut wpm = ctx.config.words_per_minute as f32;
-        if Self::slider_row(ui, col, "wpm", "Reading speed (used for time left)", &mut wpm, (120.0, 500.0, 10.0), |v| format!("{v:.0} wpm")) {
-            ctx.config.words_per_minute = wpm as u32;
-            changed = true;
+        Self::section(ui, col, "Reading speed");
+        let speed = ctx.config.reading_speed;
+        let sub = match speed.wpm() {
+            Some(w) => format!("About {w} words a minute, learned from {} of your reading. Used for the time left in a work.", reading_time(speed.minutes())),
+            None => format!("Learned from how fast you turn pages, after a few minutes of reading. Until then, {} words a minute is used.", ctx.config.words_per_minute),
+        };
+        changed |= Self::toggle_row(ui, col, "auto-wpm", "Work out my reading speed", &sub, &mut ctx.config.auto_reading_speed);
+        if !ctx.config.auto_reading_speed {
+            let mut wpm = ctx.config.words_per_minute as f32;
+            if Self::slider_row(ui, col, "wpm", "Reading speed", &mut wpm, (120.0, 500.0, 10.0), |v| format!("{v:.0} wpm")) {
+                ctx.config.words_per_minute = wpm as u32;
+                changed = true;
+            }
+        } else if speed.secs > 0.0 {
+            let r = Self::row(ui, col, "Start over", "Forget the reading measured so far, e.g. if someone else has been reading.", 96.0, 32.0);
+            if ui.button(id("wpm-reset"), r, "Reset") {
+                ctx.config.reading_speed = Default::default();
+                changed = true;
+            }
         }
 
         if changed {
@@ -224,15 +278,7 @@ impl SettingsScreen {
             changed = true;
         }
 
-        // Search box + font list, each name drawn in its own face.
-        let search = col.take(36.0);
-        col.gap(6.0);
-        let it = ui.measure(icons::SEARCH, &TextStyle::icons(14.0), TextOpts::default());
-        let input_r = Rect::new(search.x + 30.0, search.y, search.w - 30.0, search.h);
-        ui.g.draw_text(it, search.x + 6.0, search.y + (search.h - it.h) / 2.0, c.muted);
-        ui.text_input(id("font-search"), input_r, &mut self.font_query, "Search installed fonts", false);
-
-        let q = self.font_query.trim().to_lowercase();
+        let q = Self::font_search(ui, col, "font-search", &mut self.font_query);
         let mut entries: Vec<(String, FontFamilyChoice)> = Vec::new();
         if q.is_empty() {
             entries.push(("Segoe UI (default)".into(), FontFamilyChoice::SansSerif));
@@ -240,48 +286,9 @@ impl SettingsScreen {
             entries.push(("Monospace".into(), FontFamilyChoice::Monospace));
         }
         entries.extend(ctx.fonts.iter().filter(|f| q.is_empty() || f.to_lowercase().contains(&q)).map(|f| (f.clone(), FontFamilyChoice::Custom(f.clone()))));
-
-        let list_r = col.take(280.0);
-        col.gap(4.0);
-        ui.card(list_r);
-        if entries.is_empty() {
-            let msg = if ctx.fonts.is_empty() { "Loading fonts…" } else { "No installed font matches" };
-            ui.text_in(msg, &TextStyle::ui(13.0), list_r, Align::Center, c.muted);
-        }
         let current = ctx.config.typography.font_family.clone();
-        let mut picked: Option<FontFamilyChoice> = None;
-        ui.scroll_area(id("font-list"), list_r.shrink(1.0), |ui, view, y0| {
-            let total = entries.len() as f32 * FONT_ROW_H;
-            let first = (((view.y - y0) / FONT_ROW_H).floor().max(0.0)) as usize;
-            let last = ((((view.bottom() - y0) / FONT_ROW_H).ceil()) as usize).min(entries.len());
-            for i in first..last {
-                let (name, choice) = &entries[i];
-                let r = Rect::new(view.x + 4.0, y0 + i as f32 * FONT_ROW_H, view.w - 16.0, FONT_ROW_H);
-                let resp = ui.interact(id2(id("font-row"), name), r);
-                let selected = *choice == current;
-                if selected {
-                    ui.g.fill_round(r.shrink2(0.0, 2.0), 4.0, c.accent.alpha(0.16));
-                } else if resp.hovered {
-                    ui.g.fill_round(r.shrink2(0.0, 2.0), 4.0, c.hover());
-                }
-                let family = match choice {
-                    FontFamilyChoice::Custom(n) => Family::Named { name: n.clone(), file: None },
-                    FontFamilyChoice::Serif => Family::Named { name: "Georgia".into(), file: None },
-                    FontFamilyChoice::Monospace => Family::Mono,
-                    FontFamilyChoice::SansSerif => Family::Named { name: "Segoe UI".into(), file: None },
-                };
-                let style = TextStyle { family, ..TextStyle::ui(15.0) };
-                ui.text_in(name, &style, Rect::new(r.x + 12.0, r.y, r.w - 44.0, r.h), Align::Left, c.text);
-                if selected {
-                    let ck = ui.measure(icons::CHECK, &TextStyle::icons(13.0), TextOpts::default());
-                    ui.g.draw_text(ck, r.right() - 24.0, r.y + (r.h - ck.h) / 2.0, c.accent);
-                }
-                if resp.clicked {
-                    picked = Some(choice.clone());
-                }
-            }
-            total
-        });
+        let rows: Vec<(String, Family, bool)> = entries.iter().map(|(n, ch)| (n.clone(), choice_family(ch), *ch == current)).collect();
+        let picked = Self::font_list(ui, col, "font-list", &rows, ctx.fonts.is_empty()).map(|i| entries[i].1.clone());
         if let Some(choice) = picked {
             let t = &mut ctx.config.typography;
             if let FontFamilyChoice::Custom(name) = &choice {
@@ -329,9 +336,90 @@ impl SettingsScreen {
             y += l.h + t.paragraph_spacing;
         }
 
+        // The app's own interface font, for those who want it to match their reading font
+        // or need a plainer one; most people never change it.
+        Self::section(ui, col, "Advanced");
+        let current = ctx.config.typography.ui_font.clone();
+        let sub = format!("Menus, buttons and labels. Now {}.", current.as_deref().unwrap_or("Segoe UI, the Windows default"));
+        let r = Self::row(ui, col, "Interface font", &sub, 196.0, 32.0);
+        let open_label = if self.ui_font_open { "Done" } else { "Change…" };
+        if ui.button_ex(id("ui-font-open"), Rect::new(r.x, r.y, 108.0, r.h), open_label, None, ButtonKind::Secondary, true) {
+            self.ui_font_open = !self.ui_font_open;
+        }
+        if ui.button_ex(id("ui-font-reset"), Rect::new(r.x + 116.0, r.y, 80.0, r.h), "Reset", None, ButtonKind::Secondary, current.is_some()) {
+            ctx.config.typography.ui_font = None;
+            changed = true;
+        }
+        if self.ui_font_open {
+            let q = Self::font_search(ui, col, "ui-font-search", &mut self.ui_font_query);
+            let mut rows: Vec<(String, Family, bool)> = Vec::new();
+            let mut names: Vec<Option<String>> = Vec::new();
+            if q.is_empty() {
+                rows.push(("Segoe UI (default)".into(), Family::Named { name: "Segoe UI".into(), file: None }, current.is_none()));
+                names.push(None);
+            }
+            for f in ctx.fonts.iter().filter(|f| q.is_empty() || f.to_lowercase().contains(&q)) {
+                rows.push((f.clone(), Family::Named { name: f.clone(), file: None }, current.as_deref() == Some(f.as_str())));
+                names.push(Some(f.clone()));
+            }
+            if let Some(i) = Self::font_list(ui, col, "ui-font-list", &rows, ctx.fonts.is_empty()) {
+                ctx.config.typography.ui_font = names[i].clone();
+                changed = true;
+            }
+        }
+
         if changed {
             out.push(SettingsAction::ConfigChanged);
         }
+    }
+
+    /// Search box above a font list; returns the lower-cased query.
+    fn font_search(ui: &mut Ui, col: &mut Col, key: &str, query: &mut String) -> String {
+        let c = ui.c;
+        let search = col.take(36.0);
+        col.gap(6.0);
+        let it = ui.measure(icons::SEARCH, &TextStyle::icons(14.0), TextOpts::default());
+        ui.g.draw_text(it, search.x + 6.0, search.y + (search.h - it.h) / 2.0, c.muted);
+        ui.text_input(id(key), Rect::new(search.x + 30.0, search.y, search.w - 30.0, search.h), query, "Search installed fonts", false);
+        query.trim().to_lowercase()
+    }
+
+    /// A scrolling list of fonts, each name drawn in its own face: (name, face, selected).
+    /// Returns the row clicked.
+    fn font_list(ui: &mut Ui, col: &mut Col, key: &str, rows: &[(String, Family, bool)], loading: bool) -> Option<usize> {
+        let c = ui.c;
+        let list_r = col.take(280.0);
+        col.gap(4.0);
+        ui.card(list_r);
+        if rows.is_empty() {
+            let msg = if loading { "Loading fonts…" } else { "No installed font matches" };
+            ui.text_in(msg, &TextStyle::ui(13.0), list_r, Align::Center, c.muted);
+        }
+        let mut picked = None;
+        ui.scroll_area(id(key), list_r.shrink(1.0), |ui, view, y0| {
+            let first = (((view.y - y0) / FONT_ROW_H).floor().max(0.0)) as usize;
+            let last = ((((view.bottom() - y0) / FONT_ROW_H).ceil()) as usize).min(rows.len());
+            for (i, (name, family, selected)) in rows.iter().enumerate().take(last).skip(first) {
+                let r = Rect::new(view.x + 4.0, y0 + i as f32 * FONT_ROW_H, view.w - 16.0, FONT_ROW_H);
+                let resp = ui.interact(id2(id(key), name), r);
+                if *selected {
+                    ui.g.fill_round(r.shrink2(0.0, 2.0), 4.0, c.selected());
+                } else if resp.hovered {
+                    ui.g.fill_round(r.shrink2(0.0, 2.0), 4.0, c.hover());
+                }
+                let style = TextStyle { family: family.clone(), ..TextStyle::ui(15.0) };
+                ui.text_in(name, &style, Rect::new(r.x + 12.0, r.y, r.w - 44.0, r.h), Align::Left, c.text);
+                if *selected {
+                    let ck = ui.measure(icons::CHECK, &TextStyle::icons(13.0), TextOpts::default());
+                    ui.g.draw_text(ck, r.right() - 24.0, r.y + (r.h - ck.h) / 2.0, c.accent_text);
+                }
+                if resp.clicked {
+                    picked = Some(i);
+                }
+            }
+            rows.len() as f32 * FONT_ROW_H
+        });
+        picked
     }
 
     fn themes_tab(&mut self, ui: &mut Ui, col: &mut Col, ctx: &mut SettingsCtx, out: &mut Vec<SettingsAction>) {
@@ -365,13 +453,69 @@ impl SettingsScreen {
             if selected {
                 let ck = Rect::new(r.right() - 34.0, r.y + 12.0, 22.0, 22.0);
                 ui.g.fill_circle(ck.x + 11.0, ck.y + 11.0, 11.0, Color::rgb(p.accent));
-                ui.text_in(icons::CHECK, &TextStyle::icons(11.0), ck, Align::Center, Color::from_u8(255, 255, 255));
+                ui.text_in(icons::CHECK, &TextStyle::icons(11.0), ck, Align::Center, Color::rgb(p.on_accent()));
             }
             if resp.clicked && !selected {
                 ctx.config.theme = *theme;
                 out.push(SettingsAction::ConfigChanged);
             }
         }
+    }
+
+    fn import_tab(&mut self, ui: &mut Ui, col: &mut Col, out: &mut Vec<SettingsAction>) {
+        let c = ui.c;
+        Self::section(ui, col, "Import a file");
+        let intro = "Add a work you already have as a file. It goes into your library and reads like any downloaded work, offline.";
+        let it = ui.measure(intro, &TextStyle::ui(13.5), TextOpts::wrap(col.w - 36.0).line_height(1.45));
+        let formats: [(&str, &str); 3] = [
+            ("EPUB books", "Including the EPUB files from AO3's Download button."),
+            ("AO3 web pages", "AO3's HTML downloads, or a work's page saved from a browser."),
+            ("AO3 Reader works", "Works saved by this app (.json)."),
+        ];
+        let card = col.take(it.h + 18.0 + formats.len() as f32 * 44.0 + 82.0);
+        col.gap(4.0);
+        ui.card(card);
+        ui.g.draw_text(it, card.x + 18.0, card.y + 16.0, c.muted);
+        let mut y = card.y + 16.0 + it.h + 14.0;
+        for (name, what) in formats {
+            let ck = ui.measure(icons::CHECK, &TextStyle::icons(12.0), TextOpts::default());
+            ui.g.draw_text(ck, card.x + 20.0, y + 3.0, c.success);
+            ui.text(name, &TextStyle::ui(14.0).semibold(), card.x + 44.0, y, c.text);
+            ui.text(what, &TextStyle::ui(12.5), card.x + 44.0, y + 20.0, c.muted);
+            y += 44.0;
+        }
+        let by = card.bottom() - 54.0;
+        let bw = ui.button_width("Choose a file…", Some(icons::OPEN_FILE));
+        if ui.button_ex(id("import-pick"), Rect::new(card.x + 18.0, by, bw, 36.0), "Choose a file…", Some(icons::OPEN_FILE), ButtonKind::Primary, !self.import.busy) {
+            out.push(SettingsAction::Import);
+        }
+        if self.import.busy {
+            ui.spinner(card.x + 34.0 + bw, by + 18.0, 7.0);
+            ui.text("Importing…", &TextStyle::ui(13.5), card.x + 50.0 + bw, by + 9.0, c.muted);
+        }
+
+        if let Some(err) = self.import.error.clone() {
+            let t = ui.measure(&err, &TextStyle::ui(13.5), TextOpts::wrap(col.w - 58.0).line_height(1.35));
+            col.gap(8.0);
+            let r = col.take(t.h + 52.0);
+            col.gap(4.0);
+            ui.notice(r, "Couldn't import that file");
+            ui.g.draw_text(t, r.x + 40.0, r.y + 36.0, c.text.alpha(0.85));
+        } else if let Some((wid, title)) = self.import.done.clone() {
+            col.gap(8.0);
+            let r = col.take(64.0);
+            col.gap(4.0);
+            ui.card(r);
+            let bw = ui.button_width("Open", Some(icons::READING)).max(96.0);
+            ui.text("Imported", &TextStyle::ui(12.5).semibold(), r.x + 18.0, r.y + 12.0, c.success);
+            ui.text_opts(&title, &TextStyle::ui(14.5).semibold(), TextOpts::ellipsize(r.w - bw - 52.0), r.x + 18.0, r.y + 32.0, c.text);
+            if ui.button_ex(id("import-open"), Rect::new(r.right() - 16.0 - bw, r.y + 14.0, bw, 36.0), "Open", Some(icons::READING), ButtonKind::Tonal, true) {
+                out.push(SettingsAction::OpenWork(wid));
+            }
+        }
+
+        Self::section(ui, col, "Export");
+        Self::row(ui, col, "Save a work as a file", "Use ⋯ on a work in your Library to export it as a web page, Markdown or plain text.", 0.0, 0.0);
     }
 
     fn shortcuts_tab(&mut self, ui: &mut Ui, col: &mut Col) {
@@ -491,14 +635,12 @@ impl SettingsScreen {
     fn about_tab(&mut self, ui: &mut Ui, col: &mut Col, out: &mut Vec<SettingsAction>) {
         let c = ui.c;
         col.gap(14.0);
-        let blurb = "A lightweight reader for Archive of Our Own. This native build draws its interface with Direct2D on the CPU and DirectWrite, so no graphics driver is loaded into the app.";
+        let blurb = "A lightweight, unofficial reader for Archive of Our Own. Find works and save them to read offline, turn pages like a book or scroll, choose your own fonts and themes, and follow the authors and tags you love. It's small and quick, and your library stays on this PC.\n\nNot affiliated with the Organization for Transformative Works. The AO3 logo is their trademark.";
         let t = ui.measure(blurb, &TextStyle::ui(13.5), TextOpts::wrap(col.w - 32.0).line_height(1.45));
         let card = col.take(t.h + 96.0);
         col.gap(4.0);
         ui.card(card);
-        let badge = Rect::new(card.x + 16.0, card.y + 18.0, 46.0, 28.0);
-        ui.g.fill_round(badge, 6.0, c.accent);
-        ui.text_in("AO3", &TextStyle::ui(14.0).bold(), badge, Align::Center, c.on_accent);
+        ui.g.fill_path(super::logo::PATH, super::logo::SIZE, Rect::new(card.x + 16.0, card.y + 16.0, 48.0, 34.0), c.accent_mark);
         ui.text("AO3 Reader", &TextStyle::ui(18.0).semibold(), card.x + 74.0, card.y + 16.0, c.text);
         ui.text(&format!("Version {CURRENT_VERSION}"), &TextStyle::ui(SMALL), card.x + 74.0, card.y + 40.0, c.muted);
         ui.g.draw_text(t, card.x + 16.0, card.y + 70.0, c.text);

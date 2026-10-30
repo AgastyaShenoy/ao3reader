@@ -1,5 +1,6 @@
-use crate::ao3::models::{UserSession, Work};
+use crate::ao3::models::{UserSession, Work, WorkMeta};
 use crate::ao3::parser::Ao3Parser;
+use crate::ao3::search::{listing_problem, parse_listing, Feed, Listing, SearchQuery};
 use std::time::Duration;
 use ureq::http::Uri;
 use ureq::{Agent, Cookie, ResponseExt};
@@ -188,6 +189,54 @@ impl Ao3Client {
         }
 
         Ao3Parser::parse_work(&body, &work_id)
+    }
+
+    /// A work's details (title, authors, tags, summary, stats) from its first page, without
+    /// downloading the whole text: the preview shown for a pasted link.
+    pub fn work_meta(&self, work_id_or_url: &str) -> Result<WorkMeta, String> {
+        let work_id = Ao3Parser::extract_work_id(work_id_or_url)
+            .ok_or_else(|| format!("Invalid AO3 Work ID or URL: '{work_id_or_url}'"))?;
+        let url = format!("{AO3_BASE_URL}/works/{work_id}?view_adult=true");
+        let (status, _, body) = self.get_page(&url).map_err(|e| format!("Couldn't reach AO3: {e}"))?;
+        match status {
+            200..=299 => {}
+            404 => return Err(format!("Work #{work_id} was not found on AO3 (404). It might have been deleted.")),
+            429 => return Err("AO3 rate limit reached (HTTP 429). Please wait a few moments before trying again.".to_string()),
+            _ => return Err(unavailable_message(status)),
+        }
+        let doc = scraper::Html::parse_document(&body);
+        if Ao3Parser::is_restricted_page(&doc) {
+            return Err("This work is restricted to registered AO3 users. Sign in to AO3 under Account to read it.".to_string());
+        }
+        let meta = Ao3Parser::parse_metadata(&doc, &work_id);
+        if meta.title.trim().is_empty() {
+            return Err("AO3's page for this work didn't show its details. It may be hidden, or need you to sign in.".to_string());
+        }
+        Ok(meta)
+    }
+
+    /// One page of a URL that lists works (search results, or a tag, author or collection).
+    fn listing(&self, url: &str, page: u32) -> Result<Listing, String> {
+        let (status, _, body) = self.get_page(url).map_err(|e| format!("Couldn't reach AO3: {e}"))?;
+        match status {
+            200..=299 => match listing_problem(&body) {
+                Some(problem) => Err(problem),
+                None => Ok(parse_listing(&body, page)),
+            },
+            404 => Err("AO3 couldn't find that page (404). Check the name or link.".to_string()),
+            429 => Err("AO3 rate limit reached (HTTP 429). Please wait a few moments before trying again.".to_string()),
+            _ => Err(unavailable_message(status)),
+        }
+    }
+
+    /// Runs a work search; `page` is 1-based.
+    pub fn search(&self, query: &SearchQuery, page: u32) -> Result<Listing, String> {
+        self.listing(&query.url(page), page)
+    }
+
+    /// Newest works of an author, tag or collection; `page` is 1-based.
+    pub fn feed(&self, feed: &Feed, page: u32) -> Result<Listing, String> {
+        self.listing(&feed.url(page), page)
     }
 
     /// Leave kudos on an AO3 work

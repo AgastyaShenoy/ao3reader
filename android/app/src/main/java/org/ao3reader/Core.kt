@@ -21,6 +21,8 @@ object Core {
     private external fun call(method: String, arg: String): String
 
     private val worker = Executors.newSingleThreadExecutor()
+    /** Long batches (checking followed feeds) run here so they don't hold up downloads. */
+    private val slowWorker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
 
     fun req(method: String, arg: JSONObject = JSONObject()): Any? {
@@ -33,8 +35,8 @@ object Core {
     fun arr(method: String, arg: JSONObject = JSONObject()): JSONArray = req(method, arg) as JSONArray
 
     /** Runs a (possibly slow, network) call off the UI thread and delivers the result on it. */
-    fun background(method: String, arg: JSONObject, done: (Result<Any?>) -> Unit) {
-        worker.execute {
+    fun background(method: String, arg: JSONObject, slow: Boolean = false, done: (Result<Any?>) -> Unit) {
+        (if (slow) slowWorker else worker).execute {
             val r = runCatching { req(method, arg) }
             main.post { done(r) }
         }

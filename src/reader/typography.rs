@@ -145,6 +145,9 @@ pub struct TypographySettings {
     pub custom_font_name: Option<String>,
     #[serde(default)]
     pub custom_font_path: Option<std::path::PathBuf>,
+    /// Font for the app's own interface (menus, buttons, labels); None keeps the system face.
+    #[serde(default)]
+    pub ui_font: Option<String>,
 }
 
 impl Default for TypographySettings {
@@ -168,6 +171,7 @@ impl Default for TypographySettings {
             page_flip_mouse_wheel: true,
             custom_font_name: None,
             custom_font_path: None,
+            ui_font: None,
         }
     }
 }

@@ -68,7 +68,7 @@ class MemoryCard(private val a: MainActivity) : LinearLayout(a) {
             head.addView(value)
             addView(head, lp(top = a.dp(10)))
             val track = a.row().apply { background = rounded(alpha(p.text, 0.08f), a.dpf(2)) }
-            val bar = View(a).apply { background = rounded(p.accent, a.dpf(2)) }
+            val bar = View(a).apply { background = rounded(p.accentMark, a.dpf(2)) }
             val rest = View(a)
             track.addView(bar, LayoutParams(0, -1, 0f))
             track.addView(rest, LayoutParams(0, -1, 1f))

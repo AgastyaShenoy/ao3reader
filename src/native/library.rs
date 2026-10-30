@@ -3,7 +3,7 @@
 
 use super::gfx::*;
 use super::icons;
-use super::reader::preface::{category_color, rating_color, thousands};
+use super::reader::preface::thousands;
 use super::ui::*;
 use crate::ao3::models::{LibraryEntry, ShelfStatus};
 use crate::storage::library::LibraryManager;
@@ -25,7 +25,8 @@ pub enum LibraryAction {
     SetShelf(String, ShelfStatus),
     Export(String, ExportFormat),
     Delete(String),
-    GoFetch,
+    GoSearch,
+    GoImport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,28 +82,19 @@ impl LibraryScreen {
         let all: Vec<&LibraryEntry> = library.entries().values().collect();
 
         let title = ui.text("Library", &TextStyle::ui(26.0).semibold(), x, body.y + 22.0, c.text);
-        let count = format!("{} works", all.len());
-        ui.text(&count, &TextStyle::ui(SMALL), x + title.w + 14.0, body.y + 22.0 + title.h - 18.0, c.muted);
         let search_w = (w * 0.38).clamp(200.0, 320.0);
         let search = Rect::new(x + w - search_w, body.y + 22.0, search_w, 36.0);
         let it = ui.measure(icons::SEARCH, &TextStyle::icons(14.0), TextOpts::default());
         ui.g.draw_text(it, search.x - 24.0, search.y + (36.0 - it.h) / 2.0, c.muted);
         ui.text_input(id("lib-search"), search, &mut self.query, "Search title, author, fandom, tag", false);
 
-        // Filters with counts, and sorting.
+        // Filters, each with a count badge (none for an empty shelf), and sorting.
         let y = body.y + 22.0 + title.h + 14.0;
-        let counts: Vec<usize> = (0..5).map(|f| all.iter().filter(|e| in_filter(e, f)).count()).collect();
-        let labels = [
-            format!("All {}", counts[0]),
-            format!("Reading {}", counts[1]),
-            format!("Completed {}", counts[2]),
-            format!("For later {}", counts[3]),
-            format!("Favorites {}", counts[4]),
-        ];
-        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let names = ["All", "Reading", "Completed", "For later", "Favorites"];
+        let items: Vec<(&str, usize)> = names.iter().enumerate().map(|(f, n)| (*n, all.iter().filter(|e| in_filter(e, f)).count())).collect();
         let sort_w = 170.0;
-        let seg_w = (w - sort_w - 12.0).min(620.0);
-        if ui.segmented(id("lib-filter"), Rect::new(x, y, seg_w, 34.0), &label_refs, &mut self.filter) {
+        let seg_w = (w - sort_w - 12.0).min(660.0);
+        if ui.segmented_counts(id("lib-filter"), Rect::new(x, y, seg_w, 34.0), &items, &mut self.filter, Badge::Count) {
             ui.scroll_to_top(id("lib-list"));
         }
         let sort_label = SORTS.iter().find(|(s, _)| *s == self.sort).map_or("", |(_, l)| l);
@@ -125,16 +117,21 @@ impl LibraryScreen {
         if list.is_empty() {
             let r = Rect::new(x, top + 4.0, w, 150.0);
             ui.card(r);
-            let (msg, show_fetch) = if all.is_empty() {
-                ("Your library is empty. Download a work from AO3 to start reading.", true)
+            let (msg, empty) = if all.is_empty() {
+                ("Your library is empty. Search AO3 or paste a link to a work to start reading.", true)
             } else {
                 ("No works match this search or filter.", false)
             };
             ui.text_in(msg, &TextStyle::ui(14.0), Rect::new(r.x, r.y + 30.0, r.w, 24.0), Align::Center, c.muted);
-            if show_fetch {
-                let bw = ui.button_width("Fetch a work", Some(icons::DOWNLOAD));
-                if ui.button_ex(id("lib-empty-fetch"), Rect::new(r.x + (r.w - bw) / 2.0, r.y + 76.0, bw, 36.0), "Fetch a work", Some(icons::DOWNLOAD), ButtonKind::Primary, true) {
-                    out.push(LibraryAction::GoFetch);
+            if empty {
+                let sw = ui.button_width("Search AO3", Some(icons::SEARCH));
+                let iw = ui.button_width("Import a file", Some(icons::OPEN_FILE));
+                let bx = r.x + (r.w - sw - 8.0 - iw) / 2.0;
+                if ui.button_ex(id("lib-empty-search"), Rect::new(bx, r.y + 76.0, sw, 36.0), "Search AO3", Some(icons::SEARCH), ButtonKind::Primary, true) {
+                    out.push(LibraryAction::GoSearch);
+                }
+                if ui.button_ex(id("lib-empty-import"), Rect::new(bx + sw + 8.0, r.y + 76.0, iw, 36.0), "Import a file", Some(icons::OPEN_FILE), ButtonKind::Secondary, true) {
+                    out.push(LibraryAction::GoImport);
                 }
             }
             return out;
@@ -181,10 +178,9 @@ fn card(ui: &mut Ui, r: Rect, e: &LibraryEntry, confirming: bool, out: &mut Vec<
         ui.g.draw_text(t, heart.x + (heart.w - t.w) / 2.0, heart.y + (heart.h - t.h) / 2.0, Color::from_u8(225, 29, 72));
     }
     let tw = r.w - 92.0;
-    ui.g.fill_round(Rect::new(r.x + 16.0, r.y + 17.0, 4.0, 22.0), 2.0, rating_color(m));
-    let title_r = Rect::new(r.x + 28.0, r.y + 14.0, tw - 12.0, 28.0);
+    let title_r = Rect::new(r.x + 16.0, r.y + 14.0, tw, 28.0);
     let tresp = ui.interact(id2(id("lib-title"), wid), title_r);
-    let tt = ui.text_opts(&m.title, &TextStyle::ui(17.0).semibold(), TextOpts::ellipsize(tw - 12.0), title_r.x, title_r.y, c.text);
+    let tt = ui.text_opts(&m.title, &TextStyle::ui(17.0).semibold(), TextOpts::ellipsize(tw), title_r.x, title_r.y, c.text);
     if tresp.hovered {
         ui.g.fill_rect(Rect::new(title_r.x, title_r.y + tt.h - 1.0, tt.w, 1.0), c.text.alpha(0.6));
     }
@@ -198,18 +194,7 @@ fn card(ui: &mut Ui, r: Rect, e: &LibraryEntry, confirming: bool, out: &mut Vec<
     ui.text_opts(&byline, &TextStyle::ui(13.0), TextOpts::ellipsize(tw), r.x + 16.0, r.y + 44.0, c.muted);
 
     // Tag pills on one row, clipped to the card.
-    let white = Color::from_u8(255, 255, 255);
-    let mut pills: Vec<(String, Color, Color, bool)> = Vec::new();
-    for cat in &m.categories {
-        pills.push((cat.display_name().to_string(), category_color(cat), white, false));
-    }
-    for wn in m.warnings.iter().filter(|w| !w.contains("No Archive Warnings")) {
-        pills.push((wn.clone(), Color::from_u8(180, 40, 40), white, false));
-    }
-    for rel in m.relationships.iter().take(3) {
-        pills.push((rel.clone(), c.accent, c.text, true));
-    }
-    pills.push((if m.is_complete { "Complete" } else { "In progress" }.to_string(), c.border, c.muted, true));
+    let pills = super::reader::preface::card_pills(m, 3);
     ui.g.push_clip(Rect::new(r.x + 16.0, r.y + 66.0, r.w - 32.0, 26.0));
     super::reader::preface::pills(ui, r.x + 16.0, r.y + 67.0, 10_000.0, &pills);
     ui.g.pop_clip();
@@ -240,7 +225,7 @@ fn card(ui: &mut Ui, r: Rect, e: &LibraryEntry, confirming: bool, out: &mut Vec<
     let shelf_w = 140.0;
     let shelf_r = Rect::new(more.x - 8.0 - shelf_w, by, shelf_w, 34.0);
     let open_r = Rect::new(shelf_r.x - 8.0 - open_w, by, open_w, 34.0);
-    if ui.button_ex(id2(id("lib-open"), wid), open_r, label, Some(icons::READING), ButtonKind::Primary, true) {
+    if ui.button_ex(id2(id("lib-open"), wid), open_r, label, Some(icons::READING), ButtonKind::Tonal, true) {
         out.push(LibraryAction::Open(wid.clone()));
     }
     let shelf_items: Vec<(&str, bool)> = SHELVES.iter().map(|(_, l)| (*l, false)).collect();
@@ -277,7 +262,7 @@ fn card(ui: &mut Ui, r: Rect, e: &LibraryEntry, confirming: bool, out: &mut Vec<
     if bar_w > 30.0 {
         let bar = Rect::new(bar_x, by + 9.0, bar_w, 4.0);
         ui.g.fill_round(bar, 2.0, c.border);
-        ui.g.fill_round(Rect::new(bar.x, bar.y, bar.w * (p.percentage / 100.0).clamp(0.0, 1.0), 4.0), 2.0, c.accent);
+        ui.g.fill_round(Rect::new(bar.x, bar.y, bar.w * (p.percentage / 100.0).clamp(0.0, 1.0), 4.0), 2.0, c.accent_mark);
     }
     result
 }

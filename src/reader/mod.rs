@@ -1,6 +1,7 @@
 #![allow(unused_imports)]
 
 pub mod font_manager;
+pub mod pace;
 pub mod paginator;
 pub mod rich_text;
 pub mod search;

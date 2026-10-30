@@ -40,7 +40,7 @@ fun libraryScreen(a: MainActivity): View {
     val st = a.library
     val all = Core.arr("library").objects()
     val box = a.column()
-    box.addView(a.header("Library", "${all.size} works"))
+    box.addView(a.header("Library", logo = true))
 
     val search = a.input("Search title, author, fandom, tag")
     search.setText(st.query)
@@ -82,8 +82,11 @@ fun libraryScreen(a: MainActivity): View {
         empty.removeAllViews()
         empty.gone(l.isNotEmpty())
         if (all.isEmpty()) {
-            empty.addView(a.label("Your library is empty. Download a work from AO3 to start reading.", 15f, p.muted).apply { gravity = Gravity.CENTER })
-            empty.addView(a.button("Fetch a work", Kind.Primary) { a.show(1) }, lp(LinearLayout.LayoutParams.WRAP_CONTENT, top = a.dp(16)))
+            empty.addView(a.label("Your library is empty. Search AO3 or paste a link to a work to start reading.", 15f, p.muted).apply { gravity = Gravity.CENTER })
+            val buttons = a.row().apply { gravity = Gravity.CENTER }
+            buttons.addView(a.button("Search AO3", Kind.Primary, R.drawable.ic_search) { a.show(MainActivity.SEARCH) })
+            buttons.addView(a.button("Import a file") { a.show(MainActivity.IMPORT) }, lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = a.dp(8) })
+            empty.addView(buttons, lp(top = a.dp(16)))
         } else if (l.isEmpty()) {
             empty.addView(a.label("No works match this search or filter.", 15f, p.muted).apply { gravity = Gravity.CENTER })
         }
@@ -91,12 +94,7 @@ fun libraryScreen(a: MainActivity): View {
         chips.removeAllViews()
         val names = listOf("All", "Reading", "Completed", "For later", "Favorites")
         names.forEachIndexed { f, n ->
-            val sel = f == st.filter
-            val chip = a.label("$n ${all.count { inFilter(it, f) }}", 13.5f, if (sel) p.onAccent else p.text, bold = sel).apply {
-                background = if (sel) rounded(p.accent, a.dpf(16)) else rounded(0, a.dpf(16), p.border, a.dp(1))
-                setPadding(a.dp(14), a.dp(7), a.dp(14), a.dp(7))
-                setOnClickListener { st.filter = f; refresh() }
-            }
+            val chip = a.countChip(n, all.count { inFilter(it, f) }, f == st.filter) { st.filter = f; refresh() }
             chips.addView(chip, lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = a.dp(8) })
         }
         val sort = a.label("⇅ ${SORTS[st.sort]}", 13.5f, p.text).apply {
@@ -131,7 +129,6 @@ private fun workCard(a: MainActivity, e: JSONObject): View {
     val card = a.card()
 
     val top = a.row()
-    top.addView(View(a).apply { background = rounded(Pal.opaque(m.getInt("rating_color")), a.dpf(2)) }, LinearLayout.LayoutParams(a.dp(4), a.dp(22)).apply { rightMargin = a.dp(10) })
     top.addView(a.label(m.getString("title"), 17f, p.text, bold = true, lines = 2).apply { setOnClickListener { a.openWork(id) } },
         LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     val fav = e.getBoolean("favorite")
@@ -145,12 +142,7 @@ private fun workCard(a: MainActivity, e: JSONObject): View {
     val by = "by " + m.getJSONArray("authors").strings().joinToString(", ") + if (fandoms.isNotEmpty()) "  ·  " + fandoms.joinToString(", ") else ""
     card.addView(a.label(by, 13f, p.muted, lines = 1), lp(top = a.dp(2)))
 
-    val pills = a.row()
-    for (c in m.getJSONArray("categories").objects()) pills.addView(a.pill(c.getString("name"), Pal.opaque(c.getInt("color")), p.onAccent), pillLp(a))
-    for (w in m.getJSONArray("warnings").strings().filter { !it.contains("No Archive Warnings") }) pills.addView(a.pill(w, 0xFFB42828.toInt(), p.onAccent), pillLp(a))
-    for (r in m.getJSONArray("relationships").strings().take(3)) pills.addView(a.pill(r, p.accent, p.text, outlined = true), pillLp(a))
-    pills.addView(a.pill(if (m.getBoolean("complete")) "Complete" else "In progress", p.border, p.muted, outlined = true), pillLp(a))
-    card.addView(HorizontalScrollView(a).apply { isHorizontalScrollBarEnabled = false; addView(pills) }, lp(top = a.dp(10)))
+    card.addView(a.pillScroller(workPills(a, m)), lp(top = a.dp(10)))
 
     val summary = m.getString("summary").split(Regex("\\s+")).joinToString(" ").trim()
     if (summary.isNotEmpty()) card.addView(a.label(summary, 13.5f, alpha(p.text, 0.85f), lines = 3).apply { setLineSpacing(0f, 1.15f) }, lp(top = a.dp(10)))
@@ -168,14 +160,14 @@ private fun workCard(a: MainActivity, e: JSONObject): View {
     prog.addView(ProgressBar(a, null, android.R.attr.progressBarStyleHorizontal).apply {
         max = 1000
         progress = (pct * 10).toInt()
-        progressTintList = android.content.res.ColorStateList.valueOf(p.accent)
+        progressTintList = android.content.res.ColorStateList.valueOf(p.accentMark)
         progressBackgroundTintList = android.content.res.ColorStateList.valueOf(p.border)
     }, LinearLayout.LayoutParams(0, a.dp(4), 1f).apply { leftMargin = a.dp(12) })
     card.addView(prog, lp(top = a.dp(12)))
     card.addView(a.label("${thousands(m.getLong("words"))} words" + if (m.getLong("kudos") > 0) "  ·  ${thousands(m.getLong("kudos"))} kudos" else "", 12f, p.muted), lp(top = a.dp(4)))
 
     val actions = a.row()
-    actions.addView(a.button(if (completed) "Read again" else if (started) "Resume" else "Read", Kind.Primary) { a.openWork(id) })
+    actions.addView(a.button(if (completed) "Read again" else if (started) "Resume" else "Read", Kind.Tonal, R.drawable.ic_book) { a.openWork(id) })
     val shelf = SHELVES.firstOrNull { it.first == e.getString("shelf") }?.second ?: "Reading"
     val shelfBtn = a.button(shelf) {}
     shelfBtn.setOnClickListener {
@@ -206,7 +198,20 @@ private fun workCard(a: MainActivity, e: JSONObject): View {
     return card
 }
 
-private fun pillLp(a: MainActivity) = lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = a.dp(6) }
+/** Rating, categories, warnings (other than "none"), up to `ships` relationships and the
+ *  complete/in-progress status: the pills on a work card. `w` is a work's meta JSON. */
+fun workPills(a: MainActivity, w: JSONObject, ships: Int = 3): LinearLayout {
+    val pills = a.row()
+    val gap = { lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = a.dp(6) } }
+    pills.addView(a.markerPill(w.getString("rating"), Pal.opaque(w.getInt("rating_color"))), gap())
+    for (c in w.getJSONArray("categories").objects()) pills.addView(a.markerPill(c.getString("name"), Pal.opaque(c.getInt("color"))), gap())
+    for (x in w.getJSONArray("warnings").strings().filter { !it.contains("No Archive Warnings") }) pills.addView(a.markerPill(x, WARNING_RED), gap())
+    for (r in w.getJSONArray("relationships").strings().take(ships)) pills.addView(a.shipPill(r), gap())
+    pills.addView(a.tagPill(if (w.getBoolean("complete")) "Complete" else "In progress", quiet = true))
+    return pills
+}
+
+const val WARNING_RED = 0xFFCC3838.toInt()
 
 private fun confirmDelete(a: MainActivity, id: String, title: String) {
     AlertDialog.Builder(a)

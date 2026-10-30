@@ -9,6 +9,7 @@ pub enum ReaderThemeType {
     WarmSepia,
     Nord,
     Midnight,
+    HighContrast,
 }
 
 impl ReaderThemeType {
@@ -20,6 +21,7 @@ impl ReaderThemeType {
             ReaderThemeType::WarmSepia,
             ReaderThemeType::Nord,
             ReaderThemeType::Midnight,
+            ReaderThemeType::HighContrast,
         ]
     }
 
@@ -31,6 +33,7 @@ impl ReaderThemeType {
             ReaderThemeType::WarmSepia => "Warm Sepia",
             ReaderThemeType::Nord => "Nord Arctic",
             ReaderThemeType::Midnight => "Midnight Blue",
+            ReaderThemeType::HighContrast => "High Contrast",
         }
     }
 
@@ -67,7 +70,7 @@ impl ReaderThemeType {
                 surface: Rgb(241, 243, 246),
                 card: Rgb(255, 255, 255),
                 text: Rgb(33, 37, 41),
-                text_muted: Rgb(108, 117, 125),
+                text_muted: Rgb(98, 106, 114),
                 accent: Rgb(153, 0, 0), // AO3 Crimson
                 accent_hover: Rgb(180, 20, 20),
                 border: Rgb(222, 226, 230),
@@ -80,7 +83,7 @@ impl ReaderThemeType {
                 surface: Rgb(242, 229, 201),
                 card: Rgb(247, 236, 211),
                 text: Rgb(74, 59, 50),
-                text_muted: Rgb(138, 120, 107),
+                text_muted: Rgb(112, 95, 83),
                 accent: Rgb(160, 64, 48),
                 accent_hover: Rgb(180, 80, 60),
                 border: Rgb(222, 207, 178),
@@ -93,9 +96,9 @@ impl ReaderThemeType {
                 surface: Rgb(59, 66, 82),
                 card: Rgb(67, 76, 94),
                 text: Rgb(236, 239, 244),
-                text_muted: Rgb(163, 190, 140),
-                accent: Rgb(191, 97, 106), // Nord Red
-                accent_hover: Rgb(208, 114, 123),
+                text_muted: Rgb(184, 192, 208),
+                accent: Rgb(176, 82, 92), // Nord Red, deepened for white text
+                accent_hover: Rgb(191, 97, 106),
                 border: Rgb(76, 86, 106),
                 quote_bg: Rgb(51, 58, 72),
                 notes_bg: Rgb(54, 61, 76),
@@ -114,6 +117,21 @@ impl ReaderThemeType {
                 notes_bg: Rgb(24, 36, 61),
                 is_dark: true,
             },
+            // White on black with bright edges, and the classic high-contrast yellow for the
+            // accent (with black text on it): every role is far past the WCAG minimums.
+            ReaderThemeType::HighContrast => ThemePalette {
+                bg: Rgb(0, 0, 0),
+                surface: Rgb(0, 0, 0),
+                card: Rgb(0, 0, 0),
+                text: Rgb(255, 255, 255),
+                text_muted: Rgb(214, 214, 214),
+                accent: Rgb(255, 214, 10),
+                accent_hover: Rgb(255, 228, 92),
+                border: Rgb(170, 170, 170),
+                quote_bg: Rgb(18, 18, 18),
+                notes_bg: Rgb(14, 14, 14),
+                is_dark: true,
+            },
         }
     }
 }
@@ -121,6 +139,38 @@ impl ReaderThemeType {
 /// An sRGB colour, independent of any UI toolkit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
+
+impl Rgb {
+    /// WCAG relative luminance.
+    pub fn luminance(self) -> f32 {
+        let lin = |c: u8| {
+            let c = c as f32 / 255.0;
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * lin(self.0) + 0.7152 * lin(self.1) + 0.0722 * lin(self.2)
+    }
+
+    /// WCAG contrast ratio between two colours (1–21).
+    pub fn contrast(self, o: Rgb) -> f32 {
+        let (a, b) = (self.luminance(), o.luminance());
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    pub fn mix(self, o: Rgb, t: f32) -> Rgb {
+        let m = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+        Rgb(m(self.0, o.0), m(self.1, o.1), m(self.2, o.2))
+    }
+
+    /// This colour, moved toward `toward` just far enough to reach `ratio` contrast on `on`.
+    pub fn with_contrast(self, on: Rgb, toward: Rgb, ratio: f32) -> Rgb {
+        (0..=20).map(|i| self.mix(toward, i as f32 / 20.0)).find(|c| c.contrast(on) >= ratio).unwrap_or(toward)
+    }
+
+    /// This colour, moved toward `toward` just far enough to read as text (4.5:1) on `on`.
+    pub fn readable_on(self, on: Rgb, toward: Rgb) -> Rgb {
+        self.with_contrast(on, toward, 4.5)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThemePalette {
@@ -135,6 +185,44 @@ pub struct ThemePalette {
     pub quote_bg: Rgb,
     pub notes_bg: Rgb,
     pub is_dark: bool,
+}
+
+impl ThemePalette {
+    /// The accent as a text colour: the crimson itself on light themes, a softened tone of it
+    /// on dark ones, where the raw accent is too dark to read.
+    pub fn accent_text(&self) -> Rgb {
+        self.accent.readable_on(self.card, self.text)
+    }
+
+    /// The accent for marks that aren't text (the logo, progress bars, the current tab): kept
+    /// saturated, and lightened on dark themes just enough to stand out (3:1).
+    pub fn accent_mark(&self) -> Rgb {
+        self.accent.with_contrast(self.card, Rgb(255, 118, 118), 3.0)
+    }
+
+    /// Text on an accent fill: white, or black on a light accent (High Contrast's yellow).
+    pub fn on_accent(&self) -> Rgb {
+        let white = Rgb(255, 255, 255);
+        if white.contrast(self.accent) >= 4.5 { white } else { Rgb(0, 0, 0) }
+    }
+
+    /// Hearts on romantic relationship tags: a rose that stands out (3:1) on cards.
+    pub fn romance(&self) -> Rgb {
+        let toward = if self.is_dark { Rgb(255, 170, 190) } else { Rgb(120, 0, 30) };
+        Rgb(225, 29, 72).with_contrast(self.card, toward, 3.0)
+    }
+
+    /// Error text that stays readable on cards.
+    pub fn danger_text(&self) -> Rgb {
+        let base = if self.is_dark { Rgb(248, 113, 113) } else { Rgb(185, 28, 28) };
+        base.readable_on(self.card, self.text)
+    }
+
+    /// Warning text (amber) that stays readable on cards.
+    pub fn warning_text(&self) -> Rgb {
+        let base = if self.is_dark { Rgb(245, 180, 60) } else { Rgb(160, 82, 0) };
+        base.readable_on(self.card, self.text)
+    }
 }
 
 #[cfg(feature = "legacy-ui")]
@@ -187,6 +275,34 @@ mod legacy {
     impl ReaderThemeType {
         pub fn colors(&self) -> ReaderColors {
             self.palette().into()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_theme_keeps_text_readable() {
+        for t in ReaderThemeType::all() {
+            let p = t.palette();
+            for (role, fg) in [("text", p.text), ("muted", p.text_muted), ("accent", p.accent_text()), ("danger", p.danger_text()), ("warning", p.warning_text())] {
+                for (bg_name, bg) in [("card", p.card), ("surface", p.surface), ("bg", p.bg)] {
+                    let ratio = fg.contrast(bg);
+                    assert!(ratio >= 4.4, "{}: {role} on {bg_name} is {ratio:.2}:1", t.display_name());
+                }
+            }
+            let mark = p.accent_mark().contrast(p.surface).min(p.accent_mark().contrast(p.card));
+            assert!(mark >= 3.0, "{}: accent mark is {mark:.2}:1", t.display_name());
+            let on_accent = p.on_accent().contrast(p.accent);
+            assert!(on_accent >= 4.5, "{}: text on accent is {on_accent:.2}:1", t.display_name());
+            let rose = p.romance().contrast(p.card);
+            assert!(rose >= 3.0, "{}: relationship heart is {rose:.2}:1", t.display_name());
+            let edge = p.border.contrast(p.card);
+            if *t == ReaderThemeType::HighContrast {
+                assert!(edge >= 3.0, "{}: card edges are {edge:.2}:1", t.display_name());
+            }
         }
     }
 }

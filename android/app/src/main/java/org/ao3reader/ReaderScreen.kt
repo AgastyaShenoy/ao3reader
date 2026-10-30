@@ -45,6 +45,7 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
     private var status = TextView(a)
     private var progressLine = View(a)
     private var panel: View? = null
+    private var panelGravity = Gravity.BOTTOM
     /** Toolbar and status bar; hidden by default so the page uses the whole screen. */
     private var chrome = false
     private var insetTop = 0
@@ -90,15 +91,15 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         addView(top, frame(h = ViewGroup.LayoutParams.WRAP_CONTENT, gravity = Gravity.TOP))
 
         bottom = a.column().apply { setBackgroundColor(p.surface) }
-        progressLine = View(a).apply { setBackgroundColor(p.accent) }
+        progressLine = View(a).apply { setBackgroundColor(p.accentMark) }
         val track = FrameLayout(a).apply { setBackgroundColor(p.border) }
         track.addView(progressLine, frame(0, a.dp(3)))
         bottom.addView(track, lp(h = a.dp(3)))
         val row = a.row()
-        row.addView(a.iconButton(R.drawable.ic_prev, p.text) { if (chapter > 0) goChapter(chapter - 1, 0f) })
+        row.addView(a.iconButton(R.drawable.ic_prev, p.text) { if (chapter > 0) jumpChapter(chapter - 1, 0f) })
         status = a.label("", 12.5f, p.muted, lines = 2).apply { gravity = Gravity.CENTER }
         row.addView(status, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        row.addView(a.iconButton(R.drawable.ic_next, p.text) { if (chapter + 1 < chapters.size) goChapter(chapter + 1, 0f) })
+        row.addView(a.iconButton(R.drawable.ic_next, p.text) { if (chapter + 1 < chapters.size) jumpChapter(chapter + 1, 0f) })
         bottom.addView(row)
         addView(bottom, frame(h = ViewGroup.LayoutParams.WRAP_CONTENT, gravity = Gravity.BOTTOM))
         bottom.gone(!Settings.typo.optBoolean("show_reading_progress_bar", true))
@@ -123,6 +124,12 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         positionChanged()
     }
 
+    /** A chapter change from the menus: the new text fades in. */
+    private fun jumpChapter(i: Int, anchor: Float) {
+        goChapter(i, anchor)
+        Anim.enter(page, alpha = 0.15f, ms = 200)
+    }
+
     fun nextChapter() {
         if (chapter + 1 < chapters.size) goChapter(chapter + 1, 0f)
     }
@@ -137,7 +144,8 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         val anchor = page.anchor()
         val stats = runCatching { Core.obj("progress.stats", json("chapter" to chapter, "position" to anchor.toDouble())) }.getOrNull()
         val pct = stats?.optDouble("percentage") ?: 0.0
-        val wpm = Settings.config.optInt("words_per_minute", 230)
+        // Measured from the user's own reading, or the speed set by hand.
+        val wpm = stats?.optInt("wpm", 0)?.takeIf { it > 0 } ?: Settings.config.optInt("words_per_minute", 230)
         val done = chapter + 1 >= chapters.size && page.atEnd()
         val parts = mutableListOf("Chapter ${chapter + 1} of ${chapters.size}")
         if (page.paged && page.pageCount > 0) {
@@ -169,13 +177,34 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
     fun toggleChrome() {
         if (panel != null) return closePanel()
         chrome = !chrome
-        showChrome(chrome)
+        showChrome(chrome, animate = true)
     }
 
-    private fun showChrome(on: Boolean) {
-        top.gone(!on)
-        bottom.gone(!on || !Settings.typo.optBoolean("show_reading_progress_bar", true))
+    private fun showChrome(on: Boolean, animate: Boolean = false) {
+        slide(top, on, fromTop = true, animate)
+        slide(bottom, on && Settings.typo.optBoolean("show_reading_progress_bar", true), fromTop = false, animate)
         a.immersive(!on)
+    }
+
+    /** Shows or hides a toolbar, sliding it from or to its edge of the screen. */
+    private fun slide(v: View, show: Boolean, fromTop: Boolean, animate: Boolean) {
+        val away = { (if (fromTop) -1f else 1f) * v.height.coerceAtLeast(a.dp(56)) * 0.7f }
+        if (!animate || !Anim.on) {
+            v.animate().cancel()
+            v.alpha = 1f
+            v.translationY = 0f
+            v.gone(!show)
+        } else if (show) {
+            v.alpha = 0f
+            v.gone(false)
+            v.post { Anim.enter(v, dy = away(), ms = 190) }
+        } else if (v.visibility == View.VISIBLE) {
+            Anim.exit(v, dy = away(), ms = 150) {
+                v.gone(true)
+                v.alpha = 1f
+                v.translationY = 0f
+            }
+        }
     }
 
     /** Back button: closes a panel first. Returns false when the reader itself should close. */
@@ -188,9 +217,24 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
     }
 
     private fun closePanel() {
-        panel?.let { removeView(it) }
+        val pnl = panel ?: return
         panel = null
         (a.getSystemService(InputMethodManager::class.java))?.hideSoftInputFromWindow(windowToken, 0)
+        val content = (pnl as ViewGroup).getChildAt(0)
+        val (dx, dy) = panelOffset(content)
+        if (content != null) Anim.exit(content, dx * 0.5f, dy * 0.5f, ms = 150) {}
+        Anim.exit(pnl, ms = 170) { removeView(pnl) }
+    }
+
+    /** Where a panel slides in from: its own edge of the screen. */
+    private fun panelOffset(v: View?): Pair<Float, Float> {
+        val w = (v?.width ?: 0).coerceAtLeast(a.dp(200)).toFloat()
+        val h = (v?.height ?: 0).coerceAtLeast(a.dp(160)).toFloat()
+        return when (panelGravity) {
+            Gravity.START -> -w to 0f
+            Gravity.TOP -> 0f to -h
+            else -> 0f to h
+        }
     }
 
     private fun showPanel(content: View, gravity: Int, width: Int = ViewGroup.LayoutParams.MATCH_PARENT, height: Int = ViewGroup.LayoutParams.MATCH_PARENT) {
@@ -204,7 +248,16 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         content.background = rounded(p.surface, a.dpf(14), p.border, a.dp(1))
         scrim.addView(content, frame(width, height, gravity))
         panel = scrim
+        panelGravity = gravity
         addView(scrim, frame())
+        if (Anim.on) {
+            content.alpha = 0f
+            Anim.enter(scrim, ms = 160)
+            content.post {
+                val (dx, dy) = panelOffset(content)
+                Anim.enter(content, dx, dy, ms = 220)
+            }
+        }
     }
 
     private fun openContents() {
@@ -223,11 +276,11 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
                     override fun getItemId(i: Int) = i.toLong()
                     override fun getView(i: Int, c: View?, parent: ViewGroup?): View {
                         val r = a.row().apply { setPadding(a.dp(12), a.dp(12), a.dp(12), a.dp(12)) }
-                        if (i == chapter) r.background = rounded(alpha(p.accent, 0.18f), a.dpf(8))
+                        if (i == chapter) r.background = rounded(p.selected, a.dpf(8))
                         r.addView(a.label(chapters[i].getString("title").ifBlank { "Chapter ${i + 1}" }, 14.5f, p.text, bold = i == chapter, lines = 2),
                             LinearLayout.LayoutParams(0, -2, 1f))
                         r.addView(a.label("${thousands(chapters[i].getLong("words"))} words", 12f, p.muted))
-                        r.setOnClickListener { closePanel(); goChapter(i, 0f) }
+                        r.setOnClickListener { closePanel(); jumpChapter(i, 0f) }
                         return r
                     }
                 }
@@ -242,14 +295,14 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
                         val b = bms[i]
                         val r = a.row().apply { setPadding(a.dp(12), a.dp(10), a.dp(4), a.dp(10)) }
                         val t = a.column()
-                        t.addView(a.label("Chapter ${b.getInt("chapter")}", 12.5f, p.accent, bold = true))
+                        t.addView(a.label("Chapter ${b.getInt("chapter")}", 12.5f, p.accentText, bold = true))
                         t.addView(a.label(b.getString("note").ifBlank { b.getString("excerpt") }, 13.5f, p.text, lines = 2))
                         r.addView(t, LinearLayout.LayoutParams(0, -2, 1f))
                         r.addView(a.iconButton(R.drawable.ic_delete, p.muted) {
                             bookmarks = Core.arr("bookmark.remove", json("id" to workId, "bookmark" to b.getString("id")))
                             fill()
                         })
-                        r.setOnClickListener { closePanel(); goChapter(b.getInt("chapter") - 1, b.getInt("para").toFloat()) }
+                        r.setOnClickListener { closePanel(); jumpChapter(b.getInt("chapter") - 1, b.getInt("para").toFloat()) }
                         return r
                     }
                 }
@@ -276,7 +329,7 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         Settings.themes.forEach { th ->
             val sel = th.id == p.id
             swatches.addView(View(a).apply {
-                background = rounded(th.bg, a.dpf(18), if (sel) th.accent else p.border, a.dp(if (sel) 3 else 1))
+                background = rounded(th.bg, a.dpf(18), if (sel) p.text else p.border, a.dp(if (sel) 2 else 1))
                 setOnClickListener {
                     Settings.config.put("theme", th.id)
                     Settings.save()
@@ -303,8 +356,8 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         box.addView(SeekBar(a).apply {
             max = 28
             progress = ((t.optDouble("line_spacing_multiplier") - 1.2) / 0.05).toInt()
-            progressTintList = android.content.res.ColorStateList.valueOf(p.accent)
-            thumbTintList = android.content.res.ColorStateList.valueOf(p.accent)
+            progressTintList = android.content.res.ColorStateList.valueOf(p.accentMark)
+            thumbTintList = android.content.res.ColorStateList.valueOf(p.accentMark)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, v: Int, u: Boolean) { t.put("line_spacing_multiplier", 1.2 + v * 0.05) }
                 override fun onStartTrackingTouch(s: SeekBar?) {}
@@ -351,7 +404,7 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
                 hits.isEmpty() -> ""
                 else -> "${hits.indexOf(currentHit) + 1} of ${hits.size}${if (hits.size >= 2000) "+" else ""}"
             }
-            count.setTextColor(if (hits.isEmpty() && query.length >= 2) p.danger else p.muted)
+            count.setTextColor(if (hits.isEmpty() && query.length >= 2) p.dangerText else p.muted)
         }
         fun goto(h: Hit) {
             currentHit = h

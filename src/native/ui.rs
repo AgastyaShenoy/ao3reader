@@ -71,9 +71,17 @@ pub struct Colors {
     pub quote_bg: Color,
     pub notes_bg: Color,
     pub on_accent: Color,
+    /// The accent where it has to read as text or a thin mark (softened on dark themes).
+    pub accent_text: Color,
+    /// The accent for logo, progress and indicators: saturated, at least 3:1 on cards.
+    pub accent_mark: Color,
     pub input_bg: Color,
     pub danger: Color,
+    pub danger_text: Color,
+    pub warning_text: Color,
     pub success: Color,
+    /// Hearts and tint on romantic relationship tags.
+    pub romance: Color,
     pub is_dark: bool,
 }
 
@@ -91,10 +99,15 @@ impl Colors {
             border: Color::rgb(p.border),
             quote_bg: Color::rgb(p.quote_bg),
             notes_bg: Color::rgb(p.notes_bg),
-            on_accent: Color::from_u8(255, 255, 255),
+            on_accent: Color::rgb(p.on_accent()),
+            accent_text: Color::rgb(p.accent_text()),
+            accent_mark: Color::rgb(p.accent_mark()),
             input_bg: if p.is_dark { Color::rgb(p.bg) } else { Color::from_u8(255, 255, 255) },
             danger: Color::from_u8(220, 60, 60),
+            danger_text: Color::rgb(p.danger_text()),
+            warning_text: Color::rgb(p.warning_text()),
             success: Color::from_u8(34, 160, 84),
+            romance: Color::rgb(p.romance()),
             is_dark: p.is_dark,
         }
     }
@@ -102,6 +115,11 @@ impl Colors {
         self.text.alpha(0.07)
     }
     pub fn pressed(&self) -> Color {
+        self.text.alpha(0.12)
+    }
+    /// Fill for the current choice in tabs, segments and chips: neutral, so the accent is left
+    /// for the one main action on screen.
+    pub fn selected(&self) -> Color {
         self.text.alpha(0.12)
     }
 }
@@ -170,9 +188,19 @@ pub struct InputResp {
     pub escaped: bool,
 }
 
+/// What a count badge counts: works in a filter (quiet) or new works (accent tint).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Badge {
+    Count,
+    New,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonKind {
+    /// The one main action on a screen: accent fill.
     Primary,
+    /// A card's main action, repeated down a list: quiet neutral fill.
+    Tonal,
     Secondary,
     Ghost,
     Danger,
@@ -355,6 +383,17 @@ impl<'a> Ui<'a> {
         self.g.stroke_round(r, 8.0, 1.0, c.border);
     }
 
+    /// Frame for a problem the user can't fix in place (AO3 down, a failed download): a plain
+    /// card with an amber warning sign, noticeable without turning the screen red. The message
+    /// goes at x + 40.
+    pub fn notice(&mut self, r: Rect, title: &str) {
+        let c = self.c;
+        self.card(r);
+        let ic = self.measure("\u{E7BA}", &TextStyle::icons(15.0), TextOpts::default());
+        self.g.draw_text(ic, r.x + 16.0, r.y + 15.0, c.warning_text);
+        self.text(title, &TextStyle::ui(13.5).semibold(), r.x + 40.0, r.y + 14.0, c.text);
+    }
+
     pub fn separator(&mut self, x: f32, y: f32, w: f32) {
         let c = self.c.border;
         self.g.line(x, y + 0.5, x + w, y + 0.5, 1.0, c);
@@ -493,7 +532,7 @@ impl<'a> Ui<'a> {
             let color = if *danger { c.danger } else { c.text };
             self.text_in(label, &TextStyle::ui(13.5), Rect::new(row.x + 12.0, row.y, row.w - 40.0, row.h), Align::Left, color);
             if m.selected == Some(i) {
-                self.text_in("\u{E73E}", &TextStyle::icons(12.0), Rect::new(row.right() - 28.0, row.y, 16.0, row.h), Align::Center, c.accent);
+                self.text_in("\u{E73E}", &TextStyle::icons(12.0), Rect::new(row.right() - 28.0, row.y, 16.0, row.h), Align::Center, c.accent_text);
             }
             if resp.clicked {
                 self.mem.menu_pick = Some((m.id, i));
@@ -511,7 +550,7 @@ impl<'a> Ui<'a> {
     /// Square icon-only ghost button.
     pub fn icon_button(&mut self, id: Id, r: Rect, icon: &str, active: bool) -> bool {
         if active {
-            let c = self.c.accent.alpha(0.18);
+            let c = self.c.selected();
             self.g.fill_round(r, RADIUS, c);
         }
         self.button_ex(id, r, "", Some(icon), ButtonKind::Ghost, true)
@@ -527,6 +566,7 @@ impl<'a> Ui<'a> {
         let (fill, fg, border) = match kind {
             ButtonKind::Primary => (c.accent, c.on_accent, None),
             ButtonKind::Danger => (c.danger, c.on_accent, None),
+            ButtonKind::Tonal => (c.text.alpha(0.09), c.text, None),
             ButtonKind::Secondary => (c.card, c.text, Some(c.border)),
             ButtonKind::Ghost => (Color { a: 0.0, ..c.card }, c.text, None),
         };
@@ -551,7 +591,7 @@ impl<'a> Ui<'a> {
             x += icon_w + gap;
         }
         if !label.is_empty() {
-            let style = if kind == ButtonKind::Primary { TextStyle::ui(BODY).semibold() } else { TextStyle::ui(BODY) };
+            let style = if matches!(kind, ButtonKind::Primary | ButtonKind::Tonal) { TextStyle::ui(BODY).semibold() } else { TextStyle::ui(BODY) };
             let t = self.g.layout(label, &style, TextOpts::ellipsize((r.right() - x - 8.0).max(1.0)));
             self.g.draw_text(t, x, r.y + (r.h - t.h) / 2.0, fg);
         }
@@ -605,21 +645,57 @@ impl<'a> Ui<'a> {
         let x1 = r.right() - 8.0;
         let xv = x0 + (x1 - x0) * t;
         self.g.fill_round(Rect::new(x0, cy - 2.0, x1 - x0, 4.0), 2.0, c.border);
-        self.g.fill_round(Rect::new(x0, cy - 2.0, xv - x0, 4.0), 2.0, c.accent);
+        self.g.fill_round(Rect::new(x0, cy - 2.0, xv - x0, 4.0), 2.0, c.accent_mark);
         self.g.fill_circle(xv, cy, 9.0, c.card);
-        self.g.fill_circle(xv, cy, if resp.held || resp.hovered { 6.0 } else { 5.0 }, c.accent);
+        self.g.fill_circle(xv, cy, if resp.held || resp.hovered { 6.0 } else { 5.0 }, c.accent_mark);
         changed
     }
 
     /// Row of mutually exclusive options.
     pub fn segmented(&mut self, id: Id, r: Rect, options: &[&str], selected: &mut usize) -> bool {
+        let items: Vec<(&str, usize)> = options.iter().map(|o| (*o, 0)).collect();
+        self.segmented_counts(id, r, &items, selected, Badge::Count)
+    }
+
+    /// Small rounded number after a label: how many works a filter holds (`Badge::Count`,
+    /// quiet) or how many are new (`Badge::New`, accent tint). Nothing is drawn for 0.
+    /// `cy` is the vertical centre; returns the width used.
+    pub fn badge(&mut self, x: f32, cy: f32, n: usize, kind: Badge, strong: bool) -> f32 {
+        if n == 0 {
+            return 0.0;
+        }
+        let c = self.c;
+        let label = if n > 999 { "999+".to_string() } else { n.to_string() };
+        let t = self.measure(&label, &TextStyle::ui(11.5).semibold(), TextOpts::default());
+        let h = 18.0;
+        let r = Rect::new(x, cy - h / 2.0, (t.w + 12.0).max(h), h);
+        let (fill, fg) = match kind {
+            Badge::Count => (c.text.alpha(if strong { 0.16 } else { 0.09 }), if strong { c.text } else { c.muted }),
+            Badge::New => (c.accent_text.alpha(0.18), c.accent_text),
+        };
+        self.g.fill_round(r, h / 2.0, fill);
+        self.g.draw_text(t, r.x + (r.w - t.w) / 2.0, r.y + (h - t.h) / 2.0, fg);
+        r.w
+    }
+
+    /// Width `badge` will take (0 for 0).
+    pub fn badge_width(&mut self, n: usize) -> f32 {
+        if n == 0 {
+            return 0.0;
+        }
+        let label = if n > 999 { "999+".to_string() } else { n.to_string() };
+        (self.measure(&label, &TextStyle::ui(11.5).semibold(), TextOpts::default()).w + 12.0).max(18.0)
+    }
+
+    /// Segmented control whose options carry a count badge.
+    pub fn segmented_counts(&mut self, id: Id, r: Rect, options: &[(&str, usize)], selected: &mut usize, kind: Badge) -> bool {
         let c = self.c;
         self.g.fill_round(r, RADIUS, c.bg);
         self.g.stroke_round(r, RADIUS, 1.0, c.border);
         let n = options.len().max(1) as f32;
         let seg_w = r.w / n;
         let mut changed = false;
-        for (i, label) in options.iter().enumerate() {
+        for (i, (label, count)) in options.iter().enumerate() {
             let sr = Rect::new(r.x + seg_w * i as f32, r.y, seg_w, r.h).shrink(3.0);
             let resp = self.interact(id2(id, i), sr);
             if resp.clicked && *selected != i {
@@ -628,25 +704,36 @@ impl<'a> Ui<'a> {
             }
             let is_sel = *selected == i;
             if is_sel {
-                self.g.fill_round(sr, RADIUS - 2.0, c.accent);
+                self.g.fill_round(sr, RADIUS - 2.0, c.selected());
             } else if resp.hovered {
                 self.g.fill_round(sr, RADIUS - 2.0, c.hover());
             }
             let style = if is_sel { TextStyle::ui(13.0).semibold() } else { TextStyle::ui(13.0) };
-            self.text_in(label, &style, sr.shrink2(6.0, 0.0), Align::Center, if is_sel { c.on_accent } else { c.text });
+            let fg = if is_sel { c.text } else { c.muted };
+            if *count == 0 {
+                self.text_in(label, &style, sr.shrink2(6.0, 0.0), Align::Center, fg);
+                continue;
+            }
+            let bw = self.badge_width(*count);
+            let t = self.measure(label, &style, TextOpts::ellipsize((sr.w - bw - 18.0).max(1.0)));
+            let x = sr.x + ((sr.w - t.w - 6.0 - bw) / 2.0).max(6.0);
+            self.g.draw_text(t, x, sr.y + (sr.h - t.h) / 2.0, fg);
+            self.badge(x + t.w + 6.0, sr.y + sr.h / 2.0, *count, kind, is_sel);
         }
         changed
     }
 
     /// Pill-shaped tab strip with icons; wraps onto more rows when narrow. Returns its height.
-    pub fn tab_strip(&mut self, id: Id, x: f32, y: f32, w: f32, items: &[(&str, &str)], selected: &mut usize) -> (f32, bool) {
+    /// `badges` holds a "new" count per tab (or is empty).
+    pub fn tab_strip(&mut self, id: Id, x: f32, y: f32, w: f32, items: &[(&str, &str)], badges: &[usize], selected: &mut usize) -> (f32, bool) {
         let c = self.c;
         let mut cx = x;
         let mut cy = y;
         let h = 34.0;
         let mut changed = false;
         for (i, (icon, label)) in items.iter().enumerate() {
-            let bw = self.button_width(label, Some(icon));
+            let n = badges.get(i).copied().unwrap_or(0);
+            let bw = self.button_width(label, Some(icon)) + if n > 0 { self.badge_width(n) + if label.is_empty() { 2.0 } else { 6.0 } } else { 0.0 };
             if cx > x && cx + bw > x + w {
                 cx = x;
                 cy += h + 6.0;
@@ -659,16 +746,23 @@ impl<'a> Ui<'a> {
             }
             let is_sel = *selected == i;
             if is_sel {
-                self.g.fill_round(r, h / 2.0, c.accent);
+                self.g.fill_round(r, h / 2.0, c.selected());
+                // A short accent mark under the current tab; the fill stays neutral.
+                let cx = r.x + r.w / 2.0;
+                self.g.fill_round(Rect::new(cx - 9.0, r.bottom() - 3.0, 18.0, 3.0), 1.5, c.accent_mark);
             } else if resp.hovered {
                 self.g.fill_round(r, h / 2.0, c.hover());
             }
-            let fg = if is_sel { c.on_accent } else { c.text };
+            let fg = if is_sel { c.text } else { c.muted };
             let it = self.measure(icon, &TextStyle::icons(14.0), TextOpts::default());
             self.g.draw_text(it, r.x + 14.0, r.y + (h - it.h) / 2.0, fg);
             let style = if is_sel { TextStyle::ui(13.5).semibold() } else { TextStyle::ui(13.5) };
             let t = self.measure(label, &style, TextOpts::default());
             self.g.draw_text(t, r.x + 38.0, r.y + (h - t.h) / 2.0, fg);
+            if n > 0 {
+                let bx = if label.is_empty() { r.x + 36.0 } else { r.x + 44.0 + t.w };
+                self.badge(bx, r.y + h / 2.0, n, Badge::New, is_sel);
+            }
             cx += bw + 6.0;
         }
         (cy + h - y, changed)
@@ -679,7 +773,7 @@ impl<'a> Ui<'a> {
         let c = self.c;
         let focused = self.mem.edits.get(&id).is_some_and(|e| unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == e.hwnd);
         self.g.fill_round(r, RADIUS, c.input_bg);
-        self.g.stroke_round(r, RADIUS, if focused { 2.0 } else { 1.0 }, if focused { c.accent } else { c.border });
+        self.g.stroke_round(r, RADIUS, if focused { 2.0 } else { 1.0 }, if focused { c.accent_mark } else { c.border });
 
         if !self.mem.edits.contains_key(&id) {
             let ctrl_id = self.mem.next_ctrl_id;
@@ -737,7 +831,7 @@ impl<'a> Ui<'a> {
     pub fn spinner(&mut self, cx: f32, cy: f32, radius: f32) {
         let t = self.seconds();
         let head = (t * 10.0) as usize % 8;
-        let c = self.c.accent;
+        let c = self.c.accent_mark;
         for i in 0..8 {
             let a = i as f32 / 8.0 * std::f32::consts::TAU;
             let age = (head + 8 - i) % 8;

@@ -1,5 +1,6 @@
 use crate::ao3::models::{Bookmark, LibraryEntry, ReadingProgress, ShelfStatus, Work};
 use crate::storage::config::AppConfig;
+use crate::storage::safe::{load_json, write_atomic};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -23,15 +24,7 @@ impl LibraryManager {
         let works_dir = base_dir.join("works");
         let _ = fs::create_dir_all(&works_dir);
 
-        let library_file = base_dir.join("library.json");
-        let data = if library_file.exists() {
-            fs::read_to_string(&library_file)
-                .ok()
-                .and_then(|content| serde_json::from_str(&content).ok())
-                .unwrap_or_default()
-        } else {
-            LibraryData::default()
-        };
+        let data = load_json(&base_dir.join("library.json"), true).unwrap_or_default();
 
         Self { data, base_dir }
     }
@@ -47,8 +40,7 @@ impl LibraryManager {
     pub fn save(&self) -> Result<(), String> {
         let path = self.base_dir.join("library.json");
         let json = serde_json::to_string_pretty(&self.data).map_err(|e| e.to_string())?;
-        fs::write(path, json).map_err(|e| e.to_string())?;
-        Ok(())
+        write_atomic(&path, json.as_bytes()).map_err(|e| e.to_string())
     }
 
     /// Add a freshly downloaded or imported work to the library
@@ -58,7 +50,7 @@ impl LibraryManager {
 
         // Compact JSON: work files are read by the app only, and can be several MB.
         let json = serde_json::to_string(work).map_err(|e| e.to_string())?;
-        fs::write(&file_path, json).map_err(|e| e.to_string())?;
+        write_atomic(&file_path, json.as_bytes()).map_err(|e| e.to_string())?;
 
         // Update or insert library entry
         if let Some(entry) = self.data.entries.get_mut(&work_id) {

@@ -11,6 +11,7 @@ import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -22,11 +23,24 @@ class MainActivity : Activity() {
     private lateinit var shell: LinearLayout
     private lateinit var content: FrameLayout
     private lateinit var nav: LinearLayout
-    private var tab = 0
+    private var tab = LIBRARY
+    private var animateTab = false
     private var reader: ReaderScreen? = null
 
     val library = LibraryState()
-    val fetch = FetchState()
+    val search = SearchState()
+    val following = FollowingState()
+    val imports = ImportState()
+
+    companion object {
+        const val LIBRARY = 0
+        const val SEARCH = 1
+        const val FOLLOWING = 2
+        const val SETTINGS = 3
+        /** Opened from Settings; not in the tab bar. */
+        const val ACCOUNT = 4
+        const val IMPORT = 5
+    }
 
     /** Called with the result of a document picker or creator started by a screen. */
     var onDocument: ((Int, Intent?) -> Unit)? = null
@@ -40,6 +54,8 @@ class MainActivity : Activity() {
         root = FrameLayout(this)
         // Keep the first text field from taking focus (and the keyboard) on launch.
         root.isFocusableInTouchMode = true
+        // When a text field gives up focus it lands here; don't grey the whole screen to show it.
+        if (Build.VERSION.SDK_INT >= 26) root.defaultFocusHighlightEnabled = false
         setContentView(root)
         root.setOnApplyWindowInsetsListener { v, insets -> applyInsets(insets); insets }
         rebuild()
@@ -58,7 +74,8 @@ class MainActivity : Activity() {
         val r = reader
         when {
             r != null -> if (!r.back()) closeReader()
-            tab != 0 -> show(0)
+            tab == ACCOUNT || tab == IMPORT -> show(SETTINGS)
+            tab != LIBRARY -> show(LIBRARY)
             else -> finish()
         }
     }
@@ -118,19 +135,11 @@ class MainActivity : Activity() {
         root.addView(shell, frame())
         shell.setPadding(0, insetTop, 0, insetBottom)
 
-        val tabs = listOf(R.drawable.ic_book to "Library", R.drawable.ic_download to "Fetch", R.drawable.ic_person to "Account", R.drawable.ic_tune to "Settings")
-        tabs.forEachIndexed { i, (res, name) ->
-            val sel = i == tab
-            val item = column().apply {
-                gravity = Gravity.CENTER
-                setPadding(0, dp(4), 0, dp(4))
-                setOnClickListener { show(i) }
-            }
-            item.addView(icon(res, if (sel) p.accent else p.muted, 24))
-            item.addView(label(name, 11.5f, if (sel) p.accent else p.muted, bold = sel).apply { gravity = Gravity.CENTER })
-            nav.addView(item, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        }
-        content.addView(screen(tab), frame())
+        buildNav()
+        val screenView = screen(tab)
+        content.addView(screenView, frame())
+        if (animateTab) Anim.enter(screenView, dy = dpf(10), ms = 170)
+        animateTab = false
 
         reader?.let { r ->
             r.rebuild()
@@ -139,15 +148,58 @@ class MainActivity : Activity() {
         root.requestApplyInsets()
     }
 
+    /** Redraws only the tab bar (e.g. a new unread count), leaving the screen as it is. */
+    fun refreshNav() {
+        if (::nav.isInitialized) buildNav()
+    }
+
+    private fun buildNav() {
+        val p = Settings.pal
+        nav.removeAllViews()
+        val tabs = listOf(R.drawable.ic_book to "Library", R.drawable.ic_search to "Search", R.drawable.ic_follow to "Following", R.drawable.ic_tune to "Settings")
+        val unread = runCatching { Core.obj("follows").getInt("unread") }.getOrDefault(0)
+        tabs.forEachIndexed { i, (res, name) ->
+            val sel = i == tab || ((tab == ACCOUNT || tab == IMPORT) && i == SETTINGS)
+            val item = column().apply {
+                gravity = Gravity.CENTER
+                setPadding(0, dp(4), 0, dp(4))
+                setOnClickListener { show(i) }
+            }
+            val iconBox = FrameLayout(this)
+            // Material-style indicator: a neutral pill behind the current tab's icon, which takes
+            // the accent. Everything else in the bar stays quiet.
+            if (sel) iconBox.background = rounded(p.selected, dpf(14))
+            iconBox.addView(icon(res, if (sel) p.accentMark else p.muted, 24), frame(dp(24), dp(24), Gravity.CENTER))
+            if (i == FOLLOWING && unread > 0) {
+                // New works from followed authors and tags.
+                iconBox.addView(label(if (unread > 99) "99+" else "$unread", 9.5f, p.onAccent, bold = true).apply {
+                    gravity = Gravity.CENTER
+                    background = rounded(p.accent, dpf(8))
+                    setPadding(dp(4), 0, dp(4), 0)
+                    minWidth = dp(16)
+                }, frame(ViewGroup.LayoutParams.WRAP_CONTENT, dp(16), Gravity.TOP or Gravity.END))
+                iconBox.contentDescription = "$unread new"
+            }
+            item.addView(iconBox, LinearLayout.LayoutParams(dp(56), dp(30)))
+            item.addView(label(name, 11.5f, if (sel) p.text else p.muted, bold = sel, lines = 1).apply { gravity = Gravity.CENTER }, lp(top = dp(2)))
+            nav.addView(item, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+    }
+
     fun show(i: Int) {
+        animateTab = i != tab
         tab = i
         rebuild()
     }
 
+    val currentTab get() = tab
+
     private fun screen(i: Int): View = when (i) {
-        1 -> fetchScreen(this)
-        2 -> accountScreen(this)
-        3 -> settingsScreen(this)
+        SEARCH -> searchScreen(this)
+        FOLLOWING -> followingScreen(this)
+        SETTINGS -> settingsScreen(this)
+        ACCOUNT -> accountScreen(this)
+        IMPORT -> importScreen(this)
         else -> libraryScreen(this)
     }
 
@@ -187,8 +239,6 @@ class MainActivity : Activity() {
         } catch (e: CoreError) {
             if (e.message == "missing" && id.all { it.isDigit() }) {
                 toast("Downloading this work again…")
-                fetch.input = id
-                show(1)
                 startFetch(id, open = true)
             } else toast(e.message ?: "Couldn't open the work")
             return
@@ -198,10 +248,13 @@ class MainActivity : Activity() {
             v.clearFocus()
             getSystemService(android.view.inputmethod.InputMethodManager::class.java)?.hideSoftInputFromWindow(v.windowToken, 0)
         }
+        runCatching { Core.req("follows.read", json("work" to id)) }
         val r = ReaderScreen(this, id, opened)
+        reader?.let { root.removeView(it) }
         reader = r
         root.addView(r, frame())
         r.setInsets(insetTop, insetBottom, cutoutTop)
+        Anim.enter(r, dy = dpf(28), ms = 220)
         if (!hintShown) {
             hintShown = true
             toast("Tap the middle of the page for the menu; tap the sides to turn pages.")
@@ -209,36 +262,44 @@ class MainActivity : Activity() {
     }
 
     fun closeReader() {
-        reader?.let {
-            it.saveProgress()
-            root.removeView(it)
-        }
+        val r = reader ?: return
+        r.saveProgress()
         reader = null
         immersive(false)
+        // Rebuild the screens underneath, then let the reader fade away on top of them.
         rebuild()
+        root.addView(r)
+        Anim.exit(r, dy = dpf(28), ms = 160) { root.removeView(r) }
     }
 
-    fun startFetch(input: String, open: Boolean) {
-        fetch.busy = "Downloading and reading the work… long works can take a little while."
-        fetch.error = null
-        if (tab == 1) rebuild()
+    /** Downloads a work; `done` gets the work id on success, `failed` the error (else it's a toast). */
+    fun startFetch(input: String, open: Boolean, done: ((String) -> Unit)? = null, failed: ((String) -> Unit)? = null) {
         Core.background("fetch", json("input" to input)) { r ->
-            fetch.busy = null
             r.onSuccess {
                 val o = it as org.json.JSONObject
-                fetch.preview = o.getJSONObject("meta")
-                toast("Saved “${fetch.preview?.optString("title")}”")
+                toast("Saved “${o.getJSONObject("meta").optString("title")}”")
+                done?.invoke(o.getString("id"))
                 if (open) openWork(o.getString("id"))
-            }.onFailure { fetch.error = it.message }
-            if (tab == 1 && reader == null) rebuild()
+            }.onFailure {
+                val msg = it.message ?: "Couldn't download the work"
+                if (failed != null) failed(msg) else toast(msg)
+            }
         }
     }
 
     fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 
-    fun header(title: String, sub: String? = null): View {
+    fun header(title: String, sub: String? = null, logo: Boolean = false): View {
         val p = Settings.pal
         val box = row().apply { setPadding(dp(20), dp(18), dp(20), dp(10)) }
+        if (logo) {
+            // The Archive's mark on the home screen, top left, as on the desktop app.
+            box.addView(ImageView(this).apply {
+                setImageResource(R.drawable.ao3_logo)
+                imageTintList = android.content.res.ColorStateList.valueOf(p.accentMark)
+                contentDescription = "AO3"
+            }, LinearLayout.LayoutParams(dp(40), dp(28)).apply { rightMargin = dp(12) })
+        }
         box.addView(label(title, 26f, p.text, bold = true))
         if (sub != null) box.addView(label(sub, 13f, p.muted).apply { setPadding(dp(10), dp(8), 0, 0) })
         return box
@@ -252,11 +313,11 @@ class LibraryState {
     var sort = 0
 }
 
-class FetchState {
-    var input = ""
-    var busy: String? = null
+class ImportState {
+    var busy = false
     var error: String? = null
-    var preview: org.json.JSONObject? = null
+    /** The work imported last: its meta JSON. */
+    var done: org.json.JSONObject? = null
 }
 
 fun textOrEmpty(v: TextView) = v.text?.toString() ?: ""

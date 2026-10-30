@@ -7,12 +7,13 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 mod account;
+mod browse;
 pub mod app;
 mod edit;
-mod fetch;
 mod gfx;
 mod icons;
 mod library;
+mod logo;
 mod reader;
 mod settings;
 mod ui;
@@ -92,6 +93,9 @@ impl Host {
     }
 
     fn frame(&mut self) -> FrameOut {
+        if self.gfx.set_ui_family(self.app.config.typography.ui_font.as_deref()) {
+            self.set_edit_font();
+        }
         let colors = self.colors();
         let size = self.client_dips();
         let out = {
@@ -105,6 +109,18 @@ impl Host {
             unsafe { SetTimer(Some(self.hwnd), TIMER_WAKE, ms.max(10), None) };
         }
         out
+    }
+
+    /// Rebuilds the text boxes' font for the current DPI and interface face.
+    fn set_edit_font(&mut self) {
+        let old = self.mem.edit_font;
+        self.mem.edit_font = create_edit_font(self.gfx.dpi, EDIT_FONT_DIP, self.gfx.ui_family());
+        for e in self.mem.edits.values() {
+            e.set_font(self.mem.edit_font);
+        }
+        unsafe {
+            let _ = DeleteObject(old.into());
+        }
     }
 
     fn invalidate(&self) {
@@ -244,7 +260,7 @@ impl Host {
                     Some(LRESULT(0))
                 }
                 WM_APP_RESULT => {
-                    let events: Vec<_> = self.app.worker().map(|w| w.results.try_iter().collect()).unwrap_or_default();
+                    let events = self.app.take_events();
                     for ev in events {
                         self.app.on_event(ev);
                     }
@@ -285,12 +301,7 @@ impl Host {
                 WM_DPICHANGED => {
                     let dpi = loword(wp.0) as f32;
                     self.gfx.set_dpi(dpi);
-                    let old = self.mem.edit_font;
-                    self.mem.edit_font = create_edit_font(dpi, EDIT_FONT_DIP);
-                    for e in self.mem.edits.values() {
-                        e.set_font(self.mem.edit_font);
-                    }
-                    let _ = DeleteObject(old.into());
+                    self.set_edit_font();
                     let r = &*(lp.0 as *const RECT);
                     let _ = SetWindowPos(self.hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
                     self.invalidate();
@@ -432,6 +443,19 @@ fn set_fullscreen(hwnd: HWND, on: bool) {
     }
 }
 
+/// Title bar and taskbar icons: the AO3 mark in white on an AO3-red tile, drawn at the sizes
+/// Windows asks for at this DPI (the exe itself carries no icon resource).
+unsafe fn set_window_icons(hwnd: HWND, gfx: &mut Gfx, dpi: u32) {
+    let tile = gfx::Color::from_u8(153, 0, 0);
+    let mark = gfx::Color::from_u8(255, 255, 255);
+    for (which, metric) in [(ICON_SMALL, SM_CXSMICON), (ICON_BIG, SM_CXICON)] {
+        let px = GetSystemMetricsForDpi(metric, dpi).max(16);
+        if let Some(icon) = gfx.icon(logo::PATH, logo::SIZE, px, tile, mark) {
+            SendMessageW(hwnd, WM_SETICON, Some(WPARAM(which as usize)), Some(LPARAM(icon.0 as isize)));
+        }
+    }
+}
+
 pub fn run() -> Result<()> {
     let config = AppConfig::load();
     unsafe {
@@ -473,11 +497,14 @@ pub fn run() -> Result<()> {
 
         let mut app = App::new(config);
         app.attach(hwnd);
+        let mut gfx = Gfx::new(dpi as f32)?;
+        set_window_icons(hwnd, &mut gfx, dpi);
+        let edit_font = create_edit_font(dpi as f32, EDIT_FONT_DIP, gfx.ui_family());
         let host = Host {
             hwnd,
-            gfx: Gfx::new(dpi as f32)?,
+            gfx,
             input: Input::default(),
-            mem: Memory::new(create_edit_font(dpi as f32, EDIT_FONT_DIP)),
+            mem: Memory::new(edit_font),
             app,
             hand_cursor: false,
             edit_brush: CreateSolidBrush(COLORREF(0)),

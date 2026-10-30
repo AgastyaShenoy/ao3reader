@@ -10,6 +10,7 @@ use crate::native::app::{reader_family, reader_font_label};
 use crate::native::gfx::*;
 use crate::native::icons;
 use crate::native::ui::*;
+use crate::reader::pace::PaceTracker;
 use crate::reader::theme::ReaderThemeType;
 use crate::reader::typography::{PageLayoutMode, ReadingMode, TextAlignment, TypographySettings};
 use crate::storage::config::AppConfig;
@@ -99,6 +100,10 @@ pub struct ReaderScreen {
     wheel_acc: f32,
     last_flip: Option<Instant>,
     pub progress_dirty: bool,
+    /// Learns the reading speed from how fast the position moves.
+    pace: PaceTracker,
+    opened: Instant,
+    pace_words: f32,
 }
 
 fn hash_of<T: Hash>(v: &T) -> u64 {
@@ -161,6 +166,9 @@ impl ReaderScreen {
             wheel_acc: 0.0,
             last_flip: None,
             progress_dirty: false,
+            pace: PaceTracker::default(),
+            opened: Instant::now(),
+            pace_words: -1.0,
         }
     }
 
@@ -268,10 +276,19 @@ impl ReaderScreen {
             None => {}
         }
 
+        // Each move through the work teaches the reading speed (jumps and pauses are ignored).
+        let (read, _) = self.words_read();
+        if read != self.pace_words {
+            self.pace_words = read;
+            if self.pace.observe(self.opened.elapsed().as_secs_f64(), read as f64, &mut config.reading_speed) {
+                out.push(ReaderAction::ConfigChanged);
+            }
+        }
+
         if chrome {
             self.toolbar(ui, Rect::new(r.x, r.y, r.w, TOOLBAR_H), config, &mut out);
             if bottom > 0.0 {
-                self.bottom_bar(ui, Rect::new(r.x, area.bottom(), r.w, bottom), &t, config.words_per_minute);
+                self.bottom_bar(ui, Rect::new(r.x, area.bottom(), r.w, bottom), &t, config.wpm());
             }
         }
 
@@ -595,12 +612,12 @@ impl ReaderScreen {
                     let card = Rect::new(x, y + top, w, b.text_y + b.text_h + CARD_PAD - top);
                     ui.g.fill_round(card, 8.0, c.notes_bg);
                     ui.g.stroke_round(card, 8.0, 1.0, c.border);
-                    ui.text(card_label(kind), &TextStyle::ui(12.5).semibold(), x + CARD_PAD, y + top + CARD_PAD - 2.0, c.accent);
+                    ui.text(card_label(kind), &TextStyle::ui(12.5).semibold(), x + CARD_PAD, y + top + CARD_PAD - 2.0, c.accent_text);
                 }
                 if kind == Kind::Quote {
                     let r = Rect::new(x + 6.0, y, w - 6.0, b.text_y + b.text_h + 12.0);
                     ui.g.fill_round(r, 6.0, c.quote_bg);
-                    ui.g.fill_round(Rect::new(r.x, r.y, 3.0, r.h), 1.5, c.accent.alpha(0.7));
+                    ui.g.fill_round(Rect::new(r.x, r.y, 3.0, r.h), 1.5, c.text.alpha(0.22));
                 }
                 let (style, opts) = layout.styles.get(b.style);
                 let opts = TextOpts { wrap: Some(b.text_w), ..opts };
@@ -680,7 +697,7 @@ impl ReaderScreen {
         ui.g.fill_rect(r, c.surface);
         let p = self.progress();
         ui.g.fill_rect(Rect::new(r.x, r.y, r.w, 3.0), c.border);
-        ui.g.fill_rect(Rect::new(r.x, r.y, r.w * p.percentage / 100.0, 3.0), c.accent);
+        ui.g.fill_rect(Rect::new(r.x, r.y, r.w * p.percentage / 100.0, 3.0), c.accent_mark);
 
         let n = self.chapter_count();
         let has_prev = self.chapter > 0;
@@ -732,8 +749,7 @@ impl ReaderScreen {
     fn contents_panel(&mut self, ui: &mut Ui, r: Rect, bookmarks: &[Bookmark], out: &mut Vec<ReaderAction>) {
         let c = ui.c;
         Self::panel_frame(ui, r);
-        let bm_label = format!("Bookmarks ({})", bookmarks.len());
-        ui.segmented(id("contents-tab"), Rect::new(r.x + 14.0, r.y + 14.0, r.w - 28.0, 34.0), &["Chapters", bm_label.as_str()], &mut self.contents_tab);
+        ui.segmented_counts(id("contents-tab"), Rect::new(r.x + 14.0, r.y + 14.0, r.w - 28.0, 34.0), &[("Chapters", 0), ("Bookmarks", bookmarks.len())], &mut self.contents_tab, Badge::Count);
         let list = Rect::new(r.x + 4.0, r.y + 60.0, r.w - 8.0, r.h - 64.0);
         let mut jump: Option<(usize, f32)> = None;
 
@@ -750,7 +766,7 @@ impl ReaderScreen {
                     }
                     let resp = ui.interact(id2(id("toc-row"), i), rr);
                     if i == current {
-                        ui.g.fill_round(rr, 6.0, c.accent.alpha(0.16));
+                        ui.g.fill_round(rr, 6.0, c.selected());
                     } else if resp.hovered {
                         ui.g.fill_round(rr, 6.0, c.hover());
                     }
@@ -790,7 +806,7 @@ impl ReaderScreen {
                     if resp.hovered {
                         ui.g.fill_round(rr, 6.0, c.hover());
                     }
-                    ui.text(&format!("Chapter {}", bm.chapter_index), &TextStyle::ui(12.5).semibold(), rr.x + 12.0, rr.y + 9.0, c.accent);
+                    ui.text(&format!("Chapter {}", bm.chapter_index), &TextStyle::ui(12.5).semibold(), rr.x + 12.0, rr.y + 9.0, c.accent_text);
                     let body = if bm.note.trim().is_empty() { bm.excerpt.as_str() } else { bm.note.as_str() };
                     let t = ui.measure(body, &TextStyle::ui(13.0), TextOpts::wrap(rr.w - 60.0).max_lines(2));
                     ui.g.draw_text(t, rr.x + 12.0, rr.y + 30.0, c.text);
@@ -831,7 +847,7 @@ impl ReaderScreen {
             let rr = Rect::new(cx - 17.0, y, 34.0, 34.0);
             let resp = ui.interact(id2(id("ap-theme"), i), rr);
             if config.theme == *th {
-                ui.g.fill_circle(cx, y + 17.0, 17.0, c.accent);
+                ui.g.fill_circle(cx, y + 17.0, 17.0, c.text);
             } else if resp.hovered {
                 ui.g.fill_circle(cx, y + 17.0, 17.0, c.text.alpha(0.3));
             }

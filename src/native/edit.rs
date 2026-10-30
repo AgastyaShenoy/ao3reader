@@ -151,8 +151,11 @@ unsafe extern "system" fn edit_subclass(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
     }
 }
 
-/// GDI font for edit controls, matching the UI text size at the given DPI.
-pub fn create_edit_font(dpi: f32, size_dip: f32) -> HFONT {
+/// GDI font for edit controls, matching the UI text size and face at the given DPI.
+pub fn create_edit_font(dpi: f32, size_dip: f32, family: &str) -> HFONT {
+    // GDI knows the variable Segoe UI by its plain name.
+    let family = if family.starts_with("Segoe UI Variable") { "Segoe UI" } else { family };
+    let face = windows::core::HSTRING::from(family);
     unsafe {
         let height = -((size_dip * dpi / 96.0).round() as i32);
         CreateFontW(
@@ -169,7 +172,7 @@ pub fn create_edit_font(dpi: f32, size_dip: f32) -> HFONT {
             CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY,
             (VARIABLE_PITCH.0 | FF_SWISS.0) as u32,
-            w!("Segoe UI"),
+            &face,
         )
     }
 }

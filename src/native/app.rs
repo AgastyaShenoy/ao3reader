@@ -2,16 +2,18 @@
 
 use super::gfx::*;
 use super::account::{AccountAction, AccountScreen};
-use super::fetch::{FetchAction, FetchScreen};
+use super::browse::{BrowseAction, FollowingScreen, SearchScreen, Target};
 use super::icons;
+use super::logo;
 use super::library::{ExportFormat, LibraryAction, LibraryScreen};
 use super::reader::{ReaderAction, ReaderScreen};
 use super::settings::{SettingsAction, SettingsCtx, SettingsScreen};
 use super::ui::*;
 use super::worker::Worker;
 use crate::ao3::client::Ao3Client;
-use crate::ao3::models::{UserSession, Work};
-use crate::ao3::parser::Ao3Parser;
+use crate::ao3::models::{UserSession, Work, WorkMeta};
+use crate::ao3::search::{Feed, Listing};
+use crate::storage::follows::{FollowStore, Scope, STALE_MINUTES};
 use crate::storage::export::WorkExporter;
 use crate::reader::typography::{FontFamilyChoice, TypographySettings};
 use crate::storage::config::AppConfig;
@@ -31,10 +33,17 @@ const PROGRESS_SAVE_DELAY: Duration = Duration::from_secs(3);
 pub enum AppEvent {
     UpdateChecked(Result<Option<UpdateInfo>, String>),
     Kudos(Result<String, String>),
-    Fetched { result: Result<Work, String>, open: bool },
+    Fetched { id: String, result: Result<Work, String>, open: bool },
+    /// A work's details for the pasted-link card.
+    LookedUp { id: String, result: Result<WorkMeta, String> },
+    Imported(Result<Work, String>),
     Epub { name: String, result: Result<Vec<u8>, String> },
     Login(Result<UserSession, String>),
     SessionUser(Result<Option<String>, String>),
+    Searched { page: u32, result: Result<Listing, String> },
+    /// First pages of followed feeds, by feed id.
+    FollowsChecked(Vec<(String, Result<Listing, String>)>),
+    FeedPage(Result<Listing, String>),
 }
 
 /// Work the window host runs after the frame, outside any borrow of the app
@@ -52,7 +61,8 @@ pub enum Deferred {
 pub enum Tab {
     Reader,
     Library,
-    Fetch,
+    Search,
+    Following,
     Account,
     Settings,
 }
@@ -66,13 +76,17 @@ pub struct App {
     toast: Option<(String, Instant)>,
     update_status: UpdateStatus,
     worker: Option<Worker<AppEvent>>,
+    /// Checking followed feeds takes a while; it runs here so downloads aren't held up.
+    slow_worker: Option<Worker<AppEvent>>,
+    follows: FollowStore,
+    search: SearchScreen,
+    following: FollowingScreen,
     config_dirty_since: Option<Instant>,
     pub deferred: Vec<Deferred>,
     font_families: Option<Vec<String>>,
     reader: Option<ReaderScreen>,
     last_progress_save: Instant,
     library_screen: LibraryScreen,
-    fetch: FetchScreen,
     account: AccountScreen,
     /// Cookie being verified with AO3 before it is saved.
     pending_cookie: Option<String>,
@@ -127,13 +141,16 @@ impl App {
             toast: None,
             update_status: UpdateStatus::Idle,
             worker: None,
+            slow_worker: None,
+            follows: FollowStore::load(),
+            search: SearchScreen::default(),
+            following: FollowingScreen::default(),
             config_dirty_since: None,
             deferred: Vec::new(),
             font_families: None,
             reader: None,
             last_progress_save: Instant::now(),
             library_screen: LibraryScreen::default(),
-            fetch: FetchScreen::default(),
             account: AccountScreen::default(),
             pending_cookie: None,
         }
@@ -142,13 +159,15 @@ impl App {
     /// Called once the window exists, so the worker can wake it.
     pub fn attach(&mut self, hwnd: HWND) {
         self.worker = Some(Worker::new(hwnd));
+        self.slow_worker = Some(Worker::new(hwnd));
         if self.config.check_updates_on_startup {
             self.check_updates();
         }
     }
 
-    pub fn worker(&self) -> Option<&Worker<AppEvent>> {
-        self.worker.as_ref()
+    /// Results waiting from both background workers.
+    pub fn take_events(&self) -> Vec<AppEvent> {
+        self.worker.iter().chain(self.slow_worker.iter()).flat_map(|w| w.results.try_iter()).collect()
     }
 
     fn check_updates(&mut self) {
@@ -172,23 +191,99 @@ impl App {
             }
             AppEvent::Kudos(Ok(msg)) => self.set_toast(msg),
             AppEvent::Kudos(Err(e)) => self.set_toast(format!("Couldn't leave kudos: {e}")),
-            AppEvent::Fetched { result: Ok(work), open } => {
+            AppEvent::Fetched { id, result: Ok(work), open } => {
                 if let Err(e) = self.library.save_work(&work) {
-                    self.fetch.set_error(format!("Downloaded, but couldn't save it: {e}"));
+                    let e = format!("Downloaded, but couldn't save it: {e}");
+                    if !self.search.link_done(&id, Err(e.clone()), false) {
+                        self.set_toast(e);
+                    }
                     return;
                 }
-                self.fetch.set_done(Some(work.meta.clone()));
+                self.search.link_done(&id, Ok(work.meta.clone()), true);
                 self.set_toast(format!("Saved “{}”", work.meta.title));
                 if open {
                     self.open_loaded(work);
                 }
             }
-            AppEvent::Fetched { result: Err(e), .. } => self.fetch.set_error(e),
+            AppEvent::Fetched { id, result: Err(e), .. } => {
+                if !self.search.link_done(&id, Err(e.clone()), false) || self.tab != Tab::Search {
+                    self.set_toast(format!("Couldn't download: {e}"));
+                }
+            }
+            AppEvent::LookedUp { id, result } => {
+                self.search.link_done(&id, result, false);
+            }
+            AppEvent::Imported(result) => {
+                let imp = &mut self.settings.import;
+                imp.busy = false;
+                match result.and_then(|work| self.library.save_work(&work).map(|_| work)) {
+                    Ok(work) => {
+                        imp.error = None;
+                        imp.done = Some((work.meta.id.clone(), work.meta.title.clone()));
+                        self.set_toast(format!("Imported “{}”", work.meta.title));
+                    }
+                    Err(e) => {
+                        imp.error = Some(e);
+                        imp.done = None;
+                    }
+                }
+            }
+            AppEvent::Searched { page, result } => {
+                self.search.busy = false;
+                match result {
+                    Ok(l) => {
+                        if page <= 1 {
+                            self.search.results.clear();
+                        }
+                        self.search.results.extend(l.works);
+                        self.search.total = l.total;
+                        self.search.page = page;
+                        self.search.has_next = l.has_next;
+                        self.search.error = None;
+                    }
+                    Err(e) => self.search.error = Some(e),
+                }
+            }
+            AppEvent::FollowsChecked(results) => {
+                self.following.checking = false;
+                let mut fresh = 0;
+                let mut errors = Vec::new();
+                for (fid, res) in results {
+                    match res {
+                        Ok(l) => fresh += self.follows.record(&fid, l).unwrap_or(0),
+                        Err(e) => {
+                            let name = self.follows.get(&fid).map(|f| f.feed.name.clone()).unwrap_or_default();
+                            errors.push(format!("{name}: {e}"));
+                            let _ = self.follows.record_error(&fid, e);
+                        }
+                    }
+                }
+                self.following.error = errors.into_iter().next();
+                if fresh > 0 {
+                    self.set_toast(if fresh == 1 { "1 new work from your follows".to_string() } else { format!("{fresh} new works from your follows") });
+                }
+            }
+            AppEvent::FeedPage(result) => {
+                self.following.more_busy = false;
+                match result {
+                    Ok(l) => {
+                        self.following.more.extend(l.works);
+                        self.following.more_page = l.page;
+                        self.following.more_next = l.has_next;
+                    }
+                    Err(e) => self.set_toast(format!("Couldn't load more: {e}")),
+                }
+            }
             AppEvent::Epub { name, result: Ok(data) } => {
-                self.fetch.set_done(None);
+                self.search.epub_done(None);
                 self.deferred.push(Deferred::SaveFile { name, filter: "EPUB e-book", ext: "epub", data });
             }
-            AppEvent::Epub { result: Err(e), .. } => self.fetch.set_error(e),
+            AppEvent::Epub { result: Err(e), .. } => {
+                self.search.epub_done(Some(e.clone()));
+                if self.tab != Tab::Search {
+                    self.set_toast(format!("Couldn't download the EPUB: {e}"));
+                }
+            }
             AppEvent::Login(Ok(session)) => {
                 let name = session.username.clone().unwrap_or_default();
                 self.config.session = session;
@@ -227,18 +322,20 @@ impl App {
 
     fn start_fetch(&mut self, work_id: String, open: bool) {
         let client = self.client.clone();
-        self.run_job(move || AppEvent::Fetched { result: client.fetch_work(&work_id), open });
+        self.run_job(move || AppEvent::Fetched { result: client.fetch_work(&work_id), id: work_id, open });
     }
 
-    /// Reads and parses a saved .json or AO3 .html download off the UI thread.
+    /// Reads and parses an EPUB, AO3 .html download or saved .json work off the UI thread.
     pub fn import_file(&mut self, path: std::path::PathBuf) {
-        self.fetch.start_import();
-        self.tab = Tab::Fetch;
+        self.settings.import.busy = true;
+        self.settings.import.error = None;
+        self.tab = Tab::Settings;
+        self.settings.show_import();
         self.run_job(move || {
             let result = std::fs::read(&path)
                 .map_err(|e| format!("Couldn't read the file: {e}"))
                 .and_then(|bytes| crate::ao3::epub::import_bytes(&bytes));
-            AppEvent::Fetched { result, open: true }
+            AppEvent::Imported(result)
         });
     }
 
@@ -256,6 +353,7 @@ impl App {
         let title = work.meta.title.clone();
         self.reader = Some(ReaderScreen::new(work, progress.as_ref()));
         self.library.touch_history(&id);
+        let _ = self.follows.mark_work_read(&id);
         self.tab = Tab::Reader;
         self.deferred.push(Deferred::SetTitle(format!("{title} — AO3 Reader")));
     }
@@ -266,8 +364,6 @@ impl App {
             None if work_id.chars().all(|c| c.is_ascii_digit()) => {
                 // The text was cleared from disk; the library entry still knows the work.
                 self.set_toast("Downloading this work again…");
-                self.tab = Tab::Fetch;
-                self.fetch.busy = Some(super::fetch::Busy::Work);
                 self.start_fetch(work_id.to_string(), true);
             }
             None => self.set_toast("This work's text isn't on disk any more."),
@@ -390,12 +486,22 @@ impl App {
         if self.tab == Tab::Reader {
             self.reader_frame(ui, Rect::new(0.0, 0.0, w, h));
         }
+        if self.tab != Tab::Following {
+            self.following.left();
+        }
         if self.tab != Tab::Reader {
             let body = Rect::new(0.0, HEADER_H, w, (h - HEADER_H).max(0.0));
             match self.tab {
                 Tab::Settings => self.settings_frame(ui, body),
                 Tab::Library => self.library_frame(ui, body),
-                Tab::Fetch => self.fetch_frame(ui, body),
+                Tab::Search => {
+                    let actions = self.search.frame(ui, body, &self.library, &self.follows, signed_in(&self.config.session));
+                    self.browse_actions(actions);
+                }
+                Tab::Following => {
+                    let actions = self.following.frame(ui, body, &self.follows, &self.library);
+                    self.browse_actions(actions);
+                }
                 Tab::Account => self.account_frame(ui, body),
                 Tab::Reader => {}
             }
@@ -420,30 +526,40 @@ impl App {
         ui.g.fill_rect(r, c.surface);
         ui.separator(r.x, r.bottom() - 1.0, r.w);
 
-        let badge = Rect::new(16.0, 14.0, 46.0, 28.0);
-        ui.g.fill_round(badge, 6.0, c.accent);
-        ui.text_in("AO3", &TextStyle::ui(14.0).bold(), badge, Align::Center, c.on_accent);
+        // The Archive's own mark, lightened on dark themes so it stays visible.
+        ui.g.fill_path(logo::PATH, logo::SIZE, Rect::new(18.0, 13.0, 44.0, 30.0), c.accent_mark);
         ui.text_in("Reader", &TextStyle::ui(16.0).semibold(), Rect::new(70.0, r.y, 70.0, r.h), Align::Left, c.text);
 
-        let lib_label = format!("Library ({})", self.library.entries().len());
         let account_label = if signed_in(&self.config.session) { self.config.session.username.clone().unwrap_or_else(|| "Account".into()) } else { "Guest".into() };
         let mut items = vec![
-            (icons::LIBRARY, lib_label.as_str()),
-            (icons::DOWNLOAD, "Fetch"),
+            (icons::LIBRARY, "Library"),
+            (icons::SEARCH, "Search"),
+            (icons::BELL, "Following"),
             (icons::CONTACT, account_label.as_str()),
             (icons::SETTINGS, "Settings"),
         ];
-        let mut tabs = vec![Tab::Library, Tab::Fetch, Tab::Account, Tab::Settings];
+        let mut tabs = vec![Tab::Library, Tab::Search, Tab::Following, Tab::Account, Tab::Settings];
+        // New works from follows show as a badge on Following.
+        let mut badges = vec![0, 0, self.follows.unread_total(), 0, 0];
         if self.reader.is_some() {
             items.insert(0, (icons::READING, "Reading"));
             tabs.insert(0, Tab::Reader);
+            badges.insert(0, 0);
         }
         let mut sel = tabs.iter().position(|t| *t == self.tab).unwrap_or(0);
 
         let has_update = matches!(self.update_status, UpdateStatus::UpdateAvailable(_));
         let update_w = if has_update { if r.w > 860.0 { ui.button_width("Update available", Some(icons::UPDATE)) } else { 40.0 } } else { 0.0 };
         let tabs_w = r.w - 156.0 - update_w - 16.0;
-        let (_, changed) = ui.tab_strip(id("nav"), 156.0, 11.0, tabs_w, &items, &mut sel);
+        let full: f32 = items.iter().zip(&badges).map(|((icon, label), n)| ui.button_width(label, Some(icon)) + ui.badge_width(*n) + 12.0).sum();
+        if full > tabs_w {
+            for (i, item) in items.iter_mut().enumerate() {
+                if i != sel {
+                    item.1 = "";
+                }
+            }
+        }
+        let (_, changed) = ui.tab_strip(id("nav"), 156.0, 11.0, tabs_w, &items, &badges, &mut sel);
         if changed {
             self.tab = tabs[sel];
         }
@@ -464,7 +580,11 @@ impl App {
                 LibraryAction::Open(id) => self.open_work(&id),
                 LibraryAction::ToggleFavorite(id) => self.library.toggle_favorite(&id),
                 LibraryAction::SetShelf(id, shelf) => self.library.set_shelf(&id, shelf),
-                LibraryAction::GoFetch => self.tab = Tab::Fetch,
+                LibraryAction::GoSearch => self.tab = Tab::Search,
+                LibraryAction::GoImport => {
+                    self.tab = Tab::Settings;
+                    self.settings.show_import();
+                }
                 LibraryAction::Delete(id) => {
                     if self.reader.as_ref().is_some_and(|r| r.work_id() == id) {
                         self.reader = None;
@@ -490,20 +610,98 @@ impl App {
         }
     }
 
-    fn fetch_frame(&mut self, ui: &mut Ui, body: Rect) {
-        let logged_in = signed_in(&self.config.session);
-        for a in self.fetch.frame(ui, body, logged_in) {
+    fn check_follows(&mut self, target: Target) {
+        let ids: Vec<String> = match target {
+            Target::One(id) => vec![id],
+            Target::Kind(k) => self.follows.list().iter().filter(|f| f.feed.kind == k).map(|f| f.id()).collect(),
+            Target::Stale => self.follows.stale(STALE_MINUTES),
+        };
+        if ids.is_empty() {
+            self.following.checking = false;
+            return;
+        }
+        let feeds: Vec<(String, Feed)> = ids.into_iter().filter_map(|id| self.follows.get(&id).map(|f| (id, f.feed.clone()))).collect();
+        let Some(w) = &self.slow_worker else { return };
+        self.following.checking = true;
+        let client = self.client.clone();
+        w.run(move || {
+            // One feed at a time with a pause between, to go easy on AO3.
+            let mut out = Vec::new();
+            for (i, (id, feed)) in feeds.into_iter().enumerate() {
+                if i > 0 {
+                    std::thread::sleep(Duration::from_millis(1200));
+                }
+                let res = client.feed(&feed, 1);
+                let stop = res.as_ref().is_err_and(|e| e.contains("429"));
+                out.push((id, res));
+                if stop {
+                    break;
+                }
+            }
+            AppEvent::FollowsChecked(out)
+        });
+    }
+
+    fn browse_actions(&mut self, actions: Vec<BrowseAction>) {
+        for a in actions {
             match a {
-                FetchAction::Fetch { id, open } => self.start_fetch(id, open),
-                FetchAction::Epub(work_id) => {
+                BrowseAction::Search(q, page) => {
                     let client = self.client.clone();
-                    let title = self.library.get_entry(&work_id).map(|e| e.meta.title.clone()).unwrap_or_else(|| format!("ao3_{work_id}"));
+                    self.search.busy = true;
+                    self.run_job(move || AppEvent::Searched { page, result: client.search(&q, page) });
+                }
+                BrowseAction::Read(id) => {
+                    if self.library.get_entry(&id).is_some() && self.library.load_work(&id).is_some() {
+                        self.open_work(&id);
+                    } else {
+                        self.set_toast("Downloading the work…");
+                        self.start_fetch(id, true);
+                    }
+                }
+                BrowseAction::Save(id) => {
+                    self.set_toast("Saving the work to your library…");
+                    self.start_fetch(id, false);
+                }
+                BrowseAction::Follow(feed) => {
+                    let (name, kind) = (feed.name.clone(), feed.kind);
+                    match self.follows.add(feed) {
+                        Ok(fid) => {
+                            self.set_toast(format!("Following {name}"));
+                            self.following.show_kind(kind);
+                            self.check_follows(Target::One(fid));
+                        }
+                        Err(e) => self.set_toast(e),
+                    }
+                }
+                BrowseAction::Unfollow(fid) => {
+                    let _ = self.follows.remove(&fid);
+                    self.set_toast("Unfollowed");
+                }
+                BrowseAction::Check(target) => self.check_follows(target),
+                BrowseAction::MarkRead(target) => {
+                    let _ = match &target {
+                        Target::One(id) => self.follows.mark_read(Scope::One(id)),
+                        Target::Kind(k) => self.follows.mark_read(Scope::Kind(*k)),
+                        Target::Stale => Ok(()),
+                    };
+                }
+                BrowseAction::FeedPage(feed, page) => {
+                    let client = self.client.clone();
+                    self.run_job(move || AppEvent::FeedPage(client.feed(&feed, page)));
+                }
+                BrowseAction::OpenUrl(url) => self.deferred.push(Deferred::Open(url)),
+                BrowseAction::LookUp(id) => {
+                    let client = self.client.clone();
+                    self.run_job(move || AppEvent::LookedUp { result: client.work_meta(&id), id });
+                }
+                BrowseAction::Epub(work_id) => {
+                    let client = self.client.clone();
+                    let known = self.search.link.as_ref().and_then(|l| l.meta.as_ref()).map(|m| m.title.clone());
+                    let title = known.or_else(|| self.library.get_entry(&work_id).map(|e| e.meta.title.clone())).unwrap_or_else(|| format!("ao3_{work_id}"));
                     let name = file_name(&title, "epub");
                     self.run_job(move || AppEvent::Epub { name, result: client.download_epub(&work_id) });
                 }
-                FetchAction::Import => self.deferred.push(Deferred::ImportFile),
-                FetchAction::Open(id) => self.open_work(&id),
-                FetchAction::GoAccount => self.tab = Tab::Account,
+                BrowseAction::GoAccount => self.tab = Tab::Account,
             }
         }
     }
@@ -551,6 +749,8 @@ impl App {
                 SettingsAction::CheckUpdates => self.check_updates(),
                 SettingsAction::PickFontFile => self.deferred.push(Deferred::PickFontFile),
                 SettingsAction::Open(target) => self.deferred.push(Deferred::Open(target)),
+                SettingsAction::Import => self.deferred.push(Deferred::ImportFile),
+                SettingsAction::OpenWork(id) => self.open_work(&id),
                 SettingsAction::ClearCache => {
                     let works = storage_dir.join("works");
                     let _ = std::fs::remove_dir_all(&works);
@@ -575,11 +775,11 @@ impl App {
         let style = TextStyle::ui(13.5);
         let t = ui.measure(msg, &style, TextOpts::wrap((w - 120.0).min(520.0)));
         let r = Rect::new((w - t.w - 56.0) / 2.0, h - t.h - 48.0, t.w + 56.0, t.h + 22.0);
+        ui.g.fill_round(Rect::new(r.x, r.y + 2.0, r.w, r.h), 8.0, Color::from_u8(0, 0, 0).alpha(0.16));
         ui.g.fill_round(r, 8.0, c.surface);
         ui.g.stroke_round(r, 8.0, 1.0, c.border);
-        ui.g.fill_round(Rect::new(r.x, r.y, 4.0, r.h), 2.0, c.accent);
         let it = ui.measure(icons::INFO, &TextStyle::icons(14.0), TextOpts::default());
-        ui.g.draw_text(it, r.x + 16.0, r.y + (r.h - it.h) / 2.0, c.accent);
+        ui.g.draw_text(it, r.x + 16.0, r.y + (r.h - it.h) / 2.0, c.accent_text);
         ui.g.draw_text(t, r.x + 40.0, r.y + 11.0, c.text);
     }
 }
