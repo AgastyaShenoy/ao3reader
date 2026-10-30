@@ -182,7 +182,7 @@ impl FetchScreen {
             }
         }
 
-        let tips = "Paste a link to any chapter or to the work itself; the whole work is downloaded. Works for registered users only need you to sign in under Account. Downloads are saved on this PC, so you can read them offline.";
+        let tips = "Paste a link to any chapter or to the work itself; the whole work is downloaded. Import file… opens EPUB books (including AO3's EPUB downloads) and AO3 HTML downloads. Works for registered users only need you to sign in under Account. Downloads are saved on this PC, so you can read them offline.";
         let t = ui.measure(tips, &TextStyle::ui(13.0), TextOpts::wrap(w - 36.0).line_height(1.45));
         let r = col.take(t.h + 54.0);
         ui.card(r);

@@ -235,21 +235,9 @@ impl App {
         self.fetch.start_import();
         self.tab = Tab::Fetch;
         self.run_job(move || {
-            let result = std::fs::read_to_string(&path).map_err(|e| format!("Couldn't read the file: {e}")).and_then(|content| {
-                let is_json = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"));
-                if is_json {
-                    serde_json::from_str::<Work>(&content).map_err(|e| format!("Not a saved AO3 Reader work: {e}"))
-                } else {
-                    // AO3 downloads link back to the work; otherwise derive a stable local id.
-                    let id = Ao3Parser::extract_work_id(&content).unwrap_or_else(|| {
-                        use std::hash::{Hash, Hasher};
-                        let mut h = std::collections::hash_map::DefaultHasher::new();
-                        content.hash(&mut h);
-                        format!("local-{:x}", h.finish())
-                    });
-                    Ao3Parser::parse_work(&content, &id)
-                }
-            });
+            let result = std::fs::read(&path)
+                .map_err(|e| format!("Couldn't read the file: {e}"))
+                .and_then(|bytes| crate::ao3::epub::import_bytes(&bytes));
             AppEvent::Fetched { result, open: true }
         });
     }

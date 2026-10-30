@@ -406,7 +406,7 @@ impl Ao3Parser {
     }
 
     /// Extract readable paragraphs from a userstuff element
-    fn extract_paragraphs(element: scraper::ElementRef) -> Vec<String> {
+    pub(crate) fn extract_paragraphs(element: scraper::ElementRef) -> Vec<String> {
         let p_sel = Selector::parse("p, blockquote, hr, h1, h2, h3, h4, h5, h6, ul, ol").unwrap();
         let mut paragraphs = Vec::new();
 
@@ -453,7 +453,7 @@ impl Ao3Parser {
     }
 
     /// Collapses runs of spaces like a browser does and drops spaces around line breaks.
-    fn collapse_whitespace(s: &str) -> String {
+    pub(crate) fn collapse_whitespace(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
         for c in s.chars() {
             if c == ' ' && (out.ends_with(' ') || out.ends_with('\n')) {
@@ -468,7 +468,7 @@ impl Ao3Parser {
     }
 
     /// Clean inner text of an element, preserving inline formatting cues if needed
-    fn clean_element_text(element: scraper::ElementRef) -> String {
+    pub(crate) fn clean_element_text(element: scraper::ElementRef) -> String {
         let mut result = String::new();
         for node in element.children() {
             if let Some(text) = node.value().as_text() {

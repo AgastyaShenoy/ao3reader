@@ -374,7 +374,7 @@ fn run_deferred() {
             Deferred::ImportFile => {
                 let picked = rfd::FileDialog::new()
                     .set_title("Import a work")
-                    .add_filter("AO3 download or saved work (*.html, *.json)", &["html", "htm", "json"])
+                    .add_filter("EPUB, AO3 download or saved work (*.epub, *.html, *.json)", &["epub", "html", "htm", "json"])
                     .pick_file();
                 if let Some(path) = picked {
                     with_host(|host| host.app.import_file(path));

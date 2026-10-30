@@ -23,6 +23,8 @@ required-features = ["native-ui"]
 
 [dependencies]
 chrono = { version = "0.4.45", features = ["serde"] }
+# Already used by ureq for gzip; also unpacks EPUB (ZIP) files.
+flate2 = "1"
 directories = "6.0.0"
 mimalloc = { version = "0.1", default-features = false }
 regex = "1.13.1"

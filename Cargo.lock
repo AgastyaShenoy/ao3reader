@@ -179,6 +179,7 @@ dependencies = [
  "directories",
  "eframe",
  "egui",
+ "flate2",
  "mimalloc",
  "regex",
  "rfd",
