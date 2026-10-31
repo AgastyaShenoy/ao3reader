@@ -811,6 +811,8 @@ impl SettingsScreen {
                     ("↑  ↓", "Move the reading ruler a line (when it's on)"),
                     ("Ctrl+F", "Search in the work"),
                     ("Ctrl+B", "Bookmark this page"),
+                    ("Double-click", "Select a word, to highlight, copy or define it"),
+                    ("Ctrl+C", "Copy the selected text"),
                     ("Ctrl+=  Ctrl+-", "Larger / smaller text"),
                     ("R", "Read aloud, or stop"),
                     ("F", "Focus mode"),

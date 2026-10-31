@@ -1,4 +1,4 @@
-# AO3 Reader for Android
+# Flax Reader for Android
 
 The Android app uses the same Rust core as the desktop app (AO3 client and parser, library, search, export, reading positions). Only the interface is Android-specific.
 

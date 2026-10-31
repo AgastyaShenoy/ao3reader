@@ -5,9 +5,10 @@ use super::gfx::*;
 use super::icons;
 use super::reader::preface::thousands;
 use super::ui::*;
-use crate::ao3::models::{LibraryEntry, ShelfStatus};
+use crate::ao3::models::{LibraryEntry, ShelfStatus, WorkMeta};
 use crate::storage::library::LibraryManager;
 
+/// A card's height with everything on it; books without tags or a summary get shorter ones.
 const CARD_H: f32 = 192.0;
 const GAP: f32 = 10.0;
 const MAX_W: f32 = 960.0;
@@ -86,7 +87,7 @@ impl LibraryScreen {
         let search = Rect::new(x + w - search_w, body.y + 22.0, search_w, 36.0);
         let it = ui.measure(icons::SEARCH, &TextStyle::icons(14.0), TextOpts::default());
         ui.g.draw_text(it, search.x - 24.0, search.y + (36.0 - it.h) / 2.0, c.muted);
-        ui.text_input(id("lib-search"), search, &mut self.query, "Search title, author, fandom, tag", false);
+        ui.text_input(id("lib-search"), search, &mut self.query, "Search title, author or tag", false);
 
         // Filters, each with a count badge (none for an empty shelf), and sorting.
         let y = body.y + 22.0 + title.h + 14.0;
@@ -140,8 +141,10 @@ impl LibraryScreen {
         let confirm = self.confirm_delete.clone();
         let mut set_confirm: Option<Option<String>> = None;
         ui.scroll_area(id("lib-list"), area, |ui, view, y0| {
-            for (i, e) in list.iter().enumerate() {
-                let r = Rect::new(x, y0 + 2.0 + i as f32 * (CARD_H + GAP), w, CARD_H);
+            let mut y = y0 + 2.0;
+            for e in &list {
+                let r = Rect::new(x, y, w, card_height(&e.meta));
+                y += r.h + GAP;
                 if r.bottom() < view.y || r.y > view.bottom() {
                     continue;
                 }
@@ -150,13 +153,26 @@ impl LibraryScreen {
                     set_confirm = Some(c);
                 }
             }
-            list.len() as f32 * (CARD_H + GAP) + 24.0
+            y - y0 + 22.0
         });
         if let Some(c) = set_confirm {
             self.confirm_delete = c;
         }
         out
     }
+}
+
+/// Where a card's summary goes (below its tags, if it has any), and the card's height.
+fn card_layout(m: &WorkMeta) -> (f32, f32) {
+    let has_pills = !super::reader::preface::card_pills(m, 3).is_empty();
+    let has_summary = !m.summary_text.trim().is_empty();
+    let summary_y = if has_pills { 98.0 } else { 68.0 };
+    let h = if has_summary { summary_y + 40.0 } else if has_pills { 96.0 } else { 64.0 } + 56.0;
+    (summary_y, h.min(CARD_H))
+}
+
+fn card_height(m: &WorkMeta) -> f32 {
+    card_layout(m).1
 }
 
 /// Draws one work card. Returns a change to the delete-confirmation state.
@@ -201,7 +217,7 @@ fn card(ui: &mut Ui, r: Rect, e: &LibraryEntry, confirming: bool, out: &mut Vec<
     ui.g.pop_clip();
 
     let summary = m.summary_text.split_whitespace().collect::<Vec<_>>().join(" ");
-    ui.text_opts(&summary, &TextStyle::ui(13.0), TextOpts::wrap(r.w - 32.0).max_lines(2).line_height(1.35), r.x + 16.0, r.y + 98.0, c.text.alpha(0.82));
+    ui.text_opts(&summary, &TextStyle::ui(13.0), TextOpts::wrap(r.w - 32.0).max_lines(2).line_height(1.35), r.x + 16.0, r.y + card_layout(m).0, c.text.alpha(0.82));
 
     // Bottom row: progress and actions, or the delete confirmation.
     let by = r.bottom() - 46.0;

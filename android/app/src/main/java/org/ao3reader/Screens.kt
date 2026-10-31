@@ -285,7 +285,7 @@ private fun pickColour(a: MainActivity, title: String, key: String) {
 }
 
 const val DISCORD_INVITE = "https://discord.gg/3xuJY8UXKu"
-const val GITHUB = "https://github.com/AgastyaShenoy/ao3reader"
+const val GITHUB = "https://github.com/AgastyaShenoy/flax-reader"
 
 /** Settings' categories, most used first: icon, name, what's in it. */
 private val CATEGORIES = listOf(

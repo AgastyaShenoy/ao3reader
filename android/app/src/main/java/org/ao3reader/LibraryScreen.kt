@@ -41,7 +41,7 @@ fun libraryScreen(a: MainActivity): View {
     val box = a.column()
     box.addView(a.header("Library", logo = true))
 
-    val search = a.input("Search title, author, fandom, tag")
+    val search = a.input("Search title, author or tag")
     search.setText(st.query)
     box.addView(search, lp(top = 0).apply { leftMargin = a.dp(16); rightMargin = a.dp(16) })
 
@@ -187,9 +187,10 @@ private fun workCard(a: MainActivity, e: JSONObject): View {
     actions.addView(shelfBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = a.dp(8) })
     actions.addView(View(a), LinearLayout.LayoutParams(0, 1, 1f))
     lateinit var more: View
-    more = a.iconButton(R.drawable.ic_more, p.text, "More: export or delete") {
+    more = a.iconButton(R.drawable.ic_more, p.text, if (pdfPages > 0) "More: delete" else "More: export or delete") {
         val menu = a.popupMenu(more)
-        EXPORTS.forEachIndexed { i, (_, name, _) -> menu.menu.add(0, i, i, "Export as $name") }
+        // A PDF is already its own file: nothing to export.
+        if (pdfPages == 0) EXPORTS.forEachIndexed { i, (_, name, _) -> menu.menu.add(0, i, i, "Export as $name") }
         menu.menu.add(0, 99, 99, "Delete from library")
         menu.setOnMenuItemClickListener {
             if (it.itemId == 99) confirmDelete(a, id, m.getString("title")) else export(a, id, it.itemId)
