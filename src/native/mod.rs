@@ -7,6 +7,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 mod account;
+mod book;
 mod browse;
 pub mod app;
 mod edit;
@@ -15,6 +16,7 @@ mod gfx;
 mod icons;
 mod library;
 mod mark;
+mod pdf;
 mod reader;
 mod settings;
 mod speech;
@@ -487,7 +489,7 @@ fn run_deferred() {
             Deferred::ImportFile => {
                 let picked = rfd::FileDialog::new()
                     .set_title("Import a work")
-                    .add_filter("EPUB, AO3 download or saved work (*.epub, *.html, *.json)", &["epub", "html", "htm", "json"])
+                    .add_filter("EPUB, PDF, AO3 download or saved work (*.epub, *.pdf, *.html, *.json)", &["epub", "pdf", "html", "htm", "json"])
                     .pick_file();
                 if let Some(path) = picked {
                     with_host(|host| host.app.import_file(path));

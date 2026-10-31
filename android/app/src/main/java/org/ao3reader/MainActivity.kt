@@ -27,7 +27,7 @@ class MainActivity : Activity() {
     private lateinit var nav: LinearLayout
     private var tab = LIBRARY
     private var animateTab = false
-    private var reader: ReaderScreen? = null
+    private var reader: BookView? = null
 
     val library = LibraryState()
     val search = SearchState()
@@ -117,11 +117,18 @@ class MainActivity : Activity() {
         val copied = runCatching { contentResolver.openInputStream(uri)?.use { input -> tmp.outputStream().use { input.copyTo(it) } } != null }.getOrDefault(false)
         if (!copied) return toast("Couldn't open that file")
         toast("Opening the book…")
-        Core.background("import", json("path" to tmp.absolutePath)) { r ->
+        Core.background("import", json("path" to tmp.absolutePath, "name" to displayName(uri))) { r ->
             tmp.delete()
             r.onSuccess { openWork((it as org.json.JSONObject).getString("id")) }.onFailure { toast(it.message ?: "Couldn't open that book") }
         }
     }
+
+    /** A document's name without its extension, if the app that shared it tells. */
+    fun displayName(uri: android.net.Uri): String? = runCatching {
+        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0)?.substringBeforeLast('.') else null
+        }
+    }.getOrNull()
 
     @Deprecated("Used before Android 13")
     override fun onBackPressed() {
@@ -201,7 +208,7 @@ class MainActivity : Activity() {
 
         reader?.let { r ->
             r.rebuild()
-            root.addView(r, frame())
+            root.addView(r.view, frame())
         }
         root.requestApplyInsets()
     }
@@ -307,12 +314,14 @@ class MainActivity : Activity() {
             getSystemService(android.view.inputmethod.InputMethodManager::class.java)?.hideSoftInputFromWindow(v.windowToken, 0)
         }
         runCatching { Core.req("follows.read", json("work" to id)) }
-        val r = ReaderScreen(this, id, opened)
-        reader?.let { it.close(); root.removeView(it) }
+        // PDFs show their pages as they are; everything else is laid out as text.
+        val isPdf = opened.getJSONObject("meta").optInt("pdf_pages", 0) > 0
+        val r: BookView = if (isPdf) PdfScreen(this, id, opened) else ReaderScreen(this, id, opened)
+        reader?.let { it.close(); root.removeView(it.view) }
         reader = r
-        root.addView(r, frame())
+        root.addView(r.view, frame())
         r.setInsets(insetTop, insetBottom, cutoutTop)
-        Anim.enter(r, dy = dpf(28), ms = 220)
+        Anim.enter(r.view, dy = dpf(28), ms = 220)
         if (!hintShown) {
             hintShown = true
             toast("Tap the middle of the page for the menu; tap the sides to turn pages.")
@@ -327,8 +336,8 @@ class MainActivity : Activity() {
         immersive(false)
         // Rebuild the screens underneath, then let the reader fade away on top of them.
         rebuild()
-        root.addView(r)
-        Anim.exit(r, dy = dpf(28), ms = 160) { root.removeView(r) }
+        root.addView(r.view)
+        Anim.exit(r.view, dy = dpf(28), ms = 160) { root.removeView(r.view) }
     }
 
     /** Downloads a work; `done` gets the work id on success, `failed` the error (else it's a toast). */

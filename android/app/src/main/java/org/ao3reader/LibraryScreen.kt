@@ -150,8 +150,12 @@ private fun workCard(a: MainActivity, e: JSONObject): View {
     val started = e.getInt("chapter") > 1 || e.getDouble("percentage") > 0 || e.getDouble("position") > 0
     val completed = e.getBoolean("completed")
     val pct = e.getDouble("percentage")
+    // A PDF counts pages instead of chapters and words.
+    val pdfPages = m.optInt("pdf_pages", 0)
     val status = when {
         completed -> "Finished"
+        pdfPages > 0 && started -> "Page ${minOf(e.getDouble("position").toInt() + 1, pdfPages)} of $pdfPages  ·  ${pct.toInt()}%"
+        pdfPages > 0 -> "$pdfPages pages  ·  not started"
         started -> "Chapter ${e.getInt("chapter")} of ${m.getInt("chapters")}  ·  ${pct.toInt()}%"
         else -> "${m.getInt("chapters")} chapters  ·  not started"
     }
@@ -164,7 +168,8 @@ private fun workCard(a: MainActivity, e: JSONObject): View {
         progressBackgroundTintList = android.content.res.ColorStateList.valueOf(p.border)
     }, LinearLayout.LayoutParams(0, a.dp(4), 1f).apply { leftMargin = a.dp(12) })
     card.addView(prog, lp(top = a.dp(12)))
-    card.addView(a.label("${thousands(m.getLong("words"))} words" + if (m.getLong("kudos") > 0) "  ·  ${thousands(m.getLong("kudos"))} kudos" else "", 12f, p.muted), lp(top = a.dp(4)))
+    val stats = if (pdfPages > 0) "PDF" else "${thousands(m.getLong("words"))} words" + if (m.getLong("kudos") > 0) "  ·  ${thousands(m.getLong("kudos"))} kudos" else ""
+    card.addView(a.label(stats, 12f, p.muted), lp(top = a.dp(4)))
 
     val actions = a.row()
     actions.addView(a.button(if (completed) "Read again" else if (started) "Resume" else "Read", Kind.Tonal, R.drawable.ic_book) { a.openWork(id) })

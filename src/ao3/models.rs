@@ -138,9 +138,16 @@ pub struct WorkMeta {
     pub stats: WorkStats,
     pub is_restricted: bool, // Requires AO3 login
     pub is_complete: bool,
+    /// A PDF (drawn page by page from the file, see `crate::pdf`), with its page count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf_pages: Option<u32>,
 }
 
 impl WorkMeta {
+    pub fn is_pdf(&self) -> bool {
+        self.pdf_pages.is_some()
+    }
+
     /// A work from AO3 (its id is AO3's work number), as opposed to a book imported from a file.
     /// Ratings, kudos and "complete" only mean something for these.
     pub fn is_ao3(&self) -> bool {
@@ -168,6 +175,7 @@ impl Default for WorkMeta {
             stats: WorkStats::default(),
             is_restricted: false,
             is_complete: false,
+            pdf_pages: None,
         }
     }
 }

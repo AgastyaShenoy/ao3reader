@@ -8,7 +8,7 @@ description = "Bridge between the Android app and the AO3 Reader core library"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-ao3reader = { path = "../..", default-features = false }
+ao3reader = { path = "../..", default-features = false, features = ["pdf"] }
 chrono = "0.4"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
@@ -22,4 +22,5 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 strip = true
-panic = "abort"
+# Unwind (not abort), so a page the PDF engine can't draw fails alone instead of closing the app.
+panic = "unwind"

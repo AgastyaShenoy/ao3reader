@@ -853,6 +853,26 @@ impl Gfx {
         }
     }
 
+    /// Draws 0x00RRGGBB pixels (`w` × `h`, rows `w` apart) over `dest`, one pixel per device
+    /// pixel when `dest` is that size.
+    pub fn draw_pixels(&mut self, pixels: &[u32], w: u32, h: u32, dest: Rect) {
+        if !self.drawing || w == 0 || h == 0 || pixels.len() < w as usize * h as usize {
+            return;
+        }
+        unsafe {
+            let props = D2D1_BITMAP_PROPERTIES {
+                // Little-endian 0x00RRGGBB is B, G, R, unused: BGRA with the alpha ignored.
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_IGNORE },
+                dpiX: self.dpi,
+                dpiY: self.dpi,
+            };
+            let size = D2D_SIZE_U { width: w, height: h };
+            if let Ok(bmp) = self.rt.CreateBitmap(size, Some(pixels.as_ptr() as *const core::ffi::c_void), w * 4, &props) {
+                self.rt.DrawBitmap(&bmp, Some(&dest.d2d()), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, None);
+            }
+        }
+    }
+
     pub fn draw_text(&mut self, t: Text, x: f32, y: f32, c: Color) {
         if !self.drawing {
             return;

@@ -1,0 +1,19 @@
+[package]
+name = "pdf-engine"
+version = "0.1.0"
+edition = "2024"
+description = "PDF pages, text, links and outline, from the pdfreader project (see crates/README.md)"
+publish = false
+
+[dependencies]
+memmap2 = "0.9"
+# hayro's interpreter, plus what its renderer (vendored in src/raster) needs, with hayro's own features
+hayro-interpret = "0.8.0"
+# the type of a glyph's Unicode text
+hayro-cmap = "0.1.0"
+bytemuck = { version = "1", features = ["bytemuck_derive"] }
+fearless_simd = "1.0.0"
+kurbo = "0.13.0"
+pic-scale = { version = "0.7.9", default-features = false, features = ["neon", "rdm", "sse", "avx"] }
+rustc-hash = "2"
+vello_cpu = { version = "0.3", default-features = false, features = ["std", "png", "u8_pipeline"] }

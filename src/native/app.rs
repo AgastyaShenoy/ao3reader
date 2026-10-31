@@ -6,6 +6,8 @@ use super::browse::{BrowseAction, FollowingScreen, SearchScreen, Target};
 use super::icons;
 use super::mark;
 use super::library::{ExportFormat, LibraryAction, LibraryScreen};
+use super::book::Book;
+use super::pdf::PdfScreen;
 use super::reader::{ReaderAction, ReaderScreen};
 use super::settings::{SettingsAction, SettingsCtx, SettingsScreen};
 use super::ui::*;
@@ -80,13 +82,15 @@ pub struct App {
     worker: Option<Worker<AppEvent>>,
     /// Checking followed feeds takes a while; it runs here so downloads aren't held up.
     slow_worker: Option<Worker<AppEvent>>,
+    /// The main window, for render threads to wake (as a raw handle value).
+    hwnd: usize,
     follows: FollowStore,
     search: SearchScreen,
     following: FollowingScreen,
     config_dirty_since: Option<Instant>,
     pub deferred: Vec<Deferred>,
     font_families: Option<Vec<String>>,
-    reader: Option<ReaderScreen>,
+    reader: Option<Book>,
     last_progress_save: Instant,
     library_screen: LibraryScreen,
     account: AccountScreen,
@@ -153,6 +157,7 @@ impl App {
             update_status: UpdateStatus::Idle,
             worker: None,
             slow_worker: None,
+            hwnd: 0,
             follows: FollowStore::load(),
             search: SearchScreen::default(),
             following: FollowingScreen::default(),
@@ -172,6 +177,7 @@ impl App {
 
     /// Called once the window exists, so the worker can wake it.
     pub fn attach(&mut self, hwnd: HWND) {
+        self.hwnd = hwnd.0 as usize;
         self.worker = Some(Worker::new(hwnd));
         self.slow_worker = Some(Worker::new(hwnd));
         if self.config.check_updates_on_startup {
@@ -360,9 +366,11 @@ impl App {
         self.tab = Tab::Settings;
         self.settings.show_import();
         self.run_job(move || {
+            // The file's name stands in for a missing title (PDFs often have none).
+            let name = path.file_stem().map(|s| s.to_string_lossy().into_owned());
             let result = std::fs::read(&path)
                 .map_err(|e| format!("Couldn't read the file: {e}"))
-                .and_then(|bytes| crate::ao3::epub::import_bytes(&bytes));
+                .and_then(|bytes| crate::ao3::epub::import_named(&bytes, name.as_deref()));
             AppEvent::Imported(result)
         });
     }
@@ -379,7 +387,25 @@ impl App {
         let id = work.meta.id.clone();
         let progress = self.library.get_entry(&id).map(|e| e.progress.clone());
         let title = work.meta.title.clone();
-        self.reader = Some(ReaderScreen::new(work, progress.as_ref()));
+        if work.meta.is_pdf() {
+            match crate::pdf::open(&id) {
+                Ok(engine) => {
+                    // Render threads wake the window when pages are ready.
+                    let hwnd = self.hwnd;
+                    let wake = move || unsafe {
+                        use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+                        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(Some(HWND(hwnd as *mut _)), super::worker::WM_APP_RESULT, WPARAM(0), LPARAM(0));
+                    };
+                    self.reader = Some(Book::Pdf(PdfScreen::new(work.meta, engine, progress.as_ref(), wake)));
+                }
+                Err(e) => {
+                    self.set_toast(e);
+                    return;
+                }
+            }
+        } else {
+            self.reader = Some(Book::Text(ReaderScreen::new(work, progress.as_ref())));
+        }
         self.library.touch_history(&id);
         let _ = self.follows.mark_work_read(&id);
         self.tab = Tab::Reader;
@@ -400,8 +426,8 @@ impl App {
 
     fn save_progress(&mut self) {
         if let Some(r) = &mut self.reader {
-            if r.progress_dirty {
-                r.progress_dirty = false;
+            if r.unsaved() {
+                r.mark_saved();
                 let id = r.work_id().to_string();
                 self.library.update_progress(&id, r.progress());
             }
@@ -412,7 +438,7 @@ impl App {
     fn close_reader(&mut self) {
         self.save_progress();
         if let Some(r) = self.reader.take() {
-            if r.fullscreen {
+            if r.fullscreen() {
                 self.deferred.push(Deferred::Fullscreen(false));
             }
             self.deferred.push(Deferred::SetTitle("AO3 Reader".into()));
@@ -452,8 +478,7 @@ impl App {
                 ReaderAction::ConfigChanged => self.mark_config_dirty(),
                 ReaderAction::ToggleFullscreen => {
                     if let Some(r) = &mut self.reader {
-                        r.fullscreen = !r.fullscreen;
-                        let on = r.fullscreen;
+                        let on = r.toggle_fullscreen();
                         self.deferred.push(Deferred::Fullscreen(on));
                         if on {
                             self.set_toast("Full screen: press Esc or F11 to leave");
@@ -467,7 +492,7 @@ impl App {
                 ReaderAction::Notice(msg) => self.set_toast(msg),
             }
         }
-        if self.reader.as_ref().is_some_and(|r| r.progress_dirty) {
+        if self.reader.as_ref().is_some_and(|r| r.unsaved()) {
             let since = self.last_progress_save.elapsed();
             if since >= PROGRESS_SAVE_DELAY {
                 self.save_progress();

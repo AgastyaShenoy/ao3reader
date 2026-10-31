@@ -675,8 +675,9 @@ impl SettingsScreen {
         Self::section(ui, col, "Import a file");
         let intro = "Add a work you already have as a file. It goes into your library and reads like any downloaded work, offline.";
         let it = ui.measure(intro, &TextStyle::ui(13.5), TextOpts::wrap(col.w - 36.0).line_height(1.45));
-        let formats: [(&str, &str); 3] = [
+        let formats: [(&str, &str); 4] = [
             ("EPUB books", "Including the EPUB files from AO3's Download button."),
+            ("PDFs", "Shown page by page, as they were made."),
             ("AO3 web pages", "AO3's HTML downloads, or a work's page saved from a browser."),
             ("AO3 Reader works", "Works saved by this app (.json)."),
         ];

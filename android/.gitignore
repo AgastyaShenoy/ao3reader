@@ -7,3 +7,6 @@ app/src/main/jniLibs/
 
 # The bridge crate's own cargo output
 rust/target/
+
+# The Kotlin compiler's session data
+.kotlin/

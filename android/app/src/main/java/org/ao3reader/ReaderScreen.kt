@@ -23,7 +23,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** The reader: page view plus toolbar, status bar and slide-in panels. */
-class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSONObject) : FrameLayout(a) {
+class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSONObject) : FrameLayout(a), BookView {
     val meta: JSONObject = opened.getJSONObject("meta")
     private val chapters: List<JSONObject> = opened.getJSONArray("chapters").objects()
     private var bookmarks: JSONArray = opened.getJSONArray("bookmarks")
@@ -73,7 +73,9 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         rebuild()
     }
 
-    fun setInsets(t: Int, b: Int, cutout: Int = page.safeTop) {
+    override val view: View get() = this
+
+    override fun setInsets(t: Int, b: Int, cutout: Int) {
         insetTop = t
         insetBottom = b
         if (page.safeTop != cutout) {
@@ -85,7 +87,7 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
     }
 
     /** Recreates the chrome (after a theme change) while keeping the reading position. */
-    fun rebuild() {
+    override fun rebuild() {
         val p = Settings.pal
         removeAllViews()
         setBackgroundColor(p.bg)
@@ -120,7 +122,7 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         addView(bottom, frame(h = ViewGroup.LayoutParams.WRAP_CONTENT, gravity = Gravity.BOTTOM))
         bottom.gone(!Settings.typo.optBoolean("show_reading_progress_bar", true))
 
-        setInsets(insetTop, insetBottom)
+        setInsets(insetTop, insetBottom, page.safeTop)
         showChrome(chrome)
         positionChanged()
     }
@@ -183,7 +185,7 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         handler.postDelayed(saveLater, 3000)
     }
 
-    fun saveProgress() {
+    override fun saveProgress() {
         if (!dirty) return
         dirty = false
         val done = chapter + 1 >= chapters.size && page.atEnd()
@@ -283,7 +285,7 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
     }
 
     /** The reader is closing: let the voice go. */
-    fun close() {
+    override fun close() {
         reading = false
         tts?.stop()
         tts?.shutdown()
@@ -326,7 +328,7 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
     }
 
     /** Back button: closes a panel first. Returns false when the reader itself should close. */
-    fun back(): Boolean {
+    override fun back(): Boolean {
         if (panel != null) {
             closePanel()
             return true

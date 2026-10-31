@@ -2,7 +2,10 @@
 #![allow(unused_imports)]
 
 pub mod ao3;
+#[cfg(feature = "pdf")]
+pub mod pdf;
 pub mod reader;
+pub mod sources;
 pub mod storage;
 pub mod updater;
 

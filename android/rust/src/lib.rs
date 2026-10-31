@@ -87,6 +87,29 @@ struct State {
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 
+/// The PDF open in the reader. Kept apart from the state so pages render without holding its lock.
+static PDF: Mutex<Option<std::sync::Arc<dyn ao3reader::pdf::Engine>>> = Mutex::new(None);
+
+/// Renders part of a page of the open PDF at `scale` pixels per point: (x, y, width, height) in
+/// whole-page pixels, coloured for the theme (`look`: 0 as printed, 1 dark, 2 sepia). Returns ARGB
+/// pixels (Android's `Bitmap.setPixels` order), or None if there's no such page or the engine
+/// failed on it.
+pub fn render_pdf(page: usize, scale: f32, area: (u32, u32, u32, u32), look: u8) -> Option<Vec<i32>> {
+    use ao3reader::pdf::PixelRect;
+    let engine = PDF.lock().ok()?.clone()?;
+    if page >= engine.page_count() || area.2 == 0 || area.3 == 0 {
+        return None;
+    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut r = engine.renderer();
+        let mut px = r.render(page, scale, PixelRect { x: area.0, y: area.1, width: area.2, height: area.3 });
+        ao3reader::pdf::Look::from_u8(look).apply(&mut px);
+        // 0x00RRGGBB, made opaque.
+        px.into_iter().map(|p| (p | 0xFF00_0000) as i32).collect()
+    }))
+    .ok()
+}
+
 type R = Result<Value, String>;
 
 fn with_state<T>(f: impl FnOnce(&mut State) -> Result<T, String>) -> Result<T, String> {
@@ -165,6 +188,8 @@ fn meta_json(m: &ao3reader::ao3::models::WorkMeta) -> Value {
         "restricted": m.is_restricted,
         // From AO3 (ratings, kudos and "complete" apply) rather than a book from a file.
         "ao3": m.is_ao3(),
+        // A PDF, drawn page by page: its page count.
+        "pdf_pages": m.pdf_pages,
     })
 }
 
@@ -496,7 +521,11 @@ fn dispatch(method: &str, a: &Value) -> R {
             let ch = arg_u64(a, "chapter")? as usize;
             let pos = a.get("position").and_then(Value::as_f64).unwrap_or(0.0);
             let completed = a.get("completed").and_then(Value::as_bool).unwrap_or(false);
-            let (pct, _, _) = progress_stats(work, ch, pos);
+            // A PDF's position is page + fraction; text works count words read.
+            let pct = match work.meta.pdf_pages {
+                Some(n) => (pos / f64::from(n.max(1)) * 100.0).clamp(0.0, 100.0),
+                None => progress_stats(work, ch, pos).0,
+            };
             s.library.update_progress(
                 &id,
                 ReadingProgress {
@@ -706,11 +735,22 @@ fn dispatch(method: &str, a: &Value) -> R {
             // Recognised by content: Android's picker often hides the real file name.
             let path = std::path::PathBuf::from(arg_str(a, "path")?);
             let bytes = std::fs::read(&path).map_err(|e| format!("Couldn't read the file: {e}"))?;
-            let work = ao3reader::ao3::epub::import_bytes(&bytes)?;
+            // The file's name, when known, stands in for a missing title (PDFs often have none).
+            let work = ao3reader::ao3::epub::import_named(&bytes, a.get("name").and_then(Value::as_str))?;
             with_state(|s| {
                 s.library.save_work(&work)?;
                 Ok(json!({ "id": work.meta.id, "meta": meta_json(&work.meta) }))
             })
+        }
+        "pdf.open" => {
+            let engine = ao3reader::pdf::open(arg_str(a, "id")?)?;
+            let sizes: Vec<Value> = (0..engine.page_count()).map(|p| engine.page_size(p)).map(|s| json!([s.width, s.height])).collect();
+            *PDF.lock().map_err(|_| "pdf poisoned")? = Some(engine);
+            Ok(json!({ "sizes": sizes }))
+        }
+        "pdf.close" => {
+            *PDF.lock().map_err(|_| "pdf poisoned")? = None;
+            Ok(Value::Null)
         }
         "epub" => {
             let id = arg_str(a, "id")?.to_string();
@@ -766,8 +806,19 @@ fn dispatch(method: &str, a: &Value) -> R {
 #[cfg(target_os = "android")]
 mod jni_entry {
     use jni::objects::{JClass, JString};
-    use jni::sys::jstring;
+    use jni::sys::{jfloat, jint, jintArray, jstring};
     use jni::JNIEnv;
+
+    /// A part of a page of the open PDF as ARGB pixels (null if it can't be drawn).
+    #[no_mangle]
+    pub extern "system" fn Java_org_ao3reader_Core_renderPdf<'l>(env: JNIEnv<'l>, _class: JClass<'l>, page: jint, scale: jfloat, x: jint, y: jint, w: jint, h: jint, look: jint) -> jintArray {
+        let area = (x.max(0) as u32, y.max(0) as u32, w.max(0) as u32, h.max(0) as u32);
+        let Some(px) = super::render_pdf(page.max(0) as usize, scale, area, look as u8) else { return std::ptr::null_mut() };
+        match env.new_int_array(px.len() as i32) {
+            Ok(arr) if env.set_int_array_region(&arr, 0, &px).is_ok() => arr.into_raw(),
+            _ => std::ptr::null_mut(),
+        }
+    }
 
     #[no_mangle]
     pub extern "system" fn Java_org_ao3reader_Core_call<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, method: JString<'l>, arg: JString<'l>) -> jstring {

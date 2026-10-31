@@ -1,0 +1,10 @@
+[package]
+name = "pdf-render"
+version = "0.1.0"
+edition = "2024"
+description = "Page layout, tile cache, render threads and page text for PDFs, from the pdfreader project (see crates/README.md)"
+publish = false
+
+[dependencies]
+# Imported as `engine`, the name the code uses.
+engine = { package = "pdf-engine", path = "../pdf-engine" }

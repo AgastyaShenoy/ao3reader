@@ -20,6 +20,12 @@ object Core {
     @JvmStatic
     private external fun call(method: String, arg: String): String
 
+    /** Part of a page of the open PDF (see "pdf.open") as ARGB pixels, at `scale` pixels per
+     *  point; `look` 0 is as printed, 1 dark, 2 sepia. Null if it can't be drawn. Slow: call it off
+     *  the UI thread, on a thread with a deep stack. */
+    @JvmStatic
+    external fun renderPdf(page: Int, scale: Float, x: Int, y: Int, w: Int, h: Int, look: Int): IntArray?
+
     private val worker = Executors.newSingleThreadExecutor()
     /** Long batches (checking followed feeds) run here so they don't hold up downloads. */
     private val slowWorker = Executors.newSingleThreadExecutor()

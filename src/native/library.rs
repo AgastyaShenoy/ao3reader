@@ -234,8 +234,14 @@ fn card(ui: &mut Ui, r: Rect, e: &LibraryEntry, confirming: bool, out: &mut Vec<
     if let Some(i) = ui.menu_button(id2(id("lib-shelf"), wid), shelf_r, shelf_label(e.shelf), Some("\u{E8F1}"), &shelf_items, current) {
         out.push(LibraryAction::SetShelf(wid.clone(), SHELVES[i].0));
     }
-    let more_items = [("Export as HTML", false), ("Export as Markdown", false), ("Export as text", false), ("Delete from library", true)];
-    match ui.menu_button(id2(id("lib-more"), wid), more, "", Some("\u{E712}"), &more_items, None) {
+    // A PDF is already its own file: nothing to export.
+    let more_items: &[(&str, bool)] = if m.is_pdf() {
+        &[("Delete from library", true)]
+    } else {
+        &[("Export as HTML", false), ("Export as Markdown", false), ("Export as text", false), ("Delete from library", true)]
+    };
+    match ui.menu_button(id2(id("lib-more"), wid), more, "", Some("\u{E712}"), more_items, None) {
+        Some(0) if m.is_pdf() => result = Some(Some(wid.clone())),
         Some(0) => out.push(LibraryAction::Export(wid.clone(), ExportFormat::Html)),
         Some(1) => out.push(LibraryAction::Export(wid.clone(), ExportFormat::Markdown)),
         Some(2) => out.push(LibraryAction::Export(wid.clone(), ExportFormat::Text)),
@@ -245,16 +251,19 @@ fn card(ui: &mut Ui, r: Rect, e: &LibraryEntry, confirming: bool, out: &mut Vec<
     ui.tip(id2(id("lib-more"), wid), more, "More: export or delete");
 
     let total_ch = m.stats.chapters_published.max(1);
-    let status = if p.completed {
-        "Finished".to_string()
-    } else if started {
-        format!("Chapter {} of {}  ·  {:.0}%", p.current_chapter, total_ch, p.percentage)
-    } else {
-        format!("{total_ch} chapters  ·  not started")
+    let status = match (p.completed, started, m.pdf_pages) {
+        (true, _, _) => "Finished".to_string(),
+        (_, true, Some(n)) => format!("Page {} of {n}  ·  {:.0}%", (p.position.floor() as u32 + 1).min(n), p.percentage),
+        (_, false, Some(n)) => format!("{n} pages  ·  not started"),
+        (_, true, None) => format!("Chapter {} of {}  ·  {:.0}%", p.current_chapter, total_ch, p.percentage),
+        (_, false, None) => format!("{total_ch} chapters  ·  not started"),
     };
     let left_w = (open_r.x - r.x - 32.0).max(0.0);
     let st = ui.text_opts(&status, &TextStyle::ui(12.5), TextOpts::ellipsize(left_w), r.x + 16.0, by + 2.0, c.text.alpha(0.85));
-    let mut stats = format!("{} words", thousands(m.stats.words as u64));
+    let mut stats = match m.pdf_pages {
+        Some(_) => "PDF".to_string(),
+        None => format!("{} words", thousands(m.stats.words as u64)),
+    };
     if m.stats.kudos > 0 {
         stats.push_str(&format!("  ·  {} kudos", thousands(m.stats.kudos)));
     }

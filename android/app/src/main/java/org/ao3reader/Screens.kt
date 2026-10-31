@@ -43,6 +43,7 @@ fun importScreen(a: MainActivity): View = scroll(a, "Import") { col ->
     card.addView(a.label("Add a work you already have as a file. It goes into your library and reads like any downloaded work, offline.", 14f, p.muted).apply { setLineSpacing(0f, 1.15f) })
     for ((name, what) in listOf(
         "EPUB books" to "Including the EPUB files from AO3's Download button.",
+        "PDFs" to "Shown page by page, as they were made.",
         "AO3 web pages" to "AO3's HTML downloads, or a work's page saved from a browser.",
         "AO3 Reader works" to "Works saved by this app (.json).",
     )) {
@@ -93,7 +94,7 @@ private fun import(a: MainActivity) {
             st.busy = true
             st.error = null
             a.rebuild()
-            Core.background("import", json("path" to tmp.absolutePath)) { r ->
+            Core.background("import", json("path" to tmp.absolutePath, "name" to a.displayName(uri))) { r ->
                 st.busy = false
                 tmp.delete()
                 r.onSuccess {
@@ -108,7 +109,7 @@ private fun import(a: MainActivity) {
     a.startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
         addCategory(Intent.CATEGORY_OPENABLE)
         type = "*/*"
-        putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/epub+zip", "text/html", "application/json", "application/octet-stream", "application/zip"))
+        putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/epub+zip", "application/pdf", "text/html", "application/json", "application/octet-stream", "application/zip"))
     }, 3)
 }
 
@@ -434,7 +435,9 @@ fun settingsScreen(a: MainActivity): View {
 
         toggle(a, col, "Larger touch targets", "Bigger buttons with more room between them.", "larger_targets", inTypo = false) { a.rebuild() }
         val scales = listOf(0.9f, 1f, 1.1f, 1.25f, 1.5f)
-        val curScale = scales.indexOfFirst { Math.abs(it - Settings.config.optDouble("ui_scale", 1.0).toFloat()) < 0.01f }.let { if (it < 0) 1 else it }
+        // The size the app is drawn at now (kept where the activity reads it at start-up).
+        val applied = a.getSharedPreferences("ui", android.content.Context.MODE_PRIVATE).getFloat("scale", 1f)
+        val curScale = scales.indexOfFirst { Math.abs(it - applied) < 0.01f }.let { if (it < 0) 1 else it }
         val scaleBox = a.column().apply {
             background = rounded(p.card, a.dpf(10), p.border, a.dp(1))
             setPadding(a.dp(16), a.dp(12), a.dp(12), a.dp(12))
@@ -461,7 +464,7 @@ fun settingsScreen(a: MainActivity): View {
         col.addView(faceBox, lp(bottom = a.dp(6)))
 
         section(a, col, "Import")
-        col.addView(settingRow(a, "Import a file", "EPUB books, AO3 web pages and works saved by this app.", a.button("Open") { a.show(MainActivity.IMPORT) }), lp(bottom = a.dp(6)))
+        col.addView(settingRow(a, "Import a file", "EPUB books, PDFs, AO3 web pages and works saved by this app.", a.button("Open") { a.show(MainActivity.IMPORT) }), lp(bottom = a.dp(6)))
 
         section(a, col, "Storage")
         val dir = Core.obj("storage").getString("dir")
@@ -478,6 +481,6 @@ fun settingsScreen(a: MainActivity): View {
 
         section(a, col, "About")
         col.addView(settingRow(a, "AO3 Reader $version",
-            "A lightweight, unofficial reader for Archive of Our Own. Find works and save them to read offline, turn pages like a book or scroll, choose your own fonts and themes, and follow the authors and tags you love. It's small and quick, and your library stays on this phone.\n\nNot affiliated with the Organization for Transformative Works. The AO3 logo is their trademark.", null), lp(bottom = a.dp(6)))
+            "A lightweight, unofficial reader for Archive of Our Own. Find works and save them to read offline, turn pages like a book or scroll, choose your own fonts and themes, and follow the authors and tags you love. It's small and quick, and your library stays on this phone.\n\nNot affiliated with the Organization for Transformative Works.", null), lp(bottom = a.dp(6)))
     }
 }

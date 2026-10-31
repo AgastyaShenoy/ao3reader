@@ -645,9 +645,19 @@ pub fn parse_epub(bytes: &[u8]) -> Result<Work, String> {
     Ok(Work { meta, chapters, fetched_at: chrono::Utc::now(), resources })
 }
 
-/// Imports a saved work from file contents, recognised by what's inside: an EPUB (ZIP),
+/// Imports a saved work from file contents, recognised by what's inside: an EPUB (ZIP), a PDF,
 /// a work saved by AO3 Reader (JSON), or an AO3 HTML page or download.
 pub fn import_bytes(bytes: &[u8]) -> Result<Work, String> {
+    import_named(bytes, None)
+}
+
+/// `import_bytes`, with the file's name (without extension) for books that don't give a title.
+pub fn import_named(bytes: &[u8], name: Option<&str>) -> Result<Work, String> {
+    #[cfg(feature = "pdf")]
+    if crate::pdf::is_pdf(bytes) {
+        return crate::pdf::import(bytes, name);
+    }
+    let _ = name;
     if bytes.starts_with(b"PK\x03\x04") {
         return parse_epub(bytes);
     }
