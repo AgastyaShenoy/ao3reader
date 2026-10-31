@@ -6,9 +6,11 @@
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Android-informational.svg)](https://github.com/AgastyaShenoy/flax-reader/releases)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2.svg)](https://discord.gg/3xuJY8UXKu)
 
-A small, quick e-reader for Windows and Android.
+**An unofficial Archive of Our Own (AO3) reader for Windows and Android.**
 
-Read the EPUB and PDF books you have, find free books on Project Gutenberg, Standard Ebooks or your own catalogues, and follow stories on SpaceBattles, Sufficient Velocity, Royal Road and Archive of Our Own. Highlight passages, add notes and look words up as you read. Themes, fonts and reading aids are made for long, comfortable reading. Your books stay on your own device.
+Flax Reader was built for reading fanfiction on AO3. Search the Archive with its own filters, follow the authors, tags and collections you love, save works to read offline, and leave kudos, all in a small, quick app with themes, fonts and reading aids made for long reading sessions. Each work opens with its rating, warnings, fandoms, tags, summary and notes, like on the Archive. Already have works downloaded from AO3? Import them and their tags and summaries come too.
+
+It reads everything else as well: your own EPUBs and PDFs, free books from Project Gutenberg and Standard Ebooks, and stories from SpaceBattles, Sufficient Velocity and Royal Road. Highlight passages, add notes and look words up as you read. Your books stay on your own device.
 
 - **Small:** the Windows app is a single exe and uses about 10–15 MB of memory while you read. There's no web view, no Electron and no GPU driver.
 - **Native:** Windows draws with Direct2D and DirectWrite; Android uses its own built-in views. Both share one Rust core.
@@ -16,18 +18,30 @@ Read the EPUB and PDF books you have, find free books on Project Gutenberg, Stan
 - **Private:** no ads, no tracking and no account. The app goes online only for what you ask it to.
 
 > [!IMPORTANT]
-> **The AO3 features haven't been tested against the live site yet.** Archive of Our Own has been down for maintenance while they were built, so searching AO3, following authors and tags, downloading works, signing in and leaving kudos were only tested against saved pages. They'll be tested, and fixed where needed, once AO3 is back online. Everything else (your books, Project Gutenberg, Standard Ebooks, the story forums, Royal Road, catalogues, highlights, the dictionary) works now.
+> **The AO3 features haven't been tested against the live site yet.** Archive of Our Own has been down for maintenance while they were built, so searching AO3, following authors and tags, downloading works, signing in and leaving kudos were only tested against saved pages. They'll be tested, and fixed where needed, once AO3 is back online. Reading AO3 works you've already downloaded works now, and so does everything else (your books, Project Gutenberg, Standard Ebooks, the story forums, Royal Road, catalogues, highlights, the dictionary).
+
+*Flax Reader is free and unofficial. It isn't affiliated with Archive of Our Own or the Organization for Transformative Works.*
 
 <p>
 <img src="docs/screenshots/windows/reader.png" width="49%" alt="Reading Pride and Prejudice with two highlights">
 <img src="docs/screenshots/windows/library.png" width="49%" alt="The library">
 </p>
 
-*Flax Reader used to be called AO3 Reader. Updating keeps your library, progress and settings.*
+*Flax Reader used to be called AO3 Reader, and AO3 is still what it's built around. Updating keeps your library, progress and settings.*
 
 ---
 
 ## Features
+
+### Made for AO3
+*Not yet tested against the live site; see above.*
+- **Search** the Archive with its own filters: title, author, fandoms, relationships, characters, tags, rating, category, completion, crossovers, word count and language, sorted the way you like.
+- **Paste a link** to any work to save it to your library, or open an AO3 page you saved.
+- **Follow** authors, tags and collections. New and updated works are marked, with a badge for how many are unread.
+- **Read offline:** works are saved on your device, chapters and all, and open without internet.
+- **The work's details** come first, as on the Archive: rating, warnings, category, fandoms, relationships, characters, tags, summary and the author's notes.
+- **Kudos:** leave kudos from the reader. Sign in to read works that are only for logged-in users.
+- **Your AO3 downloads:** import EPUBs you downloaded from AO3, and their tags, warnings and summaries come with them. *(Works now.)*
 
 ### Reading
 - **EPUB and PDF:** EPUB books with their pictures, headings, lists and tables; PDFs page by page, as they were made (with zoom on Windows).
@@ -49,18 +63,18 @@ Read the EPUB and PDF books you have, find free books on Project Gutenberg, Stan
 </p>
 
 ### Finding books
+- **Archive of Our Own** *(not yet tested against the live site; see above)*: search with AO3's filters, paste a link to a work, and leave kudos.
 - **Your own files:** open EPUB books, PDFs and AO3 web pages, or open them with Flax Reader from your file manager.
 - **Project Gutenberg:** browse and search tens of thousands of free books, built in.
 - **Standard Ebooks:** carefully edited public-domain books, built in. Its newest releases are free to everyone; its patrons can add the full catalogue with their sign-in.
 - **SpaceBattles and Sufficient Velocity:** browse the story boards, and save any story's chapters (its "threadmarks") to your library.
 - **Your catalogues:** add any OPDS catalogue, such as Calibre's content server, Kavita, Komga or a library's catalogue, with a sign-in if it needs one.
-- **Archive of Our Own** *(not yet tested against the live site; see above)*: search with AO3's filters, paste a link to a work, and leave kudos.
 - **Other sites:** Flax Reader only fetches from sites that answer a plain request. Sites behind a bot check (FanFiction.net, Scribble Hub, Webnovel, Feedbooks) aren't fetched; save their pages or books and import them instead.
 
 ### Following
+- **AO3** *(not yet tested against the live site)*: follow authors, tags and collections.
 - **Stories:** paste a link to a story on SpaceBattles or Sufficient Velocity and it's saved to your library and kept up to date as new chapters come out. Royal Road stories tell you about new chapters too, which open in your browser (Royal Road's chapter pages ask for a browser check).
 - **Shelves:** follow any catalogue shelf, such as Project Gutenberg's latest books, Standard Ebooks' new releases or a forum's newest stories, to see what's added.
-- **AO3** *(not yet tested against the live site)*: follow authors, tags and collections.
 - **New and updated** works and chapters are marked, and a badge on Following shows how many are unread. Feeds are checked at most every 30 minutes, one at a time.
 
 ### Library

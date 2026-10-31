@@ -976,7 +976,7 @@ impl SettingsScreen {
 
         // Who we are, and where to find us.
         col.gap(10.0);
-        let blurb = "A small, quick e-reader for your own books and free ones. Read EPUBs and PDFs, browse Project Gutenberg and your own catalogues, and read Archive of Our Own, with themes, fonts and reading aids made for long, comfortable reading.";
+        let blurb = "An unofficial Archive of Our Own reader. Search AO3, follow your favourite authors and tags, and save works to read offline, with themes, fonts and reading aids made for long, comfortable reading. It reads your own EPUBs and PDFs too, plus free books from Project Gutenberg and stories from SpaceBattles, Sufficient Velocity and Royal Road.";
         let t = ui.measure(blurb, &TextStyle::ui(13.5), TextOpts::wrap(col.w - 36.0).line_height(1.45));
         let note = "The Discord is aga2522's general server: come and chat about anything, and ask about Flax Reader there too.";
         let nt = ui.measure(note, &TextStyle::ui(SMALL), TextOpts::wrap(col.w - 36.0));

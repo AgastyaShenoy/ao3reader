@@ -1,6 +1,6 @@
 # Flax Reader for Android
 
-The Android app uses the same Rust core as the desktop app (AO3 client and parser, library, search, export, reading positions). Only the interface is Android-specific.
+The unofficial Archive of Our Own reader, on Android. The app uses the same Rust core as the desktop app (AO3 client and parser, library, search, export, reading positions). Only the interface is Android-specific.
 
 - **`rust/`**: `libao3core.so`, a small bridge over the core. Kotlin calls one JNI function, `Core.call(method, json)`, and gets JSON back. There is no binding generator and no JNA at runtime.
 - **`app/`**: the app itself. It uses the platform's own views and `StaticLayout`, with no AndroidX or other libraries, to keep memory low.
