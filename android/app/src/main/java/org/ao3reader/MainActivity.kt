@@ -177,6 +177,17 @@ class MainActivity : Activity() {
             r != null -> if (!r.back()) closeReader()
             tab == ACCOUNT || tab == IMPORT -> show(SETTINGS)
             tab == SETTINGS && settingsPage >= 0 -> openSettings(-1)
+            // Within Browse: close the filters, leave a pasted link, step back up the shelves.
+            tab == SEARCH && catalogs.source == 0 && search.filtersOpen -> { search.filtersOpen = false; rebuild() }
+            tab == SEARCH && catalogs.source == 0 && search.link != null -> { search.link = null; rebuild() }
+            tab == SEARCH && catalogs.source > 0 && catalogs.stack.size > 1 -> {
+                catalogs.stack.removeAt(catalogs.stack.size - 1)
+                catalogs.error = null
+                catalogs.scroll = 0
+                rebuild()
+            }
+            // Within Following: back from one followed feed to them all.
+            tab == FOLLOWING && following.selected != null -> { following.selected = null; rebuild() }
             tab != LIBRARY -> show(LIBRARY)
             else -> finish()
         }

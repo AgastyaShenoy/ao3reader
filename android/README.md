@@ -6,7 +6,7 @@ The app uses the same Rust core as the desktop app (AO3 client and parser, libra
 - **`app/`**: the app itself. It uses the platform's own views and `StaticLayout`, with no AndroidX or other libraries, to keep memory low.
   - The reader paginates with real line metrics, the same way the desktop reader does.
 
-With a 121,000-word novel open, the release build uses about 21–26 MB (total PSS). That was measured on the emulator (Android 15, x86_64); real phones will differ somewhat.
+The release build uses about 25 MB on the library screen and about 33 MB with a 120,000-word novel open (total PSS), and starts cold in 0.7–0.8 s. That was measured on the emulator (Android 15, x86_64) with version 2.5; real phones differ somewhat.
 
 ## Build
 

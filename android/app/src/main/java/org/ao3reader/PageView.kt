@@ -214,15 +214,27 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
         return if (o.outWidth > 0 && o.outHeight > 0) o.outWidth to o.outHeight else null
     }
 
+    /** The picture decoded last, kept even if the cache can't hold it, so a picture too big for
+     *  the cache isn't decoded again on every frame. */
+    private var lastPicture: Pair<String, Bitmap>? = null
+
     private fun picture(path: String, w: Int, h: Int): Bitmap? {
         val key = "$path@$w"
         pictures.get(key)?.let { return it }
+        lastPicture?.takeIf { it.first == key }?.let { return it.second }
         val size = pictureSize(path) ?: return null
-        // Decode at the nearest power-of-two reduction that still covers the drawn size.
+        // Decode at the nearest power-of-two reduction that still covers the drawn size, then
+        // scale to exactly that: a big cover takes what it shows, not the photo's full size.
         var sample = 1
         while (size.first / (sample * 2) >= w && size.second / (sample * 2) >= h) sample *= 2
-        val bmp = BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample }) ?: return null
+        var bmp = BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample }) ?: return null
+        if (w > 0 && h > 0 && (bmp.width > w * 5 / 4 || bmp.height > h * 5 / 4)) {
+            val scaled = Bitmap.createScaledBitmap(bmp, w, h, true)
+            if (scaled !== bmp) bmp.recycle()
+            bmp = scaled
+        }
         pictures.put(key, bmp)
+        lastPicture = key to bmp
         return bmp
     }
 

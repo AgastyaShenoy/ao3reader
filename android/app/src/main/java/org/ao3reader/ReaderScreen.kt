@@ -167,8 +167,20 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
     }
 
     /** Updates the status bar and schedules a progress save. */
+    private var lastStats = 0L
+    private val statsLater = Runnable { positionChanged() }
+
     fun positionChanged() {
         if (chapterJson == null) return
+        // Scrolling calls this every frame: update at most about eight times a second, and once
+        // more when it stops.
+        val now = android.os.SystemClock.uptimeMillis()
+        handler.removeCallbacks(statsLater)
+        if (now - lastStats < 120) {
+            handler.postDelayed(statsLater, 130)
+            return
+        }
+        lastStats = now
         val anchor = page.anchor()
         val stats = runCatching { Core.obj("progress.stats", json("chapter" to chapter, "position" to anchor.toDouble())) }.getOrNull()
         val pct = stats?.optDouble("percentage") ?: 0.0

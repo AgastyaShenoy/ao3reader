@@ -511,6 +511,7 @@ impl App {
     fn open_loaded(&mut self, work: Work) {
         self.close_reader();
         let id = work.meta.id.clone();
+        self.library.mark_opened(&id);
         // A finished book opens at its start again ("Read again"), not on its last page.
         let progress = self.library.get_entry(&id).map(|e| e.progress.clone()).filter(|p| !p.completed);
         let title = work.meta.title.clone();
@@ -932,16 +933,20 @@ impl App {
         w.run(move || {
             // One feed at a time with a pause between, to go easy on the sites.
             let mut out = Vec::new();
+            let mut slow_down = false;
             for (i, (id, feed, saved)) in feeds.into_iter().enumerate() {
+                // Told to slow down: the rest wait for the next round, marked as tried, so they
+                // aren't asked for again straight away.
+                if slow_down {
+                    out.push((id, Err("Not checked: AO3 asked to slow down (HTTP 429). It's tried again later.".to_string())));
+                    continue;
+                }
                 if i > 0 {
                     std::thread::sleep(Duration::from_millis(1200));
                 }
                 let res = crate::sources::check_feed(&feed, saved, &client, &catalog_client, &catalogs);
-                let stop = res.as_ref().is_err_and(|e| e.contains("429"));
+                slow_down = res.as_ref().is_err_and(|e| e.contains("429"));
                 out.push((id, res));
-                if stop {
-                    break;
-                }
             }
             AppEvent::FollowsChecked(out)
         });

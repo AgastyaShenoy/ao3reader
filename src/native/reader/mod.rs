@@ -1617,7 +1617,12 @@ impl ReaderScreen {
                 if is_landmark(pi, p) {
                     continue;
                 }
-                let Some((_, rich)) = paragraph_rich(p) else { continue };
+                // Only text the page highlights counts (not a picture's description, say), so
+                // "3 of 12" always lands on something shown.
+                let Some((kind, rich)) = paragraph_rich(p) else { continue };
+                if !kind.searchable() {
+                    continue;
+                }
                 for m in re.find_iter(&rich.text) {
                     self.matches.push(Match { chapter: ci, para: pi, start: m.start(), end: m.end() });
                     if self.matches.len() >= MAX_MATCHES {

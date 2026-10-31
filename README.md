@@ -4,15 +4,20 @@
 
 # Flax Reader
 
-**A small, quick e-reader for Windows and Android, with Archive of Our Own built in.**
+**A tiny, fast e-reader for Windows and Android, with Archive of Our Own built in.**
+
+About 10 MB of memory · opens in a tenth of a second · a 6 MB download · no web engine
 
 Your EPUBs and PDFs · free classics · AO3 and the story forums · highlights, notes and a dictionary
 
 [![Version](https://img.shields.io/github/v/release/AgastyaShenoy/flax-reader?color=4a68b0&label=version&style=flat-square)](https://github.com/AgastyaShenoy/flax-reader/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/AgastyaShenoy/flax-reader/total?color=4a68b0&style=flat-square)](https://github.com/AgastyaShenoy/flax-reader/releases)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Android-4a68b0?style=flat-square)](https://github.com/AgastyaShenoy/flax-reader/releases/latest)
+[![Memory: about 10 MB](https://img.shields.io/badge/memory-~10%20MB-2ea44f?style=flat-square)](#-light-and-fast)
+[![Starts in 0.12 s](https://img.shields.io/badge/starts%20in-0.12%20s-2ea44f?style=flat-square)](#-light-and-fast)
+[![Download: 6.3 MB](https://img.shields.io/badge/download-6.3%20MB-2ea44f?style=flat-square)](#-light-and-fast)
 [![Core: Rust](https://img.shields.io/badge/core-Rust-b7410e?style=flat-square)](https://www.rust-lang.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square)](LICENSE)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-2ea44f?style=flat-square)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-join%20us-5865F2?style=flat-square)](https://discord.gg/3xuJY8UXKu)
 
 <a href="https://github.com/AgastyaShenoy/flax-reader/releases/latest"><img src="https://img.shields.io/badge/Download_for-Windows-4a68b0?style=for-the-badge" alt="Download for Windows"></a>
@@ -30,6 +35,26 @@ Your EPUBs and PDFs · free classics · AO3 and the story forums · highlights, 
 > **The AO3 features haven't been tested against the live site yet.** Archive of Our Own has been down for maintenance while they were built, so searching AO3, following authors and tags, downloading works, signing in and leaving kudos were only tested against saved pages. They'll be tested, and fixed where needed, once AO3 is back online. Everything else works now, including reading the AO3 works you've already downloaded.
 
 *Flax Reader used to be called AO3 Reader. Updating keeps your library, progress and settings.*
+
+## ⚡ Light and fast
+
+Speed and a small footprint aren't an afterthought: they're what Flax Reader is built around. It should feel instant on any PC or phone, old ones included, and leave the rest of your memory to everything else you run.
+
+| | 🪟 Windows | 🤖 Android |
+| :--- | :--- | :--- |
+| **Download** | **6.3 MB** zip: one 15 MB exe, no installer, no runtime | **10.8 MB** APK |
+| **Memory in the library** | **8.6 MB** | 25 MB |
+| **Memory while reading** | **10.8 MB** (*Alice in Wonderland*), **13.1 MB** (*Moby-Dick*, 215,000 words) | 33 MB (a 120,000-word novel) |
+| **Start-up** | **0.12 s** to a usable window (0.47 s the first time after a restart) | 0.7–0.8 s cold start |
+
+<sub>Measured 31 October 2026 on version 2.5. Windows: Task Manager's Memory column (private working set) on an Intel Core i5-13400F, Windows 11. Android: total PSS from `dumpsys meminfo` and `am start -W` on the Android 15 emulator; real phones differ a little.</sub>
+
+**How it stays light**
+- **Native, with no web engine.** Windows draws with Win32, Direct2D (on the CPU, so it needs no GPU driver) and DirectWrite. Android uses its own views and text layout, with no AndroidX, Compose or WebView. No Electron, no bundled browser.
+- **One Rust core** does the heavy lifting for both apps: reading EPUBs and PDFs, the library, search, the sites and the PDF engine.
+- **Nothing waits on the screen.** Downloads, imports, searches and PDF pages happen on background threads, so scrolling and page turns stay smooth.
+- **Only what's needed, when it's needed.** Books are laid out a chapter at a time, PDF pages are rendered as they come into view (in parallel tiles on Windows) and kept within a fixed memory budget, and word counts for progress are worked out once per book.
+- **Nothing in the background.** No tracking, no analytics, no services. Followed feeds are checked at most every 30 minutes, one at a time.
 
 ## ✨ At a glance
 
@@ -78,7 +103,7 @@ Dyslexia-friendly fonts, a reading ruler, bold word starts, read aloud, your own
 <td valign="top">
 
 ### 🪶 Light as a feather
-One 15 MB exe that uses about 10–15 MB of memory while you read. No web view, no Electron, no GPU driver.
+About 10 MB of memory while you read, a 6 MB download, and a window that opens in about a tenth of a second. No web engine.
 
 </td>
 <td valign="top">
@@ -205,18 +230,6 @@ The same reader, highlights, dictionary, catalogues, Following and themes, built
 
 ---
 
-## 🪶 Why it's so light
-
-| | Flax Reader |
-| :--- | :--- |
-| **Windows download** | One 15 MB exe in a 6.5 MB zip. No installer. |
-| **Windows memory** | About 10–15 MB while reading. |
-| **Android download** | An 11 MB APK. |
-| **Android memory** | About 21–26 MB with a 121,000-word novel open. |
-| **How** | Win32 with Direct2D drawn on the CPU and DirectWrite text; Android's own views with no AndroidX. One Rust core shared by both. |
-
----
-
 ## 📥 Install
 
 <table>
@@ -315,4 +328,8 @@ Flax Reader is unofficial and isn't affiliated with Archive of Our Own or the Or
 
 ## 📄 License
 
-[MIT](LICENSE). Copyright (c) 2026 Agastya Shenoy.
+Copyright (C) 2026 Agastya Shenoy.
+
+Flax Reader is free software: you can redistribute it and/or modify it under the terms of the [GNU General Public License](LICENSE) as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed in the hope that it will be useful, but without any warranty; see the License for details.
+
+In short: use it, share it and change it freely, and anyone who shares a changed version must share its source under the same terms. Versions up to 2.5.0 were released under the MIT licence and stay under it. The PDF rasteriser in `crates/pdf-engine/src/raster` keeps its own Apache-2.0 / MIT licence, alongside its code.

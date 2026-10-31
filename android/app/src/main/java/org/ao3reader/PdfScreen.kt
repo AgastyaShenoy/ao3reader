@@ -128,8 +128,17 @@ class PdfPages(context: Context, private val screen: PdfScreen) : View(context) 
     private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private var look = 0
 
-    // Page tops and heights at the current width.
+    // Page tops and heights at the current width and zoom.
     @Volatile private var scale = 1f
+    /** 1 fits the widest page to the screen; up to 4 (pinch, or double-tap for 2). */
+    private var zoom = 1f
+    /** How far a zoomed page is panned sideways. */
+    private var panX = 0f
+    /** A pinch under way: drawn scaled about (pinchX, pinchY) until the fingers lift. */
+    private var pinch = 1f
+    private var pinchX = 0f
+    private var pinchY = 0f
+    private var widest = 1f
     private var tops = FloatArray(0)
     private var heights = FloatArray(0)
     private var totalH = 0f
@@ -137,7 +146,7 @@ class PdfPages(context: Context, private val screen: PdfScreen) : View(context) 
 
     private val main = Handler(Looper.getMainLooper())
     // Room for four pages at the most a page is rendered at (MAX_PAGE_BYTES), so the pages on
-    // screen and the next one never push each other out.
+    // screen and the next one never push each other out; zoomed pages are bigger and fewer.
     private val bitmaps = object : android.util.LruCache<Int, Bitmap>(4 * MAX_PAGE_BYTES) {
         override fun sizeOf(key: Int, value: Bitmap) = value.byteCount
     }
@@ -173,8 +182,8 @@ class PdfPages(context: Context, private val screen: PdfScreen) : View(context) 
         if (width == 0 || sizes.isEmpty() || laidFor == width) return
         val anchor = pending ?: if (laidFor > 0) anchor() else 0f
         laidFor = width
-        val widest = sizes.maxOf { it.first }.coerceAtLeast(1f)
-        scale = (width - 2 * gap) / widest
+        widest = sizes.maxOf { it.first }.coerceAtLeast(1f)
+        scale = (width - 2 * gap) / widest * zoom
         tops = FloatArray(sizes.size)
         heights = FloatArray(sizes.size)
         var y = safeTop + gap
@@ -199,8 +208,30 @@ class PdfPages(context: Context, private val screen: PdfScreen) : View(context) 
 
     private fun maxScroll() = max(0f, totalH - height)
 
+    /** How far a zoomed page can pan: the widest page plus its margins, less the screen. */
+    private fun maxPan() = max(0f, widest * scale + 2 * gap - width)
+
     private fun clamp() {
         scrollPos = scrollPos.coerceIn(0f, maxScroll())
+        panX = panX.coerceIn(0f, maxPan())
+    }
+
+    /** Zooms to `z` (1 to 4), keeping the point under (fx, fy) where it is. */
+    private fun setZoom(z: Float, fx: Float, fy: Float) {
+        val nz = z.coerceIn(1f, 4f)
+        if (kotlin.math.abs(nz - zoom) < 0.01f) return
+        val ratio = nz / zoom
+        val docY = scrollPos + fy
+        val docX = panX + fx
+        zoom = nz
+        laidFor = -1
+        pending = null
+        layoutPages()
+        scrollPos = docY * ratio - fy
+        panX = docX * ratio - fx
+        clamp()
+        invalidate()
+        screen.positionChanged()
     }
 
     fun currentPage(): Int {
@@ -252,8 +283,9 @@ class PdfPages(context: Context, private val screen: PdfScreen) : View(context) 
             val gen = generation
             val (pw, ph) = sizes.getOrNull(page) ?: continue
             // A big screen in landscape would want a page bitmap of 30 MB or more: render at most
-            // MAX_PAGE_BYTES and let drawing scale it up.
-            val s = minOf(scale, kotlin.math.sqrt(MAX_PAGE_BYTES / (4f * pw * ph).coerceAtLeast(1f)))
+            // MAX_PAGE_BYTES (twice that when zoomed in) and let drawing scale it up.
+            val most = if (zoom > 1.01f) 2 * MAX_PAGE_BYTES else MAX_PAGE_BYTES
+            val s = minOf(scale, kotlin.math.sqrt(most / (4f * pw * ph).coerceAtLeast(1f)))
             val w = (pw * s).toInt()
             val h = (ph * s).toInt()
             if (w <= 0 || h <= 0) continue
@@ -278,6 +310,12 @@ class PdfPages(context: Context, private val screen: PdfScreen) : View(context) 
         val top = scrollPos
         val bottom = scrollPos + height
         queue.clear()
+        if (pinch != 1f) {
+            c.save()
+            c.scale(pinch, pinch, pinchX, pinchY)
+        }
+        // Zoomed wider than the screen, pages line up on the widest and pan together.
+        val wide = widest * scale + 2 * gap > width
         // The pages on screen, then the next one down.
         var last = -1
         for (i in tops.indices) {
@@ -285,7 +323,7 @@ class PdfPages(context: Context, private val screen: PdfScreen) : View(context) 
             if (tops[i] > bottom) break
             last = i
             val w = sizes[i].first * scale
-            val x = (width - w) / 2
+            val x = if (wide) gap + (widest * scale - w) / 2 - panX else (width - w) / 2
             val r = RectF(x, tops[i] - top, x + w, tops[i] - top + heights[i])
             val bmp = bitmaps.get(i)
             if (bmp != null) c.drawBitmap(bmp, null, r, paint) else {
@@ -301,6 +339,7 @@ class PdfPages(context: Context, private val screen: PdfScreen) : View(context) 
         }
         val next = last + 1
         if (next in tops.indices && bitmaps.get(next) == null && next !in busy) queue.offerLast(next)
+        if (pinch != 1f) c.restore()
     }
 
     // ---- touch ----------------------------------------------------------------------------
@@ -311,13 +350,21 @@ class PdfPages(context: Context, private val screen: PdfScreen) : View(context) 
             return true
         }
 
-        override fun onSingleTapUp(e: MotionEvent): Boolean {
+        // Confirmed, so a double-tap (zoom) doesn't also show and hide the bars.
+        override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
             screen.toggleChrome()
             return true
         }
 
         override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
+            if (zoom > 1.01f) panX += dx
             scrollBy(dy)
+            return true
+        }
+
+        override fun onDoubleTap(e: MotionEvent): Boolean {
+            // Double-tap zooms in to twice the size, or back to the page's width.
+            setZoom(if (zoom > 1.01f) 1f else 2f, e.x, e.y)
             return true
         }
 
@@ -328,7 +375,28 @@ class PdfPages(context: Context, private val screen: PdfScreen) : View(context) 
         }
     })
 
-    override fun onTouchEvent(event: MotionEvent): Boolean = gestures.onTouchEvent(event) || super.onTouchEvent(event)
+    private val pinches = android.view.ScaleGestureDetector(context, object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+        override fun onScale(d: android.view.ScaleGestureDetector): Boolean {
+            pinch = (pinch * d.scaleFactor).coerceIn(1f / zoom, 4f / zoom)
+            pinchX = d.focusX
+            pinchY = d.focusY
+            invalidate()
+            return true
+        }
+
+        override fun onScaleEnd(d: android.view.ScaleGestureDetector) {
+            val z = zoom * pinch
+            pinch = 1f
+            setZoom(z, pinchX, pinchY)
+            invalidate()
+        }
+    })
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        pinches.onTouchEvent(event)
+        if (pinches.isInProgress) return true
+        return gestures.onTouchEvent(event) || super.onTouchEvent(event)
+    }
 
     override fun computeScroll() {
         if (scroller.computeScrollOffset()) {

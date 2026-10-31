@@ -14,6 +14,10 @@ pub struct LibraryData {
     /// The reader's own collections, in the order they were made.
     #[serde(default)]
     pub collections: Vec<Collection>,
+    /// Books deleted while their files were still in use (a PDF open in the reader): their
+    /// files are removed next time the library opens.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_deletes: Vec<String>,
 }
 
 /// A collection the reader made, like a folder of books. A book can be in several, and
@@ -40,7 +44,9 @@ impl LibraryManager {
 
         let data = load_json(&base_dir.join("library.json"), true).unwrap_or_default();
 
-        Self { data, base_dir }
+        let mut lib = Self { data, base_dir };
+        lib.finish_deletes();
+        lib
     }
 
     fn works_dir(&self) -> PathBuf {
@@ -148,6 +154,15 @@ impl LibraryManager {
         let _ = self.save();
     }
 
+    /// A work was opened: it's the most recently read, even before a page is turned.
+    pub fn mark_opened(&mut self, work_id: &str) {
+        if let Some(entry) = self.data.entries.get_mut(work_id) {
+            entry.progress.last_read = Utc::now();
+        }
+        self.touch_history(work_id);
+        let _ = self.save();
+    }
+
     /// Mark work as recently read
     pub fn touch_history(&mut self, work_id: &str) {
         self.data.recent_history.retain(|id| id != work_id);
@@ -217,6 +232,30 @@ impl LibraryManager {
         }
     }
 
+    /// Removes what's left of books deleted while their files were in use.
+    fn finish_deletes(&mut self) {
+        if self.data.pending_deletes.is_empty() {
+            return;
+        }
+        let ids = std::mem::take(&mut self.data.pending_deletes);
+        for id in ids {
+            // A book added again since (the same file imported) keeps its files.
+            if !self.data.entries.contains_key(&id) && !self.remove_files(&id) {
+                self.data.pending_deletes.push(id);
+            }
+        }
+        let _ = self.save();
+    }
+
+    /// Deletes a work's files; false if some are still there (in use).
+    fn remove_files(&self, work_id: &str) -> bool {
+        let file = self.work_file_path(work_id);
+        let dir = self.resource_dir(work_id);
+        let _ = fs::remove_file(&file);
+        let _ = fs::remove_dir_all(&dir);
+        !file.exists() && !dir.exists()
+    }
+
     /// Delete a work from library and remove local file
     pub fn delete_work(&mut self, work_id: &str) {
         self.data.entries.remove(work_id);
@@ -224,9 +263,10 @@ impl LibraryManager {
         for c in &mut self.data.collections {
             c.works.retain(|id| id != work_id);
         }
-        let file_path = self.work_file_path(work_id);
-        let _ = fs::remove_file(file_path);
-        let _ = fs::remove_dir_all(self.resource_dir(work_id));
+        // A PDF still open in the reader can't be deleted yet: it goes on the next start.
+        if !self.remove_files(work_id) && !self.data.pending_deletes.iter().any(|d| d == work_id) {
+            self.data.pending_deletes.push(work_id.to_string());
+        }
         let _ = self.save();
     }
 

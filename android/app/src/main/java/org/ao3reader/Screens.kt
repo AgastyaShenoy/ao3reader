@@ -694,7 +694,7 @@ private fun aboutPage(a: MainActivity, col: LinearLayout) {
     val names = a.column()
     names.addView(a.label("Flax Reader", 21f, p.text, bold = true))
     names.addView(a.label("Version ${version(a)}  ·  Made by aga2522", 12.5f, p.muted))
-    names.addView(a.label("Free and open source (MIT)", 12.5f, p.muted))
+    names.addView(a.label("Free software (GPL-3.0)", 12.5f, p.muted))
     top.addView(names, LinearLayout.LayoutParams(0, -2, 1f))
     hero.addView(top)
     hero.addView(a.label("A small, quick e-reader with Archive of Our Own built in. Read your own EPUBs and PDFs, get free books from Project Gutenberg and Standard Ebooks, follow stories on SpaceBattles, Sufficient Velocity and Royal Road, and search, follow and save works from AO3. Themes, fonts and reading aids are made for long, comfortable reading.", 14f, p.text).apply { setLineSpacing(0f, 1.15f) }, lp(top = a.dp(12)))

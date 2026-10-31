@@ -81,7 +81,9 @@ private fun catalogView(a: MainActivity): View {
         cs.busy = true
         cs.error = null
         Core.background("catalog.feed", json("index" to index, "url" to url)) { r ->
-            cs.busy = false
+            // A page left (Back, another catalogue) before it arrived has no say on screen.
+            val current = cs.source - 1 == index && cs.stack.lastOrNull() === page
+            if (current) cs.busy = false
             r.onSuccess {
                 val feed = it as JSONObject
                 val have = page.feed
@@ -90,8 +92,8 @@ private fun catalogView(a: MainActivity): View {
                     feed.getJSONArray("entries").objects().forEach { e -> entries.put(e) }
                     have.put("next", feed.opt("next"))
                 } else page.feed = feed
-            }.onFailure { cs.error = it.message }
-            reload()
+            }.onFailure { if (current) cs.error = it.message }
+            if (current) reload()
         }
     }
 
@@ -167,6 +169,9 @@ private fun catalogView(a: MainActivity): View {
     when {
         cs.error != null -> {
             box.addView(FrameLayout(a).apply { setPadding(a.dp(16), a.dp(8), a.dp(16), 0); addView(a.notice("Couldn't load the catalogue", cs.error!!)) })
+            cs.stack.lastOrNull()?.let { page ->
+                box.addView(a.button("Try again", Kind.Secondary) { load(page); a.rebuild() }, lp(-2).apply { leftMargin = a.dp(16); topMargin = a.dp(8) })
+            }
             return box
         }
         feed == null -> {

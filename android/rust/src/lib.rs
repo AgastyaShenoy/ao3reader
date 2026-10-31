@@ -82,6 +82,9 @@ struct State {
     follows: FollowStore,
     /// The work open in the reader.
     work: Option<Work>,
+    /// Words in each paragraph of each of its chapters, counted once when it opens: progress
+    /// is worked out from them on every scroll.
+    words: Vec<Vec<usize>>,
     /// For catalogs (Project Gutenberg and the reader's own).
     catalogs: CatalogClient,
     /// Learns the reading speed from how fast the reading position moves.
@@ -329,10 +332,10 @@ fn paragraph_words(work: &Work, ch: usize) -> Vec<usize> {
 }
 
 /// (percentage, words left in work, words left in chapter) for a reading position.
-fn progress_stats(work: &Work, ch: usize, position: f64) -> (f64, usize, usize) {
-    let chapter_words: Vec<usize> = (0..work.chapters.len()).map(|i| paragraph_words(work, i).iter().sum()).collect();
+fn progress_stats(words: &[Vec<usize>], ch: usize, position: f64) -> (f64, usize, usize) {
+    let chapter_words: Vec<usize> = words.iter().map(|p| p.iter().sum()).collect();
     let total: usize = chapter_words.iter().sum();
-    let paras = paragraph_words(work, ch);
+    let paras: &[usize] = words.get(ch).map_or(&[], Vec::as_slice);
     let idx = position.max(0.0).floor() as usize;
     let mut in_ch: f64 = paras.iter().take(idx).sum::<usize>() as f64;
     if let Some(w) = paras.get(idx) {
@@ -432,7 +435,7 @@ fn dispatch(method: &str, a: &Value) -> R {
             let mut guard = STATE.lock().map_err(|_| "state poisoned")?;
             let follows = FollowStore::load();
             let themes = themes_json(&config);
-            *guard = Some(State { config, library, client, follows, work: None, catalogs: CatalogClient::new(), pace: PaceTracker::default(), started: std::time::Instant::now() });
+            *guard = Some(State { config, library, client, follows, work: None, words: Vec::new(), catalogs: CatalogClient::new(), pace: PaceTracker::default(), started: std::time::Instant::now() });
             Ok(json!({ "themes": themes }))
         }
         // After "Your colours" change.
@@ -533,6 +536,8 @@ fn dispatch(method: &str, a: &Value) -> R {
                 "bookmarks": bookmarks_json(entry),
                 "highlights": highlights_json(entry),
             });
+            s.library.mark_opened(&work.meta.id);
+            s.words = (0..work.chapters.len()).map(|i| paragraph_words(&work, i)).collect();
             s.work = Some(work);
             s.pace.reset();
             Ok(out)
@@ -612,9 +617,10 @@ fn dispatch(method: &str, a: &Value) -> R {
             let work = s.work.as_ref().ok_or("no work open")?;
             let ch = arg_u64(a, "chapter")? as usize;
             let pos = a.get("position").and_then(Value::as_f64).unwrap_or(0.0);
-            let (pct, left_work, left_ch) = progress_stats(work, ch, pos);
+            let _ = work;
+            let (pct, left_work, left_ch) = progress_stats(&s.words, ch, pos);
             // Every move through the work teaches the reading speed (jumps and pauses are ignored).
-            let total: usize = (0..work.chapters.len()).map(|i| paragraph_words(work, i).iter().sum::<usize>()).sum();
+            let total: usize = s.words.iter().flatten().sum();
             let read = total.saturating_sub(left_work) as f64;
             let t = s.started.elapsed().as_secs_f64();
             if s.pace.observe(t, read, &mut s.config.reading_speed) {
@@ -631,7 +637,7 @@ fn dispatch(method: &str, a: &Value) -> R {
             // A PDF's position is page + fraction; text works count words read.
             let pct = match work.meta.pdf_pages {
                 Some(n) => (pos / f64::from(n.max(1)) * 100.0).clamp(0.0, 100.0),
-                None => progress_stats(work, ch, pos).0,
+                None => progress_stats(&s.words, ch, pos).0,
             };
             s.library.update_progress(
                 &id,
@@ -866,6 +872,12 @@ fn dispatch(method: &str, a: &Value) -> R {
             let mut fresh = 0;
             let mut errors = Vec::new();
             for (i, id) in ids.iter().enumerate() {
+                if i > 0 && errors.iter().any(|e: &String| e.contains("429")) {
+                    // Told to slow down: the rest wait for the next round, marked as tried, so
+                    // they aren't asked for again straight away.
+                    with_state(|s| s.follows.record_error(id, "Not checked: AO3 asked to slow down (HTTP 429). It's tried again later.".into()))?;
+                    continue;
+                }
                 if i > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(1200));
                 }
@@ -889,12 +901,8 @@ fn dispatch(method: &str, a: &Value) -> R {
                         })?
                     }
                     Err(e) => {
-                        let rate_limited = e.contains("429");
                         with_state(|s| s.follows.record_error(id, e.clone()))?;
                         errors.push(format!("{}: {e}", feed.name));
-                        if rate_limited {
-                            break;
-                        }
                     }
                 }
             }

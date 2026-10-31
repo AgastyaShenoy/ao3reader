@@ -187,6 +187,8 @@ pub struct MenuState {
     /// (label, danger)
     pub items: Vec<(String, bool)>,
     pub selected: Option<usize>,
+    /// How far a menu taller than the window is scrolled (the wheel moves it).
+    pub scroll: f32,
 }
 
 /// State that persists between frames.
@@ -650,7 +652,8 @@ impl<'a> Ui<'a> {
     /// Vertical scroll container. `content` draws at the given top y and returns its height.
     /// Nested areas get the wheel first; it reaches the outer one only if they cannot scroll.
     pub fn scroll_area(&mut self, id: Id, r: Rect, content: impl FnOnce(&mut Ui, Rect, f32) -> f32) {
-        let hovered = self.hit(r);
+        // An open menu over the area takes the wheel itself.
+        let hovered = self.hit(r) && !self.mem.menu.as_ref().is_some_and(|m| m.rect.contains(self.input.mouse));
         let (mut offset, content_h) = {
             let s = self.mem.scroll.entry(id).or_default();
             (s.offset, s.content_h)
@@ -745,15 +748,28 @@ impl<'a> Ui<'a> {
                     // Room for the label plus the row's padding and check mark (see below).
                     .map(|(l, _)| self.g.layout(l, &TextStyle::ui(13.5), TextOpts::default()).w + 52.0)
                     .fold(r.w.max(180.0), f32::max);
-                let h = items.len() as f32 * 34.0 + 8.0;
+                let full = items.len() as f32 * 34.0 + 8.0;
                 let x = (r.right() - w).max(4.0).min(self.size.0 - w - 4.0);
-                let y = if r.bottom() + 4.0 + h > self.size.1 - 4.0 { (r.y - 4.0 - h).max(4.0) } else { r.bottom() + 4.0 };
+                // Below the button, or above it, whichever has room; a menu taller than both is
+                // cut to the bigger one and scrolls.
+                let below = self.size.1 - 4.0 - (r.bottom() + 4.0);
+                let above = r.y - 4.0 - 4.0;
+                let (y, h) = if full <= below {
+                    (r.bottom() + 4.0, full)
+                } else if full <= above {
+                    (r.y - 4.0 - full, full)
+                } else if below >= above {
+                    (r.bottom() + 4.0, below.max(34.0 + 8.0))
+                } else {
+                    (4.0, above.max(34.0 + 8.0))
+                };
                 self.mem.menu = Some(MenuState {
                     id,
                     anchor: r,
                     rect: Rect::new(x, y, w, h),
                     items: items.iter().map(|(l, d)| (l.to_string(), *d)).collect(),
                     selected,
+                    scroll: 0.0,
                 });
                 self.menu_seen = true;
             }
@@ -774,8 +790,22 @@ impl<'a> Ui<'a> {
         self.g.fill_round(Rect::new(m.rect.x + 1.0, m.rect.y + 3.0, m.rect.w, m.rect.h), 8.0, Color::from_u8(0, 0, 0).alpha(0.18));
         self.g.fill_round(m.rect, 8.0, c.surface);
         self.g.stroke_round(m.rect, 8.0, 1.0, c.border);
+        let full = m.items.len() as f32 * 34.0 + 8.0;
+        let max_scroll = (full - m.rect.h).max(0.0);
+        if max_scroll > 0.0 && self.input.wheel != 0.0 && m.rect.contains(self.input.mouse) {
+            if let Some(mm) = &mut self.mem.menu {
+                mm.scroll = (mm.scroll - self.input.wheel * 48.0).clamp(0.0, max_scroll);
+            }
+            self.wheel_used = true;
+            self.repaint = true;
+        }
+        let scroll = m.scroll.clamp(0.0, max_scroll);
+        self.g.push_clip(m.rect.shrink(1.0));
         for (i, (label, danger)) in m.items.iter().enumerate() {
-            let row = Rect::new(m.rect.x + 4.0, m.rect.y + 4.0 + i as f32 * 34.0, m.rect.w - 8.0, 34.0);
+            let row = Rect::new(m.rect.x + 4.0, m.rect.y + 4.0 + i as f32 * 34.0 - scroll, m.rect.w - 8.0, 34.0);
+            if row.bottom() < m.rect.y || row.y > m.rect.bottom() {
+                continue;
+            }
             let resp = self.interact_as(id2(m.id, ("menu-item", i)), row, Role::MenuItem, label);
             if resp.hovered {
                 self.g.fill_round(row, 5.0, c.hover());
@@ -790,6 +820,13 @@ impl<'a> Ui<'a> {
                 self.mem.menu = None;
                 self.repaint = true;
             }
+        }
+        self.g.pop_clip();
+        if max_scroll > 0.0 {
+            // A thin bar says there's more.
+            let bar_h = (m.rect.h * m.rect.h / full).max(24.0);
+            let bar_y = m.rect.y + (m.rect.h - bar_h) * (scroll / max_scroll);
+            self.g.fill_round(Rect::new(m.rect.right() - 5.0, bar_y + 2.0, 3.0, bar_h - 4.0), 1.5, c.muted.alpha(0.5));
         }
         if self.input.pressed && !m.rect.contains(self.input.mouse) && !m.anchor.contains(self.input.mouse) {
             self.mem.menu = None;

@@ -990,7 +990,7 @@ impl SettingsScreen {
         ui.card(card);
         ui.g.fill_path(super::mark::PATH, super::mark::SIZE, Rect::new(card.x + 18.0, card.y + 18.0, 48.0, 48.0), c.accent_mark);
         let n = ui.text("Flax Reader", &TextStyle::ui(22.0).semibold(), card.x + 80.0, card.y + 16.0, c.text);
-        ui.text(&format!("Version {CURRENT_VERSION}  ·  Made by aga2522  ·  Free and open source (MIT)"), &TextStyle::ui(SMALL), card.x + 80.0, card.y + 18.0 + n.h, c.muted);
+        ui.text(&format!("Version {CURRENT_VERSION}  ·  Made by aga2522  ·  Free software (GPL-3.0)"), &TextStyle::ui(SMALL), card.x + 80.0, card.y + 18.0 + n.h, c.muted);
         ui.g.draw_text(t, card.x + 18.0, card.y + 84.0, c.text);
         let by = card.y + 84.0 + t.h + 16.0;
         ui.g.draw_text(nt, card.x + 18.0, by + 48.0, c.muted);

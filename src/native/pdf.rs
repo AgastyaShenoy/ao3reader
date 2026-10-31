@@ -9,7 +9,7 @@ use crate::pdf::{Engine, PageSize};
 use crate::reader::theme::ReaderThemeType;
 use crate::storage::config::AppConfig;
 use pdf_render::{compose, wanted_tiles, Frame, Layout, Look, RenderPool, Style, TileCache, Viewport};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const TOOLBAR_H: f32 = 48.0;
 /// Space around and between pages, in DIPs.
@@ -33,9 +33,82 @@ const VK_SUBTRACT: u16 = 0x6D;
 const VK_OEM_PLUS: u16 = 0xBB;
 const VK_OEM_MINUS: u16 = 0xBD;
 const VK_0: u16 = 0x30;
+const VK_F: u16 = 0x46;
+const VK_G: u16 = 0x47;
+
+/// A line of the PDF's own contents (its outline), flattened.
+struct Toc {
+    title: String,
+    page: usize,
+    depth: usize,
+}
+
+/// A page the search found, with the words around the first hit.
+struct Found {
+    page: usize,
+    snippet: String,
+}
+
+/// A search through the pages' text, run on a thread of its own (big PDFs take a moment).
+#[derive(Default)]
+struct Search {
+    query: String,
+    found: Vec<Found>,
+    done: bool,
+}
+
+fn flatten(items: &[pdf_engine::OutlineItem], depth: usize, out: &mut Vec<Toc>) {
+    for it in items {
+        if let Some(pdf_engine::Target::Page { page, .. }) = &it.target {
+            out.push(Toc { title: it.title.trim().to_string(), page: *page, depth });
+        }
+        flatten(&it.children, depth + 1, out);
+    }
+}
+
+/// Up to 200 pages with `query` on them (any case), with the words around the first hit.
+fn search_pages(engine: &dyn Engine, query: &str, out: &Mutex<Search>) {
+    let q: Vec<char> = query.to_lowercase().chars().collect();
+    for page in 0..engine.page_count() {
+        let text: String = engine.page_text(page).chars.iter().map(|c| c.ch).collect();
+        let lower: Vec<char> = text.to_lowercase().chars().collect();
+        if let Some(at) = (0..lower.len().saturating_sub(q.len() - 1)).find(|&i| lower[i..].starts_with(&q)) {
+            let chars: Vec<char> = text.chars().collect();
+            let from = at.saturating_sub(40);
+            let to = (at + q.len() + 60).min(chars.len());
+            let mut words: Vec<String> = chars[from..to].iter().collect::<String>().split_whitespace().map(str::to_string).collect();
+            // Whole words only: drop the ones cut at either end.
+            if from > 0 && words.len() > 3 {
+                words.remove(0);
+            }
+            if to < chars.len() && words.len() > 3 {
+                words.pop();
+            }
+            let snippet = format!("{}{}{}", if from > 0 { "…" } else { "" }, words.join(" "), if to < chars.len() { "…" } else { "" });
+            let mut s = out.lock().unwrap_or_else(|e| e.into_inner());
+            if s.query != query {
+                return; // A newer search took over.
+            }
+            s.found.push(Found { page, snippet });
+            if s.found.len() >= 200 {
+                break;
+            }
+        }
+    }
+    out.lock().unwrap_or_else(|e| e.into_inner()).done = true;
+}
 
 pub struct PdfScreen {
     meta: WorkMeta,
+    engine: Arc<dyn Engine>,
+    /// The PDF's own contents, if it has any.
+    toc: Vec<Toc>,
+    /// The contents and search panel is open.
+    panel: bool,
+    query: String,
+    search: Arc<Mutex<Search>>,
+    /// "Go to page" being typed.
+    goto: Option<String>,
     pool: RenderPool,
     cache: TileCache,
     sizes: Vec<PageSize>,
@@ -71,8 +144,16 @@ impl PdfScreen {
     pub fn new(meta: WorkMeta, engine: Arc<dyn Engine>, progress: Option<&ReadingProgress>, wake: impl Fn() + Send + Sync + 'static) -> Self {
         let sizes = (0..engine.page_count()).map(|p| engine.page_size(p)).collect();
         let threads = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(1, 4));
+        let mut toc = Vec::new();
+        flatten(&engine.outline(), 0, &mut toc);
         Self {
             meta,
+            engine: engine.clone(),
+            toc,
+            panel: false,
+            query: String::new(),
+            search: Arc::new(Mutex::new(Search::default())),
+            goto: None,
             pool: RenderPool::new(engine, threads, wake),
             cache: TileCache::default(),
             sizes,
@@ -178,7 +259,8 @@ impl PdfScreen {
         }
 
         self.keys(ui, &mut out, vh as i64, px);
-        if ui.hit(area) && ui.input.wheel != 0.0 {
+        let panel_r = self.panel_rect(area);
+        if ui.hit(area) && ui.input.wheel != 0.0 && !(self.panel && panel_r.contains(ui.input.mouse)) {
             let dy = (-ui.input.wheel * 120.0 * px) as i64;
             self.y += dy;
             self.ahead = dy.signum();
@@ -231,7 +313,107 @@ impl PdfScreen {
             self.toolbar(ui, Rect::new(r.x, r.y, r.w, TOOLBAR_H), current, &mut out);
             ui.tab_first(mark);
         }
+        if self.panel {
+            self.side_panel(ui, panel_r);
+        }
         out
+    }
+
+    fn panel_rect(&self, area: Rect) -> Rect {
+        let w = 380.0f32.min(area.w - 24.0);
+        Rect::new(area.right() - w - 12.0, area.y + 8.0, w, (area.h - 16.0).max(100.0))
+    }
+
+    /// Scrolls to the top of page `page` (0-based).
+    fn go_to_page(&mut self, page: usize) {
+        if let Some(l) = &self.layout {
+            let p = page.min(l.pages.len().saturating_sub(1));
+            self.y = l.pages[p].y - l.gap as i64;
+            self.ahead = 1;
+        }
+    }
+
+    /// The PDF's contents, or what a search found: click a line to go there.
+    fn side_panel(&mut self, ui: &mut Ui, r: Rect) {
+        let c = ui.c;
+        ui.block(r);
+        ui.g.fill_round(r, 8.0, c.surface);
+        ui.g.stroke_round(r, 8.0, 1.0, c.border);
+        let input = Rect::new(r.x + 14.0, r.y + 14.0, r.w - 28.0, 34.0);
+        let resp = ui.text_input(id("pdf-search"), input, &mut self.query, "Search the pages", false);
+        if resp.submitted && self.query.trim().chars().count() >= 2 {
+            let q = self.query.trim().to_string();
+            *self.search.lock().unwrap_or_else(|e| e.into_inner()) = Search { query: q.clone(), ..Default::default() };
+            let (engine, out) = (self.engine.clone(), self.search.clone());
+            std::thread::spawn(move || search_pages(engine.as_ref(), &q, &out));
+        }
+        if self.query.trim().is_empty() {
+            self.search.lock().unwrap_or_else(|e| e.into_inner()).query.clear();
+        }
+        let list = Rect::new(r.x + 4.0, r.y + 58.0, r.w - 8.0, r.h - 62.0);
+        let mut go: Option<usize> = None;
+        let s = self.search.lock().unwrap_or_else(|e| e.into_inner());
+        if !s.query.is_empty() {
+            if !s.done {
+                ui.wake_after(150);
+            }
+            let head = if s.done { format!("{} pages with “{}”", s.found.len(), s.query) } else { format!("Searching… {} pages so far", s.found.len()) };
+            ui.text(&head, &TextStyle::ui(12.5).semibold(), list.x + 12.0, list.y, c.muted);
+            let body = Rect::new(list.x, list.y + 24.0, list.w, list.h - 24.0);
+            let found = &s.found;
+            ui.scroll_area(id("pdf-found"), body, |ui, view, y0| {
+                let row_h = 62.0;
+                for (i, f) in found.iter().enumerate() {
+                    let rr = Rect::new(view.x + 6.0, y0 + i as f32 * row_h, view.w - 22.0, row_h - 4.0);
+                    if rr.bottom() < view.y || rr.y > view.bottom() {
+                        continue;
+                    }
+                    let resp = ui.interact_as(id2(id("pdf-hit"), i), rr, Role::Button, &f.snippet);
+                    if resp.hovered {
+                        ui.g.fill_round(rr, 6.0, c.hover());
+                    }
+                    ui.text(&format!("Page {}", f.page + 1), &TextStyle::ui(12.5).semibold(), rr.x + 10.0, rr.y + 6.0, c.accent_text);
+                    let t = ui.measure(&f.snippet, &TextStyle::ui(12.5), TextOpts::wrap(rr.w - 20.0).max_lines(2));
+                    ui.g.draw_text(t, rr.x + 10.0, rr.y + 26.0, c.text);
+                    if resp.clicked {
+                        go = Some(f.page);
+                    }
+                }
+                found.len() as f32 * row_h + 8.0
+            });
+        } else if self.toc.is_empty() {
+            let t = ui.measure("This PDF has no contents of its own. Search its pages above, or click the page number to go to a page.", &TextStyle::ui(13.0), TextOpts::wrap(list.w - 40.0).align(Align::Center));
+            ui.g.draw_text(t, list.x + 20.0, list.y + 20.0, c.muted);
+        } else {
+            let toc = &self.toc;
+            ui.scroll_area(id("pdf-toc"), list, |ui, view, y0| {
+                let row_h = 38.0;
+                for (i, t) in toc.iter().enumerate() {
+                    let rr = Rect::new(view.x + 6.0, y0 + i as f32 * row_h, view.w - 22.0, row_h - 2.0);
+                    if rr.bottom() < view.y || rr.y > view.bottom() {
+                        continue;
+                    }
+                    let resp = ui.interact_as(id2(id("pdf-toc-row"), i), rr, Role::Button, &t.title);
+                    if resp.hovered {
+                        ui.g.fill_round(rr, 6.0, c.hover());
+                    }
+                    let indent = t.depth.min(4) as f32 * 16.0;
+                    let n = format!("{}", t.page + 1);
+                    let nt = ui.text_in(&n, &TextStyle::ui(12.0), Rect::new(rr.right() - 60.0, rr.y, 52.0, rr.h), Align::Right, c.muted);
+                    let style = if t.depth == 0 { TextStyle::ui(13.5).semibold() } else { TextStyle::ui(13.5) };
+                    ui.text_in(&t.title, &style, Rect::new(rr.x + 10.0 + indent, rr.y, rr.w - nt.w - 30.0 - indent, rr.h), Align::Left, c.text);
+                    if resp.clicked {
+                        go = Some(t.page);
+                    }
+                }
+                toc.len() as f32 * row_h + 8.0
+            });
+        }
+        drop(s);
+        if let Some(p) = go {
+            self.go_to_page(p);
+            ui.request_repaint();
+        }
     }
 
     fn keys(&mut self, ui: &mut Ui, out: &mut Vec<ReaderAction>, view_h: i64, px: f32) {
@@ -276,6 +458,17 @@ impl PdfScreen {
         if ui.key_combo(VK_0, true, false) {
             self.set_zoom(None);
         }
+        // Ctrl+F: contents and search; Ctrl+G: go to a page.
+        if ui.key_combo(VK_F, true, false) {
+            self.panel = true;
+            ui.focus_input(id("pdf-search"));
+        }
+        if ui.key_combo(VK_G, true, false) {
+            self.goto = Some(String::new());
+        }
+        if self.panel && ui.key_combo(VK_ESCAPE, false, false) {
+            self.panel = false;
+        }
         if ui.key_combo(VK_F11, false, false) || (self.fullscreen && ui.key_combo(VK_ESCAPE, false, false)) {
             out.push(ReaderAction::ToggleFullscreen);
         }
@@ -315,6 +508,10 @@ impl PdfScreen {
         if ui.button_ex(id("pdf-back"), Rect::new(r.x + 8.0, r.y + 8.0, 96.0, 32.0), "Library", Some("\u{E72B}"), ButtonKind::Ghost, true) {
             out.push(ReaderAction::Close);
         }
+        let toc_r = Rect::new(r.x + 108.0, r.y + 8.0, 34.0, 32.0);
+        if ui.icon_button(id("pdf-contents"), toc_r, "\u{E8FD}", "Contents and search (Ctrl+F)", self.panel) {
+            self.panel = !self.panel;
+        }
 
         let mut x = r.right() - 8.0 - 34.0;
         let (fs_icon, fs_tip) = if self.fullscreen { ("\u{E73F}", "Leave full screen (F11)") } else { ("\u{E740}", "Full screen (F11)") };
@@ -338,16 +535,39 @@ impl PdfScreen {
             self.step_zoom(dpi, false);
         }
 
-        // Title, and where the reader is.
+        // Title, and where the reader is: click the page number to go to a page.
         let page = format!("Page {} of {}", current + 1, self.page_count());
         let left = r.x + 150.0;
         let width = (x - 16.0 - left).max(0.0);
         let title = TextStyle::ui(14.0).semibold();
-        let tt = ui.measure(&self.meta.title, &title, TextOpts::ellipsize((width - 130.0).max(40.0)));
+        let tt = ui.measure(&self.meta.title, &title, TextOpts::ellipsize((width - 150.0).max(40.0)));
         let pt = ui.measure(&page, &TextStyle::ui(13.0), TextOpts::default());
         let total = tt.w + 14.0 + pt.w;
         let tx = left + ((width - total) / 2.0).max(0.0);
         ui.g.draw_text(tt, tx, r.y + (r.h - tt.h) / 2.0, c.text);
-        ui.g.draw_text(pt, tx + tt.w + 14.0, r.y + (r.h - pt.h) / 2.0, c.muted);
+        let pr = Rect::new(tx + tt.w + 8.0, r.y + 8.0, pt.w + 12.0, 32.0);
+        if let Some(mut typed) = self.goto.take() {
+            let n = self.page_count();
+            let input = Rect::new(pr.x, pr.y, 120.0, 32.0);
+            let resp = ui.text_input(id("pdf-goto"), input, &mut typed, &format!("Page (1–{n})"), false);
+            ui.focus_input(id("pdf-goto"));
+            if resp.submitted {
+                if let Ok(p) = typed.trim().parse::<usize>() {
+                    self.go_to_page(p.clamp(1, n) - 1);
+                }
+            } else if !resp.escaped {
+                self.goto = Some(typed);
+            }
+        } else {
+            let resp = ui.interact_as(id("pdf-page"), pr, Role::Button, "Go to a page (Ctrl+G)");
+            if resp.hovered {
+                ui.g.fill_round(pr, 6.0, c.hover());
+            }
+            ui.g.draw_text(pt, pr.x + 6.0, r.y + (r.h - pt.h) / 2.0, c.muted);
+            ui.tip(id("pdf-page"), pr, "Go to a page (Ctrl+G)");
+            if resp.clicked {
+                self.goto = Some(String::new());
+            }
+        }
     }
 }
