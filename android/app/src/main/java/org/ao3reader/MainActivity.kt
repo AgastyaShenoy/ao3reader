@@ -26,11 +26,14 @@ class MainActivity : Activity() {
     private lateinit var content: FrameLayout
     private lateinit var nav: LinearLayout
     private var tab = LIBRARY
+    /** The Settings category open, or -1 for the list of them. */
+    var settingsPage = -1
     private var animateTab = false
     private var reader: BookView? = null
 
     val library = LibraryState()
     val search = SearchState()
+    val catalogs = CatalogState()
     val following = FollowingState()
     val imports = ImportState()
 
@@ -67,6 +70,7 @@ class MainActivity : Activity() {
     override fun onSaveInstanceState(out: Bundle) {
         super.onSaveInstanceState(out)
         out.putInt("tab", if (tab == ACCOUNT || tab == IMPORT) SETTINGS else tab)
+        out.putInt("settings_page", settingsPage)
     }
 
     private fun isNight(c: Configuration) = (c.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
@@ -88,6 +92,7 @@ class MainActivity : Activity() {
         Settings.load()
         Settings.night = isNight(resources.configuration)
         tab = savedInstanceState?.getInt("tab", LIBRARY) ?: LIBRARY
+        settingsPage = savedInstanceState?.getInt("settings_page", -1) ?: -1
 
         root = FrameLayout(this)
         // Keep the first text field from taking focus (and the keyboard) on launch.
@@ -140,6 +145,7 @@ class MainActivity : Activity() {
         when {
             r != null -> if (!r.back()) closeReader()
             tab == ACCOUNT || tab == IMPORT -> show(SETTINGS)
+            tab == SETTINGS && settingsPage >= 0 -> openSettings(-1)
             tab != LIBRARY -> show(LIBRARY)
             else -> finish()
         }
@@ -221,14 +227,15 @@ class MainActivity : Activity() {
     private fun buildNav() {
         val p = Settings.pal
         nav.removeAllViews()
-        val tabs = listOf(R.drawable.ic_book to "Library", R.drawable.ic_search to "Search", R.drawable.ic_follow to "Following", R.drawable.ic_tune to "Settings")
+        val tabs = listOf(R.drawable.ic_book to "Library", R.drawable.ic_search to "Browse", R.drawable.ic_follow to "Following", R.drawable.ic_tune to "Settings")
         val unread = runCatching { Core.obj("follows").getInt("unread") }.getOrDefault(0)
         tabs.forEachIndexed { i, (res, name) ->
             val sel = i == tab || ((tab == ACCOUNT || tab == IMPORT) && i == SETTINGS)
             val item = column().apply {
                 gravity = Gravity.CENTER
                 setPadding(0, dp(4), 0, dp(4))
-                setOnClickListener { show(i) }
+                // Settings again, from one of its categories: back to the list of them.
+                setOnClickListener { if (i == SETTINGS && tab == SETTINGS) openSettings(-1) else show(i) }
             }
             val iconBox = FrameLayout(this)
             // Material-style indicator: a neutral pill behind the current tab's icon, which takes
@@ -259,8 +266,16 @@ class MainActivity : Activity() {
 
     val currentTab get() = tab
 
+    /** Opens a Settings category (-1: the list of them). */
+    fun openSettings(page: Int) {
+        settingsPage = page
+        animateTab = true
+        tab = SETTINGS
+        rebuild()
+    }
+
     private fun screen(i: Int): View = when (i) {
-        SEARCH -> searchScreen(this)
+        SEARCH -> browseScreen(this)
         FOLLOWING -> followingScreen(this)
         SETTINGS -> settingsScreen(this)
         ACCOUNT -> accountScreen(this)

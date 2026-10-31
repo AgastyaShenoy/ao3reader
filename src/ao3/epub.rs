@@ -578,15 +578,18 @@ pub fn parse_epub(bytes: &[u8]) -> Result<Work, String> {
     };
 
     let ao3_url = Regex::new(r"archiveofourown\.org/works/(\d+)").unwrap();
-    let mut work_id = ao3_url.captures(&opf_text).map(|c| c[1].to_string());
-    let mut is_ao3 = false;
+    // AO3's EPUBs name the work in their metadata. A link in the text alone doesn't make a book an
+    // AO3 work (it might just mention one): that needs AO3's own preface or afterword too.
+    let work_id = ao3_url.captures(&opf_text).map(|c| c[1].to_string());
+    let mut linked_id = None;
+    let mut is_ao3 = work_id.is_some();
     let mut b = Builder { chapters: Vec::new(), titled: false, zip: &zip, file: String::new(), images: HashMap::new(), resources: Vec::new(), resource_bytes: 0 };
 
     for path in &spine {
         let Some(html) = zip.text(path) else { continue };
         b.file = path.clone();
-        if work_id.is_none() {
-            work_id = ao3_url.captures(&html).map(|c| c[1].to_string());
+        if linked_id.is_none() {
+            linked_id = ao3_url.captures(&html).map(|c| c[1].to_string());
         }
         let doc = Html::parse_document(&html);
         // AO3's preface (metadata) and afterword are not chapters.
@@ -636,7 +639,7 @@ pub fn parse_epub(bytes: &[u8]) -> Result<Work, String> {
         meta.stats.chapters_total = Some(chapters.len() as u32);
         meta.is_complete = true;
     }
-    meta.id = work_id.unwrap_or_else(|| {
+    meta.id = work_id.or(linked_id.filter(|_| is_ao3)).unwrap_or_else(|| {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         bytes.hash(&mut h);
@@ -646,7 +649,7 @@ pub fn parse_epub(bytes: &[u8]) -> Result<Work, String> {
 }
 
 /// Imports a saved work from file contents, recognised by what's inside: an EPUB (ZIP), a PDF,
-/// a work saved by AO3 Reader (JSON), or an AO3 HTML page or download.
+/// a work saved by Flax Reader (JSON), or an AO3 HTML page or download.
 pub fn import_bytes(bytes: &[u8]) -> Result<Work, String> {
     import_named(bytes, None)
 }
@@ -664,7 +667,7 @@ pub fn import_named(bytes: &[u8], name: Option<&str>) -> Result<Work, String> {
     let text = String::from_utf8_lossy(bytes);
     let t = text.trim_start_matches('\u{feff}').trim_start();
     if t.starts_with('{') {
-        return serde_json::from_str::<Work>(t).map_err(|e| format!("Not a saved AO3 Reader work: {e}"));
+        return serde_json::from_str::<Work>(t).map_err(|e| format!("Not a saved Flax Reader work: {e}"));
     }
     let id = Ao3Parser::extract_work_id(t).unwrap_or_else(|| {
         use std::hash::{Hash, Hasher};

@@ -494,6 +494,26 @@ impl Gfx {
     }
 
     /// Rectangles (relative to the layout origin) covering a byte range of the laid-out text.
+    /// The byte offset in `text` (laid out as `t`) nearest to (x, y), relative to the layout.
+    pub fn hit_point(&self, t: Text, text: &str, x: f32, y: f32) -> usize {
+        let Some(c) = self.layouts.get(&t.key) else { return 0 };
+        let mut trailing = BOOL(0);
+        let mut inside = BOOL(0);
+        let mut m = DWRITE_HIT_TEST_METRICS::default();
+        if unsafe { c.layout.HitTestPoint(x, y, &mut trailing, &mut inside, &mut m) }.is_err() {
+            return 0;
+        }
+        let units = (m.textPosition + if trailing.as_bool() { m.length } else { 0 }) as usize;
+        let mut seen = 0;
+        for (i, ch) in text.char_indices() {
+            if seen >= units {
+                return i;
+            }
+            seen += ch.len_utf16();
+        }
+        text.len()
+    }
+
     pub fn range_rects(&self, t: Text, text: &str, start: usize, end: usize) -> Vec<Rect> {
         let Some(c) = self.layouts.get(&t.key) else { return Vec::new() };
         let start = start.min(text.len());

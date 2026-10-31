@@ -1,6 +1,5 @@
 package org.ao3reader
 
-import android.app.AlertDialog
 import android.content.Intent
 import android.text.Editable
 import android.text.TextWatcher
@@ -84,7 +83,7 @@ fun libraryScreen(a: MainActivity): View {
         if (all.isEmpty()) {
             empty.addView(a.label("Your library is empty. Search AO3 or paste a link to a work to start reading.", 15f, p.muted).apply { gravity = Gravity.CENTER })
             val buttons = a.row().apply { gravity = Gravity.CENTER }
-            buttons.addView(a.button("Search AO3", Kind.Primary, R.drawable.ic_search) { a.show(MainActivity.SEARCH) })
+            buttons.addView(a.button("Search AO3", Kind.Primary, R.drawable.ic_search) { a.catalogs.switch(0); a.show(MainActivity.SEARCH) })
             buttons.addView(a.button("Import a file") { a.show(MainActivity.IMPORT) }, lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = a.dp(8) })
             empty.addView(buttons, lp(top = a.dp(16)))
         } else if (l.isEmpty()) {
@@ -102,7 +101,7 @@ fun libraryScreen(a: MainActivity): View {
             setPadding(a.dp(14), a.dp(7), a.dp(14), a.dp(7))
         }
         sort.setOnClickListener {
-            val m = PopupMenu(a, sort)
+            val m = a.popupMenu(sort)
             SORTS.forEachIndexed { i, s -> m.menu.add(0, i, i, s).apply { isCheckable = true; isChecked = i == st.sort } }
             m.setOnMenuItemClickListener { st.sort = it.itemId; refresh(); true }
             m.show()
@@ -176,7 +175,7 @@ private fun workCard(a: MainActivity, e: JSONObject): View {
     val shelf = SHELVES.firstOrNull { it.first == e.getString("shelf") }?.second ?: "Reading"
     val shelfBtn = a.button(shelf) {}
     shelfBtn.setOnClickListener {
-        val menu = PopupMenu(a, shelfBtn)
+        val menu = a.popupMenu(shelfBtn)
         SHELVES.forEachIndexed { i, (key, name) -> menu.menu.add(0, i, i, name).apply { isCheckable = true; isChecked = key == e.getString("shelf") } }
         menu.setOnMenuItemClickListener {
             Core.req("library.shelf", json("id" to id, "shelf" to SHELVES[it.itemId].first))
@@ -189,7 +188,7 @@ private fun workCard(a: MainActivity, e: JSONObject): View {
     actions.addView(View(a), LinearLayout.LayoutParams(0, 1, 1f))
     lateinit var more: View
     more = a.iconButton(R.drawable.ic_more, p.text, "More: export or delete") {
-        val menu = PopupMenu(a, more)
+        val menu = a.popupMenu(more)
         EXPORTS.forEachIndexed { i, (_, name, _) -> menu.menu.add(0, i, i, "Export as $name") }
         menu.menu.add(0, 99, 99, "Delete from library")
         menu.setOnMenuItemClickListener {
@@ -221,16 +220,12 @@ fun workPills(a: MainActivity, w: JSONObject, ships: Int = 3): LinearLayout {
 const val WARNING_RED = 0xFFCC3838.toInt()
 
 private fun confirmDelete(a: MainActivity, id: String, title: String) {
-    AlertDialog.Builder(a)
-        .setTitle("Delete this work?")
-        .setMessage("“$title” and its downloaded text will be removed from your library.")
-        .setPositiveButton("Delete") { _, _ ->
-            Core.req("library.delete", json("id" to id))
-            a.toast("Removed “$title”")
-            a.rebuild()
-        }
-        .setNegativeButton("Cancel", null)
-        .show()
+    a.dialog("Delete this work?", "“$title” and its downloaded text will be removed from your library.", ok = "Delete", okKind = Kind.Danger) {
+        Core.req("library.delete", json("id" to id))
+        a.toast("Removed “$title”")
+        a.rebuild()
+        true
+    }
 }
 
 /** Exports through the system "save as" picker. */

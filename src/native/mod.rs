@@ -8,6 +8,7 @@
 
 mod account;
 mod book;
+mod catalog;
 mod browse;
 pub mod app;
 mod edit;
@@ -282,6 +283,7 @@ impl Host {
                     self.mouse_from(lp);
                     self.input.down = true;
                     self.input.pressed = true;
+                    self.input.double = msg == WM_LBUTTONDBLCLK;
                     self.input_frame();
                     Some(LRESULT(0))
                 }
@@ -468,6 +470,24 @@ fn run_deferred() {
                 let _ = SetWindowTextW(hwnd, &HSTRING::from(title));
             },
             Deferred::Fullscreen(on) => set_fullscreen(hwnd, on),
+            Deferred::Copy(text) => unsafe {
+                use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+                use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+                const CF_UNICODETEXT: u32 = 13;
+                let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+                if OpenClipboard(Some(hwnd)).is_ok() {
+                    let _ = EmptyClipboard();
+                    if let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2) {
+                        let p = GlobalLock(mem) as *mut u16;
+                        if !p.is_null() {
+                            std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
+                            let _ = GlobalUnlock(mem);
+                            let _ = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(mem.0)));
+                        }
+                    }
+                    let _ = CloseClipboard();
+                }
+            },
             Deferred::PickColor { text, current } => unsafe {
                 use windows::Win32::UI::Controls::Dialogs::{ChooseColorW, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW};
                 // COLORREF is 0x00BBGGRR.
@@ -582,7 +602,7 @@ pub fn run() -> Result<()> {
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             class,
-            w!("AO3 Reader"),
+            w!("Flax Reader"),
             STYLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,

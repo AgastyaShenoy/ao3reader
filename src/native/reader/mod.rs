@@ -5,7 +5,9 @@
 mod layout;
 pub mod preface;
 
-use crate::ao3::models::{Bookmark, ReadingProgress, Work};
+use crate::ao3::models::{Bookmark, Highlight, ReadingProgress, Work};
+use crate::sources::dictionary::Meaning;
+use std::cell::RefCell;
 use crate::native::app::{reader_family, reader_font_label};
 use crate::native::gfx::*;
 use crate::native::icons;
@@ -44,6 +46,15 @@ const VK_OEM_MINUS: u16 = 0xBD;
 const VK_F: u16 = 0x46;
 const VK_B: u16 = 0x42;
 const VK_R: u16 = 0x52;
+const VK_C: u16 = 0x43;
+
+/// Highlight colours: yellow, green, blue, pink.
+pub const HIGHLIGHTS: [(u8, u8, u8, &str); 4] = [(250, 204, 21, "Yellow"), (74, 222, 128, "Green"), (96, 165, 250, "Blue"), (244, 114, 182, "Pink")];
+
+fn highlight_color(i: u8, dark: bool) -> Color {
+    let (r, g, b, _) = HIGHLIGHTS[(i as usize).min(HIGHLIGHTS.len() - 1)];
+    Color::from_u8(r, g, b).alpha(if dark { 0.30 } else { 0.38 })
+}
 
 pub enum ReaderAction {
     Close,
@@ -55,6 +66,12 @@ pub enum ReaderAction {
     OpenTypographySettings,
     /// A short message for the toast.
     Notice(String),
+    /// A new highlight, or a changed one (colour, note).
+    SaveHighlight(Highlight),
+    RemoveHighlight(String),
+    Copy(String),
+    /// Look a word up.
+    Define(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +81,35 @@ enum Panel {
     Appearance,
     Search,
     Bookmark,
+    /// Writing a highlight's note.
+    Note,
+    /// A word's meanings.
+    Define,
+}
+
+/// One end of a selection: a block of this layout and a byte offset into its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Mark {
+    block: usize,
+    at: usize,
+}
+
+struct Selection {
+    /// The layout it was made in (a new layout drops it).
+    key: u64,
+    anchor: Mark,
+    head: Mark,
+    dragging: bool,
+}
+
+/// Text drawn this frame, for picking it with the mouse.
+struct Spot {
+    block: usize,
+    /// Where the text starts, and the part of it that's on screen.
+    x: f32,
+    y: f32,
+    shown: Rect,
+    text: Text,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -135,6 +181,18 @@ pub struct ReaderScreen {
     /// Read aloud: the voice (made on first use) and where it has got to.
     voice: Option<Voice>,
     aloud: Option<Aloud>,
+    /// Selecting and highlighting: the text on screen, the selection, this chapter's highlights,
+    /// and the bar of actions shown over a selection or highlight (where, and for which).
+    spots: RefCell<Vec<Spot>>,
+    sel: Option<Selection>,
+    highlights: Vec<Highlight>,
+    popover: Option<(Rect, Option<String>)>,
+    popover_rect: Option<Rect>,
+    /// The highlight whose note is being written (a new one isn't saved until then).
+    note_for: Option<Highlight>,
+    note: String,
+    /// The word being looked up, and its meanings once they arrive.
+    define: Option<(String, Option<Result<Vec<Meaning>, String>>)>,
 }
 
 fn hash_of<T: Hash>(v: &T) -> u64 {
@@ -207,6 +265,14 @@ impl ReaderScreen {
             visible: Vec::new(),
             voice: None,
             aloud: None,
+            spots: RefCell::new(Vec::new()),
+            sel: None,
+            highlights: Vec::new(),
+            popover: None,
+            popover_rect: None,
+            note_for: None,
+            note: String::new(),
+            define: None,
         }
     }
 
@@ -284,9 +350,12 @@ impl ReaderScreen {
 
     // ---- frame ---------------------------------------------------------------------
 
-    pub fn frame(&mut self, ui: &mut Ui, r: Rect, config: &mut AppConfig, bookmarks: &[Bookmark]) -> Vec<ReaderAction> {
+    pub fn frame(&mut self, ui: &mut Ui, r: Rect, config: &mut AppConfig, bookmarks: &[Bookmark], highlights: &[Highlight]) -> Vec<ReaderAction> {
         let mut out = Vec::new();
+        self.highlights = highlights.iter().filter(|h| h.chapter == self.chapter).cloned().collect();
+        self.selection_keys(ui, &mut out);
         self.global_keys(ui, config, &mut out);
+        self.spots.borrow_mut().clear();
         let t = config.typography.clone();
         let c = ui.c;
         // Focus mode: only the text, like full screen but in the window.
@@ -320,6 +389,9 @@ impl ReaderScreen {
             ui.text_node(id("rd-page"), area, &text.join("\n"));
         }
         self.read_aloud(ui, area, &t, config.speech_rate);
+        if self.panel == Panel::None {
+            self.select(ui, area);
+        }
         // A soft colour over the page, then the reading ruler on top.
         if let Some(tint) = t.tint {
             ui.g.fill_rect(area, Color::from_u8((tint >> 16) as u8, (tint >> 8) as u8, tint as u8).alpha(t.tint_strength.clamp(0.0, 0.5)));
@@ -346,13 +418,20 @@ impl ReaderScreen {
             }
         }
 
+        if self.panel == Panel::None {
+            self.popover(ui, area, &mut out);
+        } else {
+            self.popover = None;
+        }
         if let Some(pr) = panel_rect {
             ui.g.fill_rect(area, Color { a: 0.25, ..Color::from_u8(0, 0, 0) });
             ui.overlay(|ui| match self.panel {
-                Panel::Contents => self.contents_panel(ui, pr, bookmarks, &mut out),
+                Panel::Contents => self.contents_panel(ui, pr, bookmarks, highlights, &mut out),
                 Panel::Appearance => self.appearance_panel(ui, pr, config, &mut out),
                 Panel::Search => self.search_panel(ui, pr),
                 Panel::Bookmark => self.bookmark_panel(ui, pr, &mut out),
+                Panel::Note => self.note_panel(ui, pr, &mut out),
+                Panel::Define => self.define_panel(ui, pr),
                 Panel::None => {}
             });
         }
@@ -367,6 +446,8 @@ impl ReaderScreen {
             Panel::Appearance => Some(Rect::new(r.right() - w(360.0), area.y, w(360.0), area.h)),
             Panel::Search => Some(Rect::new(r.right() - w(440.0) - 12.0, area.y + 10.0, w(440.0), 108.0)),
             Panel::Bookmark => Some(Rect::new(r.right() - w(420.0) - 12.0, area.y + 10.0, w(420.0), 210.0)),
+            Panel::Note => Some(Rect::new(r.right() - w(440.0) - 12.0, area.y + 10.0, w(440.0), 226.0)),
+            Panel::Define => Some(Rect::new(r.right() - w(400.0), area.y, w(400.0), area.h)),
         }
     }
 
@@ -403,6 +484,10 @@ impl ReaderScreen {
         if ui.key_combo(VK_ESCAPE, false, false) {
             if self.aloud.is_some() {
                 self.stop_aloud();
+            } else if self.panel == Panel::None && (self.sel.is_some() || self.popover.is_some()) {
+                self.sel = None;
+                self.popover = None;
+                ui.request_repaint();
             } else if self.panel != Panel::None {
                 self.close_panel();
             } else if config.typography.focus_mode {
@@ -989,6 +1074,27 @@ impl ReaderScreen {
                 let opts = TextOpts { wrap: Some(b.text_w), ..opts };
                 let th = ui.g.layout_rich(&b.rich.text, &b.rich.spans, style, opts);
                 let (tx, ty) = (x + b.text_x, y + b.text_y);
+                if kind.searchable() {
+                    let shift = Self::shift(b);
+                    let len = b.rich.text.len().saturating_sub(shift);
+                    for h in &self.highlights {
+                        if let Some((s, e)) = h.span_in(b.para, len) {
+                            for rr in ui.g.range_rects(th, &b.rich.text, s + shift, e + shift) {
+                                ui.g.fill_rect(Rect::new(tx + rr.x, ty + rr.y, rr.w, rr.h), highlight_color(h.color, c.is_dark));
+                            }
+                        }
+                    }
+                    if let Some((s, e)) = self.sel_in(bi, b.rich.text.len()) {
+                        for rr in ui.g.range_rects(th, &b.rich.text, s, e) {
+                            ui.g.fill_rect(Rect::new(tx + rr.x, ty + rr.y, rr.w, rr.h), c.accent_mark.alpha(0.3));
+                        }
+                    }
+                    let whole = Rect::new(tx, ty, b.text_w, b.text_h);
+                    let shown = ui.g.clip().map_or(whole, |cl| whole.intersect(&cl));
+                    if shown.w > 0.0 && shown.h > 0.0 {
+                        self.spots.borrow_mut().push(Spot { block: bi, x: tx, y: ty, shown, text: th });
+                    }
+                }
                 if let Some(Aloud { chapter, block: Some(ab), word: Some((s, e)), .. }) = self.aloud {
                     if chapter == layout.chapter && ab == bi {
                         for rr in ui.g.range_rects(th, &b.rich.text, s, e) {
@@ -1142,14 +1248,24 @@ impl ReaderScreen {
         ui.g.stroke_round(r, 8.0, 1.0, c.border);
     }
 
-    fn contents_panel(&mut self, ui: &mut Ui, r: Rect, bookmarks: &[Bookmark], out: &mut Vec<ReaderAction>) {
+    fn contents_panel(&mut self, ui: &mut Ui, r: Rect, bookmarks: &[Bookmark], highlights: &[Highlight], out: &mut Vec<ReaderAction>) {
         let c = ui.c;
         Self::panel_frame(ui, r);
-        ui.segmented_counts(id("contents-tab"), Rect::new(r.x + 14.0, r.y + 14.0, r.w - 28.0, 34.0), &[("Chapters", 0), ("Bookmarks", bookmarks.len())], &mut self.contents_tab, Badge::Count);
+        ui.segmented_counts(
+            id("contents-tab"),
+            Rect::new(r.x + 14.0, r.y + 14.0, r.w - 28.0, 34.0),
+            &[("Chapters", 0), ("Bookmarks", bookmarks.len()), ("Highlights", highlights.len())],
+            &mut self.contents_tab,
+            Badge::Count,
+        );
         let list = Rect::new(r.x + 4.0, r.y + 60.0, r.w - 8.0, r.h - 64.0);
         let mut jump: Option<(usize, f32)> = None;
 
-        if self.contents_tab == 0 {
+        if self.contents_tab == 2 {
+            if let Some(j) = self.highlights_list(ui, list, highlights, out) {
+                jump = Some(j);
+            }
+        } else if self.contents_tab == 0 {
             let row_h = 44.0;
             let chapters = &self.work.chapters;
             let current = self.chapter;
@@ -1417,6 +1533,441 @@ impl ReaderScreen {
         if close_hit {
             self.close_panel();
         }
+    }
+
+    // ---- selecting, highlights, notes and definitions -----------------------------------
+
+    /// Where a block's text starts counting for positions (after a first-line indent).
+    fn shift(b: &Block) -> usize {
+        if b.kind == Kind::Para && b.rich.text.starts_with(INDENT) { INDENT.len() } else { 0 }
+    }
+
+    /// The selection, start first, if it's in the current layout.
+    fn sel_range(&self) -> Option<(Mark, Mark)> {
+        let s = self.sel.as_ref()?;
+        if self.layout.as_ref().is_none_or(|l| l.key != s.key) || s.anchor == s.head {
+            return None;
+        }
+        Some(if s.anchor <= s.head { (s.anchor, s.head) } else { (s.head, s.anchor) })
+    }
+
+    /// The selected part of block `bi` (whose text is `len` bytes).
+    fn sel_in(&self, bi: usize, len: usize) -> Option<(usize, usize)> {
+        let (a, b) = self.sel_range()?;
+        if bi < a.block || bi > b.block {
+            return None;
+        }
+        let s = if bi == a.block { a.at } else { 0 };
+        let e = if bi == b.block { b.at } else { len };
+        (s < e).then_some((s, e.min(len)))
+    }
+
+    fn sel_text(&self) -> String {
+        let (Some(layout), Some((a, b))) = (&self.layout, self.sel_range()) else { return String::new() };
+        let mut parts = Vec::new();
+        for bi in a.block..=b.block {
+            let blk = &layout.blocks[bi];
+            if !blk.kind.searchable() {
+                continue;
+            }
+            if let Some((s, e)) = self.sel_in(bi, blk.rich.text.len()) {
+                parts.push(blk.rich.text.get(s..e).unwrap_or_default().trim().to_string());
+            }
+        }
+        parts.join("\n")
+    }
+
+    /// The selection as a highlight (not saved yet).
+    fn sel_highlight(&self, color: u8) -> Option<Highlight> {
+        let layout = self.layout.as_ref()?;
+        let (a, b) = self.sel_range()?;
+        let at = |m: Mark| {
+            let blk = &layout.blocks[m.block];
+            (blk.para, m.at.saturating_sub(Self::shift(blk)))
+        };
+        Some(Highlight {
+            id: format!("h{}", chrono::Utc::now().timestamp_millis()),
+            chapter: self.chapter,
+            start: at(a),
+            end: at(b),
+            color,
+            note: String::new(),
+            text: self.sel_text(),
+            created_at: chrono::Utc::now(),
+        })
+    }
+
+    /// The text position under `m`: on text exactly (`exact`), or the nearest line otherwise.
+    fn mark_at(&self, ui: &Ui, m: (f32, f32), exact: bool) -> Option<Mark> {
+        let spots = self.spots.borrow();
+        let spot = spots.iter().find(|s| s.shown.contains(m)).or_else(|| {
+            if exact {
+                return None;
+            }
+            spots.iter().min_by(|a, b| {
+                let d = |s: &&Spot| (m.1 - m.1.min(s.shown.bottom()).max(s.shown.y)).abs() + (m.0 - m.0.min(s.shown.right()).max(s.shown.x)).abs() * 0.25;
+                d(a).total_cmp(&d(b))
+            })
+        })?;
+        let blk = &self.layout.as_ref()?.blocks[spot.block];
+        // Into the text's visible part (max then min: never panics on a sliver of a line).
+        let inside = |v: f32, lo: f32, hi: f32| v.min(hi).max(lo);
+        let p = (inside(m.0, spot.shown.x, spot.shown.right()) - spot.x, inside(m.1, spot.shown.y, spot.shown.bottom() - 1.0) - spot.y);
+        Some(Mark { block: spot.block, at: ui.g.hit_point(spot.text, &blk.rich.text, p.0, p.1) })
+    }
+
+    /// `m` moved to the start (`end`: the end) of the word it's inside, so a selection never stops
+    /// halfway through one.
+    fn snap(&self, m: Mark, end: bool) -> Mark {
+        let Some(text) = self.layout.as_ref().map(|l| &l.blocks[m.block].rich.text) else { return m };
+        let mut at = m.at.min(text.len());
+        while !text.is_char_boundary(at) {
+            at -= 1;
+        }
+        // Spaces at the ends of a selection drop off.
+        if end {
+            at = text[..at].trim_end().len();
+        } else {
+            at = text.len() - text[at..].trim_start().len();
+        }
+        let in_word = |c: char| c.is_alphanumeric() || matches!(c, '\'' | '’' | '-');
+        let inside = if end { text[..at].chars().next_back() } else { text[at..].chars().next() }.is_some_and(in_word);
+        if !inside {
+            return Mark { at, ..m };
+        }
+        let at = if end {
+            text[at..].char_indices().find(|&(_, c)| !in_word(c)).map_or(text.len(), |(i, _)| at + i)
+        } else {
+            text[..at].char_indices().rev().find(|&(_, c)| !in_word(c)).map_or(0, |(i, c)| i + c.len_utf8())
+        };
+        Mark { at, ..m }
+    }
+
+    /// The highlight under `mark`, if any.
+    fn highlight_at(&self, mark: Mark) -> Option<&Highlight> {
+        let blk = &self.layout.as_ref()?.blocks[mark.block];
+        let at = mark.at.saturating_sub(Self::shift(blk));
+        self.highlights.iter().find(|h| h.span_in(blk.para, blk.rich.text.len()).is_some_and(|(s, e)| at >= s && at <= e))
+    }
+
+    /// Dragging over text selects it, in whole words; letting go shows what can be done with it.
+    /// A double-click selects a word, and a click on a highlight shows what can be done with that.
+    fn select(&mut self, ui: &mut Ui, area: Rect) {
+        let m = ui.input.mouse;
+        let on_popover = self.popover_rect.is_some_and(|p| p.contains(m));
+        if ui.input.pressed && ui.input.double && ui.hit(area) && !on_popover {
+            if let Some(mark) = self.mark_at(ui, m, true) {
+                let (a, b) = (self.snap(mark, false), self.snap(mark, true));
+                if a != b {
+                    self.sel = Some(Selection { key: self.layout.as_ref().map_or(0, |l| l.key), anchor: a, head: b, dragging: false });
+                    self.popover = self.place(ui, a, b).map(|r| (r, None));
+                    ui.request_repaint();
+                    return;
+                }
+            }
+        }
+        if ui.input.pressed && ui.hit(area) && !on_popover {
+            self.popover = None;
+            self.sel = match self.mark_at(ui, m, true) {
+                Some(mark) => Some(Selection { key: self.layout.as_ref().map_or(0, |l| l.key), anchor: mark, head: mark, dragging: true }),
+                None => None,
+            };
+        }
+        let dragging = self.sel.as_ref().is_some_and(|s| s.dragging);
+        if dragging && ui.input.down {
+            if let Some(mark) = self.mark_at(ui, m, false) {
+                if let Some(s) = &mut self.sel {
+                    if s.head != mark {
+                        s.head = mark;
+                        ui.request_repaint();
+                    }
+                }
+            }
+        }
+        if dragging && ui.input.released {
+            if let Some((a, b)) = self.sel_range() {
+                let (a, b) = (self.snap(a, false), self.snap(b, true));
+                if let Some(s) = &mut self.sel {
+                    (s.anchor, s.head) = (a, b);
+                }
+            }
+            if let Some(s) = &mut self.sel {
+                s.dragging = false;
+            }
+            match self.sel_range() {
+                Some((a, b)) => self.popover = self.place(ui, a, b).map(|r| (r, None)),
+                None => {
+                    // A click: on a highlight, its actions.
+                    let anchor = self.sel.as_ref().map(|s| s.anchor);
+                    self.sel = None;
+                    if let Some(h) = anchor.and_then(|a| self.highlight_at(a)).map(|h| h.id.clone()) {
+                        self.popover = anchor.and_then(|a| self.place(ui, a, a)).map(|r| (r, Some(h)));
+                    }
+                }
+            }
+            ui.request_repaint();
+        }
+    }
+
+    /// Where the selection is on screen: from its first line's top to its last line's bottom,
+    /// across the first line (so the bar can sit above it, or below it all).
+    fn place(&self, ui: &Ui, a: Mark, b: Mark) -> Option<Rect> {
+        let spots = self.spots.borrow();
+        let layout = self.layout.as_ref()?;
+        let line = |m: Mark, from: usize, to: usize, last: bool| -> Option<Rect> {
+            let spot = spots.iter().find(|s| s.block == m.block)?;
+            let text = &layout.blocks[m.block].rich.text;
+            let rects = ui.g.range_rects(spot.text, text, from.min(text.len()), to.min(text.len()));
+            let r = if last { rects.last() } else { rects.first() }?;
+            Some(Rect::new(spot.x + r.x, spot.y + r.y, r.w.max(8.0), r.h))
+        };
+        let a_len = layout.blocks[a.block].rich.text.len();
+        let first = line(a, a.at, if b.block == a.block { b.at.max(a.at + 1) } else { a_len }, false)?;
+        let last = line(b, if b.block == a.block { a.at } else { 0 }, b.at.max(1), true).unwrap_or(first);
+        Some(Rect::new(first.x, first.y, first.w, (last.bottom() - first.y).max(first.h)))
+    }
+
+    fn selection_keys(&mut self, ui: &mut Ui, out: &mut Vec<ReaderAction>) {
+        if ui.key_combo(VK_C, true, false) && self.sel_range().is_some() {
+            out.push(ReaderAction::Copy(self.sel_text()));
+            out.push(ReaderAction::Notice("Copied".into()));
+        }
+    }
+
+    /// The bar over a selection (highlight colours, note, copy, define) or over a highlight
+    /// (colours, note, copy, remove).
+    fn popover(&mut self, ui: &mut Ui, area: Rect, out: &mut Vec<ReaderAction>) {
+        let Some((at, hid)) = self.popover.clone() else {
+            self.popover_rect = None;
+            return;
+        };
+        let c = ui.c;
+        let existing = hid.as_ref().and_then(|id| self.highlights.iter().find(|h| &h.id == id).cloned());
+        if hid.is_some() && existing.is_none() {
+            self.popover = None;
+            return;
+        }
+        let text = existing.as_ref().map_or_else(|| self.sel_text(), |h| h.text.clone());
+        let word = crate::sources::dictionary::word_of(&text);
+        let can_define = existing.is_none() && !word.is_empty() && word.split_whitespace().count() <= 3;
+        let mut items: Vec<(&str, &str)> = vec![("\u{E70F}", "Note"), ("\u{E8C8}", "Copy")];
+        if can_define {
+            items.push(("\u{E82D}", "Define"));
+        }
+        if existing.is_some() {
+            items.push((icons::DELETE, "Remove"));
+        }
+        let dot = 30.0;
+        let w = 12.0 + 4.0 * dot + 10.0 + items.len() as f32 * 40.0 + 8.0;
+        let h = 44.0;
+        let x = (at.x + at.w / 2.0 - w / 2.0).clamp(area.x + 8.0, area.right() - w - 8.0);
+        let y = if at.y - h - 8.0 > area.y { at.y - h - 8.0 } else { at.bottom() + 8.0 };
+        let r = Rect::new(x, y, w, h);
+        self.popover_rect = Some(r);
+        ui.block(r);
+        ui.overlay(|ui| {
+            ui.g.fill_round(Rect::new(r.x + 1.0, r.y + 3.0, r.w, r.h), 10.0, Color::from_u8(0, 0, 0).alpha(0.18));
+            ui.g.fill_round(r, 10.0, c.surface);
+            ui.g.stroke_round(r, 10.0, 1.0, c.border);
+            let mut bx = r.x + 12.0;
+            for (i, (rr, gg, bb, name)) in HIGHLIGHTS.iter().enumerate() {
+                let dr = Rect::new(bx, r.y + 7.0, dot, dot);
+                let current = existing.as_ref().is_some_and(|h| h.color as usize == i);
+                let resp = ui.interact_as(id2(id("hl-color"), i), dr, Role::Choice(current), &format!("Highlight {}", name.to_lowercase()));
+                ui.g.fill_circle(dr.x + dot / 2.0, dr.y + dot / 2.0, 10.0, Color::from_u8(*rr, *gg, *bb));
+                if current || resp.hovered {
+                    ui.g.stroke_round(dr.shrink(1.0), dot / 2.0 - 1.0, 2.0, c.text.alpha(if current { 0.9 } else { 0.4 }));
+                }
+                ui.tip(id2(id("hl-color"), i), dr, &format!("Highlight in {}", name.to_lowercase()));
+                if resp.clicked {
+                    match &existing {
+                        Some(h) => out.push(ReaderAction::SaveHighlight(Highlight { color: i as u8, ..h.clone() })),
+                        None => {
+                            if let Some(h) = self.sel_highlight(i as u8) {
+                                out.push(ReaderAction::SaveHighlight(h));
+                            }
+                        }
+                    }
+                    self.sel = None;
+                    self.popover = None;
+                }
+                bx += dot;
+            }
+            bx += 10.0;
+            ui.g.fill_rect(Rect::new(bx - 6.0, r.y + 10.0, 1.0, r.h - 20.0), c.border);
+            for (icon, label) in items {
+                let br = Rect::new(bx, r.y + 6.0, 36.0, 32.0);
+                if ui.icon_button(id2(id("hl-act"), label), br, icon, label, false) {
+                    match label {
+                        "Note" => {
+                            let h = existing.clone().or_else(|| self.sel_highlight(0));
+                            if let Some(h) = h {
+                                self.note = h.note.clone();
+                                self.note_for = Some(h);
+                                self.panel = Panel::Note;
+                                self.focus_pending = true;
+                            }
+                        }
+                        "Copy" => {
+                            out.push(ReaderAction::Copy(text.clone()));
+                            out.push(ReaderAction::Notice("Copied".into()));
+                        }
+                        "Define" => {
+                            self.define = Some((word.clone(), None));
+                            self.panel = Panel::Define;
+                            out.push(ReaderAction::Define(word.clone()));
+                        }
+                        _ => {
+                            if let Some(h) = &existing {
+                                out.push(ReaderAction::RemoveHighlight(h.id.clone()));
+                            }
+                        }
+                    }
+                    self.popover = None;
+                    if label != "Note" && label != "Define" {
+                        self.sel = None;
+                    }
+                }
+                bx += 40.0;
+            }
+        });
+    }
+
+    /// Meanings arrived for the word being looked up.
+    pub fn defined(&mut self, word: &str, result: Result<Vec<Meaning>, String>) {
+        if let Some((w, r)) = &mut self.define {
+            if w == word {
+                *r = Some(result);
+            }
+        }
+    }
+
+    fn note_panel(&mut self, ui: &mut Ui, r: Rect, out: &mut Vec<ReaderAction>) {
+        let c = ui.c;
+        Self::panel_frame(ui, r);
+        let Some(h) = self.note_for.clone() else {
+            self.panel = Panel::None;
+            return;
+        };
+        let (x, w) = (r.x + 16.0, r.w - 32.0);
+        ui.text(if h.note.is_empty() { "Add a note" } else { "Edit the note" }, &TextStyle::ui(15.0).semibold(), x, r.y + 14.0, c.text);
+        ui.g.fill_round(Rect::new(x, r.y + 44.0, 4.0, 38.0), 2.0, highlight_color(h.color, false).alpha(1.0));
+        let t = ui.measure(&format!("“{}”", h.text), &TextStyle::ui(12.5).italic(), TextOpts::wrap(w - 14.0).max_lines(2));
+        ui.g.draw_text(t, x + 14.0, r.y + 44.0, c.muted);
+        let nid = id("rd-note");
+        let resp = ui.text_input(nid, Rect::new(x, r.y + 100.0, w, 36.0), &mut self.note, "Your note", false);
+        if self.focus_pending {
+            ui.focus_input(nid);
+            self.focus_pending = false;
+        }
+        if resp.escaped || ui.button(id("rd-note-cancel"), Rect::new(r.right() - 16.0 - 230.0, r.bottom() - 52.0, 100.0, 36.0), "Cancel") {
+            self.panel = Panel::None;
+            self.note_for = None;
+            return;
+        }
+        let save = ui.button_ex(id("rd-note-save"), Rect::new(r.right() - 16.0 - 122.0, r.bottom() - 52.0, 122.0, 36.0), "Save", Some(icons::CHECK), ButtonKind::Primary, true);
+        if save || resp.submitted {
+            out.push(ReaderAction::SaveHighlight(Highlight { note: self.note.trim().to_string(), ..h }));
+            out.push(ReaderAction::Notice("Note saved".into()));
+            self.panel = Panel::None;
+            self.note_for = None;
+            self.sel = None;
+        }
+    }
+
+    fn define_panel(&mut self, ui: &mut Ui, r: Rect) {
+        let c = ui.c;
+        Self::panel_frame(ui, r);
+        let Some((word, result)) = self.define.clone() else {
+            self.panel = Panel::None;
+            return;
+        };
+        let (x, w) = (r.x + 18.0, r.w - 36.0);
+        let t = ui.text(&word, &TextStyle::ui(22.0).semibold(), x, r.y + 16.0, c.text);
+        let close = Rect::new(r.right() - 46.0, r.y + 12.0, 34.0, 32.0);
+        if ui.icon_button(id("rd-define-close"), close, icons::CLOSE, "Close", false) {
+            self.panel = Panel::None;
+            return;
+        }
+        let top = r.y + 22.0 + t.h + 10.0;
+        let list = Rect::new(r.x + 2.0, top, r.w - 4.0, r.bottom() - top - 36.0);
+        match result {
+            None => ui.spinner(r.x + r.w / 2.0, top + 40.0, 12.0),
+            Some(Err(e)) => {
+                let t = ui.measure(&e, &TextStyle::ui(13.5), TextOpts::wrap(w));
+                ui.g.draw_text(t, x, top + 8.0, c.muted);
+            }
+            Some(Ok(meanings)) => {
+                ui.scroll_area(id("rd-define-list"), list, |ui, _view, y0| {
+                    let mut y = y0 + 4.0;
+                    for m in &meanings {
+                        let pt = ui.text(&m.part, &TextStyle::ui(13.0).semibold().italic(), x, y, c.accent_text);
+                        y += pt.h + 6.0;
+                        for (i, d) in m.definitions.iter().take(6).enumerate() {
+                            let n = ui.text(&format!("{}.", i + 1), &TextStyle::ui(13.5), x, y, c.muted);
+                            let t = ui.measure(d, &TextStyle::ui(13.5), TextOpts::wrap(w - 24.0).line_height(1.35));
+                            ui.g.draw_text(t, x + 22.0, y, c.text);
+                            y += t.h.max(n.h) + 8.0;
+                        }
+                        y += 8.0;
+                    }
+                    y - y0
+                });
+            }
+        }
+        ui.text_in("From Wiktionary", &TextStyle::ui(11.5), Rect::new(x, r.bottom() - 30.0, w, 20.0), Align::Left, c.muted);
+    }
+
+    /// The Highlights tab of Contents: every highlight and note, to jump to. Returns where to go.
+    fn highlights_list(&mut self, ui: &mut Ui, list: Rect, highlights: &[Highlight], out: &mut Vec<ReaderAction>) -> Option<(usize, f32)> {
+        let c = ui.c;
+        let mut sorted: Vec<&Highlight> = highlights.iter().collect();
+        sorted.sort_by_key(|h| (h.chapter, h.start));
+        if sorted.is_empty() {
+            let msg = "No highlights yet. Select text with the mouse to highlight it, add a note, copy it or look a word up.";
+            let t = ui.measure(msg, &TextStyle::ui(13.0), TextOpts::wrap(list.w - 48.0).align(Align::Center));
+            ui.g.draw_text(t, list.x + 24.0, list.y + 32.0, c.muted);
+            return None;
+        }
+        let row_h = 96.0;
+        let mut jump = None;
+        let mut remove = None;
+        let titles: Vec<String> = self.work.chapters.iter().map(|ch| ch.title.clone()).collect();
+        ui.scroll_area(id("highlight-list"), list, |ui, view, y0| {
+            for (i, h) in sorted.iter().enumerate() {
+                let rr = Rect::new(view.x + 6.0, y0 + i as f32 * row_h, view.w - 22.0, row_h - 6.0);
+                if rr.bottom() < view.y || rr.y > view.bottom() {
+                    continue;
+                }
+                let del = Rect::new(rr.right() - 38.0, rr.y + 8.0, 32.0, 30.0);
+                let deleted = ui.button_ex(id2(id("hl-del"), &h.id), del, "", Some(icons::DELETE), ButtonKind::Ghost, true);
+                ui.tip(id2(id("hl-del"), &h.id), del, "Remove highlight");
+                if deleted {
+                    remove = Some(h.id.clone());
+                }
+                let resp = ui.interact_as(id2(id("hl-row"), &h.id), Rect::new(rr.x, rr.y, rr.w - 44.0, rr.h), Role::Button, &h.text);
+                ui.g.stroke_round(rr, 6.0, 1.0, c.border);
+                if resp.hovered {
+                    ui.g.fill_round(rr, 6.0, c.hover());
+                }
+                ui.g.fill_round(Rect::new(rr.x + 10.0, rr.y + 10.0, 4.0, rr.h - 20.0), 2.0, highlight_color(h.color, false).alpha(1.0));
+                let ch = titles.get(h.chapter).map(|t| t.trim()).filter(|t| !t.is_empty()).map_or_else(|| format!("Chapter {}", h.chapter + 1), str::to_string);
+                ui.text_opts(&ch, &TextStyle::ui(12.0).semibold(), TextOpts::ellipsize(rr.w - 80.0), rr.x + 22.0, rr.y + 9.0, c.accent_text);
+                let t = ui.measure(&h.text, &TextStyle::ui(13.0), TextOpts::wrap(rr.w - 72.0).max_lines(2));
+                ui.g.draw_text(t, rr.x + 22.0, rr.y + 28.0, c.text);
+                if !h.note.is_empty() {
+                    ui.text_opts(&h.note, &TextStyle::ui(12.5).italic(), TextOpts::ellipsize(rr.w - 72.0), rr.x + 22.0, rr.y + 30.0 + t.h + 2.0, c.muted);
+                }
+                if resp.clicked {
+                    jump = Some((h.chapter, h.start.0 as f32));
+                }
+            }
+            sorted.len() as f32 * row_h + 8.0
+        });
+        if let Some(id) = remove {
+            out.push(ReaderAction::RemoveHighlight(id));
+        }
+        jump
     }
 
     fn bookmark_panel(&mut self, ui: &mut Ui, r: Rect, out: &mut Vec<ReaderAction>) {

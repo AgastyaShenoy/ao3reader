@@ -52,6 +52,118 @@ private class Page(val slices: List<Slice>, val y: Float)
 /** A search match: chapter, paragraph, UTF-16 start and end. */
 class Hit(val chapter: Int, val para: Int, val start: Int, val end: Int)
 
+/** Block kinds whose text can be selected and highlighted. */
+private val SELECTABLE = setOf("para", "quote", "heading", "item", "center")
+
+/** A place in the text: a block, and a character offset into its laid-out text. */
+data class TextPos(val block: Int, val at: Int) : Comparable<TextPos> {
+    override fun compareTo(other: TextPos) = compareValuesBy(this, other, { it.block }, { it.at })
+}
+
+/** Where a block's text was last drawn: the part on screen, and where the text starts. */
+private class Spot(val block: Int, val clip: RectF, val ox: Float, val oy: Float)
+
+/** Highlight colours: yellow, green, blue, pink (as on the desktop app). */
+val HIGHLIGHTS = intArrayOf(0xFACC15, 0x4ADE80, 0x60A5FA, 0xF472B6)
+val HIGHLIGHT_NAMES = listOf("Yellow", "Green", "Blue", "Pink")
+fun highlightFill(i: Int): Int = alpha(Pal.opaque(HIGHLIGHTS[i.coerceIn(0, 3)]), if (Settings.pal.dark) 0.30f else 0.38f)
+
+private fun utf8Bytes(c: Int) = when {
+    c < 0x80 -> 1
+    c < 0x800 -> 2
+    c < 0x10000 -> 3
+    else -> 4
+}
+
+/** Bytes of UTF-8 in the first `n` characters of `s` (the core counts positions in bytes). */
+fun utf8Len(s: String, n: Int): Int {
+    var b = 0
+    var i = 0
+    val end = n.coerceIn(0, s.length)
+    while (i < end) {
+        val c = s.codePointAt(i)
+        b += utf8Bytes(c)
+        i += Character.charCount(c)
+    }
+    return b
+}
+
+/** The character position in `s` at its `bytes`-th byte of UTF-8. */
+fun utf16At(s: String, bytes: Int): Int {
+    var b = 0
+    var i = 0
+    while (i < s.length && b < bytes) {
+        val c = s.codePointAt(i)
+        b += utf8Bytes(c)
+        i += Character.charCount(c)
+    }
+    return i
+}
+
+// Layout's measurements leave out the space that justification adds between words, though its
+// drawing has it, so positions in justified text are worked out here.
+
+/** Whether `line` is stretched to the full width (all but a paragraph's last line). */
+private fun justified(l: Layout, line: Int): Boolean {
+    if (l.justificationMode == Layout.JUSTIFICATION_MODE_NONE) return false
+    val end = l.getLineEnd(line)
+    return end < l.text.length && l.text[end - 1] != '\n'
+}
+
+/** How much wider each space on `line` is drawn than it's measured. */
+private fun spaceExtra(l: Layout, line: Int): Float {
+    if (!justified(l, line)) return 0f
+    val start = l.getLineStart(line)
+    var end = l.getLineEnd(line)
+    while (end > start && l.text[end - 1].isWhitespace()) end--
+    val spaces = (start until end).count { l.text[it] == ' ' }
+    if (spaces == 0) return 0f
+    val natural = Layout.getDesiredWidth(l.text, start, end, l.paint)
+    return ((l.width - natural) / spaces).coerceAtLeast(0f)
+}
+
+/** Where offset `o` is drawn on `line` (the line's right end for its last offset). */
+private fun xAt(l: Layout, line: Int, o: Int): Float {
+    val start = l.getLineStart(line)
+    val end = l.getLineEnd(line)
+    val extra = spaceExtra(l, line)
+    if (o >= end && end < l.text.length) return if (extra > 0f) l.width.toFloat() else l.getLineRight(line)
+    return l.getPrimaryHorizontal(o) + extra * (start until o.coerceAtMost(end)).count { l.text[it] == ' ' }
+}
+
+/** The offset on `line` nearest to `x`. */
+private fun offsetAt(l: Layout, line: Int, x: Float): Int {
+    val extra = spaceExtra(l, line)
+    if (extra == 0f) return l.getOffsetForHorizontal(line, x)
+    val start = l.getLineStart(line)
+    val end = l.getLineVisibleEnd(line)
+    var best = start
+    var bestD = Float.MAX_VALUE
+    var spaces = 0
+    for (o in start..end) {
+        val d = abs(l.getPrimaryHorizontal(o) + extra * spaces - x)
+        if (d < bestD) {
+            bestD = d
+            best = o
+        }
+        if (o < end && l.text[o] == ' ') spaces++
+    }
+    return best
+}
+
+/** The shape of offsets `s` until `e`, line by line. */
+private fun rangePath(l: Layout, s: Int, e: Int, path: android.graphics.Path) {
+    path.reset()
+    if (s >= e) return
+    for (line in l.getLineForOffset(s)..l.getLineForOffset(e - 1)) {
+        val a = max(s, l.getLineStart(line))
+        val b = min(e, l.getLineEnd(line))
+        path.addRect(xAt(l, line, a), l.getLineTop(line).toFloat(), xAt(l, line, b), l.getLineBottom(line).toFloat(), android.graphics.Path.Direction.CW)
+    }
+}
+
+private fun inWord(c: Char) = c.isLetterOrDigit() || c == '\'' || c == '’' || c == '-'
+
 /**
  * Paged or scrolling chapter view. Every block is laid out with the platform's StaticLayout
  * once per (chapter, size, typography); pages are cut at real line boundaries, and positions
@@ -124,6 +236,21 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
     /** Space kept clear at the top for a camera cutout. */
     var safeTop = 0
 
+    // Selecting text: a long press picks a word, dragging (or the handles) moves its ends.
+    private val spots = mutableListOf<Spot>()
+    private var selA: TextPos? = null
+    private var selB: TextPos? = null
+    /** The finger that long-pressed is still down, extending the selection. */
+    private var selecting = false
+    /** A handle being dragged: 1 the start, 2 the end. */
+    private var handle = 0
+    private var grabDy = 0f
+    /** The word first pressed: dragging selects from it. */
+    private var anchorWord: Pair<TextPos, TextPos>? = null
+    /** The rest of this touch is used up (it closed the selection). */
+    private var swallow = false
+    private val handleAt = arrayOfNulls<android.graphics.PointF>(2)
+
     private val margin get() = context.dp(if (width > context.dp(700)) 48 else 22).toFloat()
     private val headH get() = safeTop + context.dpf(34)
     private val footH get() = context.dpf(30)
@@ -133,6 +260,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
     val spread get() = dual
 
     fun setChapter(anchor: Float) {
+        clearSelection()
         key = ""
         pendingAnchor = anchor
         page = 0
@@ -141,6 +269,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
     }
 
     fun relayout() {
+        clearSelection()
         pendingAnchor = anchor()
         key = ""
         requestLayoutBlocks()
@@ -175,7 +304,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
         dual = paged && wide && layoutMode != "Single"
         val gutter = context.dpf(56)
         colW = if (dual) (width - 2 * margin - gutter) / 2 else width - 2 * margin
-        val k = "${reader.chapter}|$width|$height|$paged|$dual|$t|${reader.hitsKey}"
+        val k = "${reader.chapter}|$width|$height|$paged|$dual|$t|${reader.hitsKey}|${reader.highlightsKey}"
         if (k == key) return
         key = k
         build(t)
@@ -184,7 +313,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
         reader.positionChanged()
     }
 
-    private fun spannable(text: String, spans: org.json.JSONArray, shift: Int, hits: List<Hit>, para: Int): SpannableString {
+    private fun spannable(text: String, spans: org.json.JSONArray, shift: Int, hits: List<Hit>, para: Int, marks: Boolean = false): SpannableString {
         val s = SpannableString(text)
         for (i in 0 until spans.length()) {
             val sp = spans.getJSONArray(i)
@@ -209,6 +338,17 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
             if (a < 0 || b > s.length || a >= b) continue
             val current = reader.currentHit === h
             s.setSpan(BackgroundColorSpan(alpha(p.accent, if (current) 0.55f else 0.22f)), a, b, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        if (marks) {
+            val raw = text.substring(shift)
+            for (h in reader.chapterHighlights) {
+                val st = h.getJSONArray("start")
+                val en = h.getJSONArray("end")
+                if (para < st.getInt(0) || para > en.getInt(0)) continue
+                val a = shift + if (para == st.getInt(0)) utf16At(raw, st.getInt(1)) else 0
+                val b = shift + if (para == en.getInt(0)) utf16At(raw, en.getInt(1)) else raw.length
+                if (a < b) s.setSpan(BackgroundColorSpan(highlightFill(h.optInt("color"))), a, b, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
         }
         return s
     }
@@ -279,13 +419,13 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
                     val hp = TextPaint(body).apply { textSize = size * scale; typeface = Typeface.create(tf, Typeface.BOLD) }
                     val first = out.lastOrNull()?.kind !in BODY
                     val top = if (first) 0f else gap * 0.6f + size * 0.6f
-                    val tl = staticLayout(spannable(text, b.getJSONArray("spans"), 0, hits, para), hp, w, 1.3f, Layout.Alignment.ALIGN_NORMAL, false)
+                    val tl = staticLayout(spannable(text, b.getJSONArray("spans"), 0, hits, para, marks = true), hp, w, 1.3f, Layout.Alignment.ALIGN_NORMAL, false)
                     out += Block(kind, para, listOf(El.Text(tl, 0f, top, p.text)), top + tl.height + gap * 0.7f, bottoms(tl, top), say = text, sayEl = 0)
                 }
                 "item" -> {
                     val depth = b.optInt("depth", 1).coerceIn(1, 8)
                     val left = context.dpf(24) * depth
-                    val tl = staticLayout(spannable(text, b.getJSONArray("spans"), 0, hits, para), body, (w - left).toInt(), mult, Layout.Alignment.ALIGN_NORMAL, false)
+                    val tl = staticLayout(spannable(text, b.getJSONArray("spans"), 0, hits, para, marks = true), body, (w - left).toInt(), mult, Layout.Alignment.ALIGN_NORMAL, false)
                     val mp = TextPaint(body).apply { color = p.muted }
                     val marker = staticLayout(b.optString("marker", "•"), mp, left.toInt(), mult, Layout.Alignment.ALIGN_OPPOSITE, false)
                     val more = nextKind == "item"
@@ -306,7 +446,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
                     ), h + gap, bottoms(tl, context.dpf(10)))
                 }
                 "center" -> {
-                    val tl = staticLayout(spannable(text, b.getJSONArray("spans"), 0, hits, para), body, w, mult, Layout.Alignment.ALIGN_CENTER, false)
+                    val tl = staticLayout(spannable(text, b.getJSONArray("spans"), 0, hits, para, marks = true), body, w, mult, Layout.Alignment.ALIGN_CENTER, false)
                     out += Block(kind, para, listOf(El.Text(tl, 0f, 0f, p.text)), tl.height + gap, bottoms(tl, 0f), say = text, sayEl = 0)
                 }
                 "image" -> {
@@ -382,7 +522,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
                 }
                 "quote" -> {
                     val inset = context.dpf(20)
-                    val tl = staticLayout(spannable(text, b.getJSONArray("spans"), 0, hits, para), body, (w - inset - context.dpf(12)).toInt(), mult, Layout.Alignment.ALIGN_NORMAL, justify)
+                    val tl = staticLayout(spannable(text, b.getJSONArray("spans"), 0, hits, para, marks = true), body, (w - inset - context.dpf(12)).toInt(), mult, Layout.Alignment.ALIGN_NORMAL, justify)
                     val h = tl.height + context.dpf(20)
                     out += Block(kind, para, listOf(
                         El.Box(RectF(0f, 0f, w.toFloat(), h), context.dpf(6), p.quoteBg),
@@ -392,7 +532,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
                 }
                 else -> {
                     val prefix = if (indent) "  " else ""
-                    val tl = staticLayout(spannable(prefix + text, b.getJSONArray("spans"), prefix.length, hits, para), body, w, mult, Layout.Alignment.ALIGN_NORMAL, justify)
+                    val tl = staticLayout(spannable(prefix + text, b.getJSONArray("spans"), prefix.length, hits, para, marks = true), body, w, mult, Layout.Alignment.ALIGN_NORMAL, justify)
                     out += Block("para", para, listOf(El.Text(tl, 0f, 0f, p.text)), tl.height + gap, bottoms(tl, 0f), say = text, sayEl = 0, shift = prefix.length)
                 }
             }
@@ -615,6 +755,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
     // ---- navigation ---------------------------------------------------------------------
 
     fun turn(forward: Boolean, byUser: Boolean = true) {
+        clearSelection()
         val step = if (dual) 2 else 1
         ruler = 0
         if (forward) {
@@ -692,8 +833,26 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
             return true
         }
 
+        override fun onLongPress(e: MotionEvent) {
+            if (rulerDrag || dragging) return
+            val pos = hitText(e.x, e.y, exact = true) ?: return
+            val (a, b) = wordAt(pos) ?: return
+            selA = a
+            selB = b
+            anchorWord = a to b
+            selecting = true
+            performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+            parent?.requestDisallowInterceptTouchEvent(true)
+            invalidate()
+        }
+
         override fun onSingleTapUp(e: MotionEvent): Boolean {
             if (rulerDrag) return true
+            val tapped = hitText(e.x, e.y, exact = true)?.let { pos -> highlightAt(pos)?.let { pos to it } }
+            if (tapped != null) {
+                posRect(tapped.first)?.let { r -> reader.showSelectionBar(r.left, r.top, r.bottom, tapped.second) }
+                return true
+            }
             val x = e.x / width
             if (!paged) {
                 val endBlock = blocks.lastOrNull()
@@ -728,6 +887,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
     })
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (selectionTouch(event)) return true
         if (paged && event.actionMasked == MotionEvent.ACTION_DOWN) {
             downX = event.x
             downY = event.y
@@ -823,9 +983,211 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
         }
     }
 
+    // ---- selecting and highlights -----------------------------------------------------
+
+    private fun textOf(bi: Int): StaticLayout? = blocks.getOrNull(bi)?.let { it.els.getOrNull(it.sayEl) as? El.Text }?.layout
+
+    /** The selection, start first. */
+    private fun selRange(): Pair<TextPos, TextPos>? {
+        val a = selA ?: return null
+        val b = selB ?: return null
+        if (a == b) return null
+        return if (a < b) a to b else b to a
+    }
+
+    /** The text position under (x, y): on text exactly (`exact`), or on the nearest line. */
+    private fun hitText(x: Float, y: Float, exact: Boolean): TextPos? {
+        val spot = spots.firstOrNull { s ->
+            val l = textOf(s.block)
+            s.clip.contains(x, y) && l != null && (!exact || (y - s.oy <= l.height && x >= s.ox - context.dpf(4) && x <= s.ox + l.width + context.dpf(4)))
+        } ?: if (exact) return null else spots.minByOrNull { s ->
+            abs(y - y.coerceIn(s.clip.top, s.clip.bottom)) + abs(x - x.coerceIn(s.clip.left, s.clip.right)) * 0.25f
+        } ?: return null
+        val l = textOf(spot.block) ?: return null
+        val ly = (y.coerceIn(spot.clip.top, spot.clip.bottom - 1f) - spot.oy).coerceIn(0f, l.height - 1f)
+        val line = l.getLineForVertical(ly.toInt())
+        return TextPos(spot.block, offsetAt(l, line, x - spot.ox).coerceAtLeast(blocks[spot.block].shift))
+    }
+
+    private fun wordAt(p: TextPos): Pair<TextPos, TextPos>? {
+        val t = textOf(p.block)?.text ?: return null
+        var s = p.at.coerceIn(0, t.length)
+        var e = s
+        while (s > 0 && inWord(t[s - 1])) s--
+        while (e < t.length && inWord(t[e])) e++
+        return if (s < e) TextPos(p.block, s) to TextPos(p.block, e) else null
+    }
+
+    /** `p` moved to the start (`end`: the end) of the word it's inside, without the spaces around. */
+    private fun snap(p: TextPos, end: Boolean): TextPos {
+        val t = textOf(p.block)?.text ?: return p
+        var at = p.at.coerceIn(0, t.length)
+        if (end) {
+            while (at > 0 && t[at - 1].isWhitespace()) at--
+            if (at > 0 && inWord(t[at - 1])) while (at < t.length && inWord(t[at])) at++
+        } else {
+            while (at < t.length && t[at].isWhitespace()) at++
+            if (at < t.length && inWord(t[at])) while (at > 0 && inWord(t[at - 1])) at--
+        }
+        return TextPos(p.block, at.coerceAtLeast(blocks[p.block].shift))
+    }
+
+    /** Where `p` is on screen: a zero-width rectangle as tall as its line (for the `end` of a
+     *  range, the line it ends, not the next one). */
+    private fun posRect(p: TextPos, end: Boolean = false): RectF? {
+        val l = textOf(p.block) ?: return null
+        val at = p.at.coerceIn(0, l.text.length)
+        val line = l.getLineForOffset(if (end && at > 0) at - 1 else at)
+        for (s in spots) {
+            if (s.block != p.block) continue
+            val top = s.oy + l.getLineTop(line)
+            val bottom = s.oy + l.getLineBottom(line)
+            if (bottom > s.clip.top + 1 && top < s.clip.bottom - 1) {
+                val x = s.ox + xAt(l, line, at)
+                return RectF(x, top, x, bottom)
+            }
+        }
+        return null
+    }
+
+    /** The highlight at `p`, if there is one. */
+    private fun highlightAt(p: TextPos): JSONObject? {
+        val blk = blocks.getOrNull(p.block) ?: return null
+        val at = utf8Len(blk.say, p.at - blk.shift)
+        return reader.chapterHighlights.firstOrNull { h ->
+            val st = h.getJSONArray("start")
+            val en = h.getJSONArray("end")
+            val afterStart = blk.para > st.getInt(0) || (blk.para == st.getInt(0) && at >= st.getInt(1))
+            val beforeEnd = blk.para < en.getInt(0) || (blk.para == en.getInt(0) && at <= en.getInt(1))
+            afterStart && beforeEnd
+        }
+    }
+
+    fun selectedText(): String {
+        val (a, b) = selRange() ?: return ""
+        return (a.block..b.block).mapNotNull { bi ->
+            val blk = blocks[bi]
+            val t = textOf(bi)?.text?.takeIf { blk.kind in SELECTABLE } ?: return@mapNotNull null
+            val s = if (bi == a.block) a.at else blk.shift
+            val e = if (bi == b.block) b.at else t.length
+            if (s < e) t.subSequence(s.coerceIn(0, t.length), e.coerceIn(0, t.length)).toString().trim() else null
+        }.joinToString("\n")
+    }
+
+    /** The selection as a highlight for the core (not saved yet). */
+    fun selectionHighlight(color: Int): JSONObject? {
+        val (a, b) = selRange() ?: return null
+        fun end(p: TextPos): org.json.JSONArray {
+            val blk = blocks[p.block]
+            return org.json.JSONArray(listOf(blk.para, utf8Len(blk.say, p.at - blk.shift)))
+        }
+        return JSONObject().put("chapter", reader.chapter).put("start", end(a)).put("end", end(b)).put("color", color).put("note", "").put("text", selectedText())
+    }
+
+    fun clearSelection() {
+        val had = selA != null
+        selA = null
+        selB = null
+        selecting = false
+        handle = 0
+        reader.hideSelectionBar()
+        if (had) invalidate()
+    }
+
+    /** Selection bar for the selection, above it (or below, near the top of the screen). */
+    private fun showBar() {
+        val (a, b) = selRange() ?: return
+        val r0 = posRect(a) ?: return
+        val r1 = posRect(b, end = true) ?: r0
+        reader.showSelectionBar(r0.left, r0.top, r1.bottom + context.dpf(22), null)
+    }
+
+    /** Touches that select: a long press then dragging, the handles, and closing a selection. */
+    private fun selectionTouch(e: MotionEvent): Boolean {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                swallow = false
+                if (selRange() != null) {
+                    val near = context.dpf(28)
+                    val i = handleAt.indexOfFirst { it != null && abs(it.x - e.x) < near && abs(it.y - e.y) < near }
+                    if (i >= 0) {
+                        handle = i + 1
+                        val (a, b) = selRange()!!
+                        val r = if (i == 0) posRect(a) else posRect(b, end = true)
+                        grabDy = if (r != null) e.y - r.centerY() else 0f
+                        reader.hideSelectionBar()
+                        parent?.requestDisallowInterceptTouchEvent(true)
+                        return true
+                    }
+                }
+                if (selRange() != null || reader.selectionBarShown) {
+                    clearSelection()
+                    swallow = true
+                    return true
+                }
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (handle != 0) {
+                    val pos = hitText(e.x, e.y - grabDy, exact = false) ?: return true
+                    val (a, b) = selRange() ?: return true
+                    if (handle == 1) { selA = pos; selB = b } else { selA = a; selB = pos }
+                    if (selA == selB) selB = TextPos(pos.block, pos.at + 1)
+                    invalidate()
+                    return true
+                }
+                if (selecting) {
+                    val pos = hitText(e.x, e.y, exact = false) ?: return true
+                    val (wa, wb) = anchorWord ?: return true
+                    // From the word first pressed, to the word under the finger.
+                    val word = wordAt(pos)
+                    if (pos < wa) { selA = wb; selB = word?.first ?: pos } else { selA = wa; selB = word?.second ?: pos }
+                    invalidate()
+                    return true
+                }
+                return swallow
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (handle != 0 || selecting) {
+                    handle = 0
+                    selecting = false
+                    selRange()?.let { (a, b) ->
+                        selA = snap(a, end = false)
+                        selB = snap(b, end = true)
+                    }
+                    if (selRange() == null) clearSelection() else { invalidate(); post { showBar() } }
+                    return true
+                }
+                if (swallow) {
+                    swallow = false
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    /** The selection's two handles, under its ends. */
+    private fun drawHandles(c: Canvas) {
+        handleAt[0] = null
+        handleAt[1] = null
+        val (a, b) = selRange() ?: return
+        val r = context.dpf(8)
+        boxPaint.style = Paint.Style.FILL
+        boxPaint.color = Settings.pal.accentMark
+        listOf(a, b).forEachIndexed { i, pos ->
+            val rect = posRect(pos, end = i == 1) ?: return@forEachIndexed
+            val cx = rect.left
+            val cy = rect.bottom + r
+            c.drawRect(cx - context.dpf(1), rect.top, cx + context.dpf(1), cy, boxPaint)
+            c.drawCircle(cx, cy, r, boxPaint)
+            handleAt[i] = android.graphics.PointF(cx, cy)
+        }
+    }
+
     // ---- drawing ------------------------------------------------------------------------
 
-    private fun drawBlock(c: Canvas, b: Block, x: Float, y: Float) {
+    private fun drawBlock(c: Canvas, b: Block, x: Float, y: Float, bi: Int = -1, clip: RectF? = null) {
+        if (clip != null && bi >= 0 && b.kind in SELECTABLE) (b.els.getOrNull(b.sayEl) as? El.Text)?.let { spots += Spot(bi, clip, x + it.x, y + it.y) }
         c.save()
         c.translate(x, y)
         for (el in b.els) when (el) {
@@ -862,10 +1224,22 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
                 val w = reader.aloudWord
                 if (w != null && b === blocks.getOrNull(reader.aloudBlock) && el === b.els.getOrNull(b.sayEl)) {
                     val n = el.layout.text.length
-                    el.layout.getSelectionPath((w.first + b.shift).coerceIn(0, n), (w.last + 1 + b.shift).coerceIn(0, n), wordPath)
+                    rangePath(el.layout, (w.first + b.shift).coerceIn(0, n), (w.last + 1 + b.shift).coerceIn(0, n), wordPath)
                     boxPaint.style = Paint.Style.FILL
                     boxPaint.color = alpha(Settings.pal.accentMark, 0.3f)
                     c.drawPath(wordPath, boxPaint)
+                }
+                val sel = selRange()
+                if (sel != null && bi in sel.first.block..sel.second.block && el === b.els.getOrNull(b.sayEl)) {
+                    val n = el.layout.text.length
+                    val s = if (bi == sel.first.block) sel.first.at else b.shift
+                    val e = if (bi == sel.second.block) sel.second.at else n
+                    if (s < e) {
+                        rangePath(el.layout, s.coerceIn(0, n), e.coerceIn(0, n), wordPath)
+                        boxPaint.style = Paint.Style.FILL
+                        boxPaint.color = alpha(Settings.pal.accentMark, 0.32f)
+                        c.drawPath(wordPath, boxPaint)
+                    }
                 }
                 el.layout.paint.color = el.color
                 el.layout.draw(c)
@@ -888,6 +1262,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
     override fun onDraw(c: Canvas) {
         val p = Settings.pal
         c.drawColor(p.bg)
+        spots.clear()
         if (blocks.isEmpty()) return
         headPaint.textSize = context.dpf(12)
         headPaint.color = alpha(p.muted, 0.85f)
@@ -916,9 +1291,10 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
             val x = (width - colW) / 2
             val top = headH - scrollPos
             rulerLines.clear()
-            for (b in blocks) {
+            for ((bi, b) in blocks.withIndex()) {
                 if (top + b.y + b.h < 0 || top + b.y > height) continue
-                drawBlock(c, b, x, top + b.y)
+                val clip = RectF(x - context.dpf(8), max(top + b.y, 0f), x + colW + context.dpf(8), min(top + b.y + b.h, height.toFloat()))
+                drawBlock(c, b, x, top + b.y, bi, clip)
                 lineRects(b, x, top + b.y, 0f, height.toFloat())
             }
         }
@@ -927,6 +1303,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
         // A soft colour over the page, then the reading ruler.
         if (t.has("tint") && !t.isNull("tint")) c.drawColor(alpha(Pal.opaque(t.optInt("tint")), t.optDouble("tint_strength", 0.18).toFloat().coerceIn(0f, 0.5f)))
         if (t.optBoolean("reading_ruler") && dragX == 0f) drawRuler(c)
+        if (dragX == 0f) drawHandles(c)
     }
 
     /** Screen rectangles of block `b`'s text lines (drawn at `x`, `y`) within `top`..`bottom`. */
@@ -982,7 +1359,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
                 val h = s.to - s.from
                 c.save()
                 c.clipRect(px - context.dpf(8), y, px + colW + context.dpf(8), y + h)
-                drawBlock(c, blocks[s.block], px, y - s.from)
+                drawBlock(c, blocks[s.block], px, y - s.from, s.block, if (first == page && dx == 0f) RectF(px - context.dpf(8), y, px + colW + context.dpf(8), y + h) else null)
                 c.restore()
                 if (first == page) lineRects(blocks[s.block], px, y - s.from, y, y + h)
                 y += h

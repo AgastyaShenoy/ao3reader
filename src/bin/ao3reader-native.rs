@@ -3,7 +3,7 @@
 
 fn main() {
     if let Err(e) = ao3reader::native::run() {
-        eprintln!("AO3 Reader failed to start: {e}");
+        eprintln!("Flax Reader failed to start: {e}");
         std::process::exit(1);
     }
 }

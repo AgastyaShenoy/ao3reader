@@ -2,6 +2,8 @@ use serde::Deserialize;
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GITHUB_REPO: &str = "AgastyaShenoy/ao3reader";
+/// The readers' Discord server.
+pub const DISCORD_INVITE: &str = "https://discord.gg/3xuJY8UXKu";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GitHubReleaseAsset {
@@ -78,7 +80,7 @@ pub fn is_newer_version(latest_tag: &str, current_ver: &str) -> bool {
 pub fn check_for_updates() -> Result<Option<UpdateInfo>, String> {
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .user_agent("AO3Reader-Desktop/1.0 (Windows; Rust; +https://github.com/AgastyaShenoy/ao3reader)")
+        .user_agent(concat!("FlaxReader-Desktop/", env!("CARGO_PKG_VERSION"), " (Windows; +https://github.com/AgastyaShenoy/ao3reader)"))
         .timeout_global(Some(std::time::Duration::from_secs(10)))
         .http_status_as_error(false)
         .build()

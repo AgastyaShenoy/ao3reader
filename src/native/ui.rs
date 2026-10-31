@@ -44,6 +44,8 @@ pub struct Input {
     pub mouse_in: bool,
     pub down: bool,
     pub pressed: bool,
+    /// The press was the second of a double-click.
+    pub double: bool,
     pub released: bool,
     /// Wheel movement in notches (positive = away from the user); fractional for touchpads.
     pub wheel: f32,
@@ -53,6 +55,7 @@ pub struct Input {
 impl Input {
     pub fn clear_transient(&mut self) {
         self.pressed = false;
+        self.double = false;
         self.released = false;
         self.wheel = 0.0;
         self.keys.clear();

@@ -4,7 +4,7 @@ use super::pdf::PdfScreen;
 use super::reader::{ReaderAction, ReaderScreen};
 use super::ui::Ui;
 use super::gfx::Rect;
-use crate::ao3::models::{Bookmark, ReadingProgress};
+use crate::ao3::models::{Bookmark, Highlight, ReadingProgress};
 use crate::storage::config::AppConfig;
 
 pub enum Book {
@@ -13,6 +13,13 @@ pub enum Book {
 }
 
 impl Book {
+    /// A word's meanings arrived (text books only look words up).
+    pub fn defined(&mut self, word: &str, result: Result<Vec<crate::sources::dictionary::Meaning>, String>) {
+        if let Book::Text(r) = self {
+            r.defined(word, result);
+        }
+    }
+
     pub fn work_id(&self) -> &str {
         match self {
             Book::Text(r) => r.work_id(),
@@ -59,9 +66,9 @@ impl Book {
         *f
     }
 
-    pub fn frame(&mut self, ui: &mut Ui, r: Rect, config: &mut AppConfig, bookmarks: &[Bookmark]) -> Vec<ReaderAction> {
+    pub fn frame(&mut self, ui: &mut Ui, r: Rect, config: &mut AppConfig, bookmarks: &[Bookmark], highlights: &[Highlight]) -> Vec<ReaderAction> {
         match self {
-            Book::Text(t) => t.frame(ui, r, config, bookmarks),
+            Book::Text(t) => t.frame(ui, r, config, bookmarks, highlights),
             Book::Pdf(p) => p.frame(ui, r, config),
         }
     }

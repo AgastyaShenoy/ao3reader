@@ -7,7 +7,7 @@
 //! they do not hold the state lock while waiting on AO3.
 
 use ao3reader::ao3::client::Ao3Client;
-use ao3reader::ao3::models::{Bookmark, Category, LibraryEntry, ReadingProgress, ShelfStatus, UserSession, Work};
+use ao3reader::ao3::models::{Bookmark, Category, Highlight, LibraryEntry, ReadingProgress, ShelfStatus, UserSession, Work};
 use ao3reader::reader::pace::PaceTracker;
 use ao3reader::reader::rich_text::{image_source, is_landmark, paragraph_display, parse_inline, table_cells, with_word_starts, word_count, ParagraphKind, RichText};
 use ao3reader::reader::theme::{ReaderThemeType, Rgb};
@@ -16,6 +16,8 @@ use ao3reader::ao3::search::{Blurb, Feed, FeedKind, Listing, SearchQuery};
 use ao3reader::storage::export::WorkExporter;
 use ao3reader::storage::follows::{FollowStore, Mark, Scope, STALE_MINUTES};
 use ao3reader::storage::library::LibraryManager;
+use ao3reader::sources::opds::{Feed as Catalogue, Search};
+use ao3reader::sources::{Catalog, CatalogClient};
 use serde_json::{json, Value};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
@@ -80,6 +82,8 @@ struct State {
     follows: FollowStore,
     /// The work open in the reader.
     work: Option<Work>,
+    /// For catalogs (Project Gutenberg and the reader's own).
+    catalogs: CatalogClient,
     /// Learns the reading speed from how fast the reading position moves.
     pace: PaceTracker,
     started: std::time::Instant,
@@ -284,6 +288,23 @@ fn bookmarks_json(e: Option<&LibraryEntry>) -> Value {
     )
 }
 
+/// Highlights in reading order. Their ends are [paragraph, byte offset into its text as shown].
+fn highlights_json(e: Option<&LibraryEntry>) -> Value {
+    let mut list: Vec<&Highlight> = e.map(|e| e.highlights.iter().collect()).unwrap_or_default();
+    list.sort_by_key(|h| (h.chapter, h.start));
+    Value::Array(
+        list.iter()
+            .map(|h| json!({"id": h.id, "chapter": h.chapter, "start": [h.start.0, h.start.1], "end": [h.end.0, h.end.1], "color": h.color, "note": h.note, "text": h.text}))
+            .collect(),
+    )
+}
+
+fn arg_pair(a: &Value, key: &str) -> Result<(usize, usize), String> {
+    let v = a.get(key).and_then(Value::as_array).ok_or_else(|| format!("missing {key}"))?;
+    let n = |i: usize| v.get(i).and_then(Value::as_u64).map(|n| n as usize).ok_or_else(|| format!("bad {key}"));
+    Ok((n(0)?, n(1)?))
+}
+
 fn paragraph_words(work: &Work, ch: usize) -> Vec<usize> {
     work.chapters.get(ch).map(|c| c.paragraphs.iter().map(|p| word_count(p)).collect()).unwrap_or_default()
 }
@@ -326,6 +347,43 @@ fn themes_json(cfg: &AppConfig) -> Value {
     )
 }
 
+/// Every catalog: the built-in ones, then the reader's.
+fn catalogs(cfg: &AppConfig) -> Vec<Catalog> {
+    ao3reader::sources::builtin().into_iter().chain(cfg.catalogs.iter().cloned()).collect()
+}
+
+fn catalogs_json(cfg: &AppConfig) -> Value {
+    let builtin = ao3reader::sources::builtin().len();
+    Value::Array(catalogs(cfg).iter().enumerate().map(|(i, c)| json!({ "name": c.name, "url": c.url, "builtin": i < builtin })).collect())
+}
+
+/// A catalog page for the app: entries with what can be done with each (get a book, open a shelf).
+fn catalogue_json(f: &Catalogue) -> Value {
+    json!({
+        "title": f.title,
+        "next": f.next,
+        "search": match &f.search {
+            Some(Search::Template(t)) => json!({ "kind": "template", "url": t }),
+            Some(Search::Description(u)) => json!({ "kind": "description", "url": u }),
+            None => Value::Null,
+        },
+        "entries": f.entries.iter().map(|e| json!({
+            "key": if e.id.is_empty() { &e.title } else { &e.id },
+            "title": e.title,
+            "authors": e.authors,
+            "summary": e.summary,
+            "book": e.book().map(|l| json!({ "href": l.href, "mime": l.mime })),
+            "feed": e.feed().map(|l| json!({ "href": l.href })),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// The catalog an argument names by its place in `catalogs`.
+fn catalog_arg(a: &Value) -> Result<(Catalog, CatalogClient), String> {
+    let i = arg_u64(a, "index")? as usize;
+    with_state(|s| Ok((catalogs(&s.config).get(i).cloned().ok_or("no such catalog")?, s.catalogs.clone())))
+}
+
 fn signed_in(s: &UserSession) -> bool {
     s.is_logged_in && (s.session_cookie.is_some() || s.remember_token.is_some())
 }
@@ -355,7 +413,7 @@ fn dispatch(method: &str, a: &Value) -> R {
             let mut guard = STATE.lock().map_err(|_| "state poisoned")?;
             let follows = FollowStore::load();
             let themes = themes_json(&config);
-            *guard = Some(State { config, library, client, follows, work: None, pace: PaceTracker::default(), started: std::time::Instant::now() });
+            *guard = Some(State { config, library, client, follows, work: None, catalogs: CatalogClient::new(), pace: PaceTracker::default(), started: std::time::Instant::now() });
             Ok(json!({ "themes": themes }))
         }
         // After "Your colours" change.
@@ -425,6 +483,7 @@ fn dispatch(method: &str, a: &Value) -> R {
                 "chapter": entry.map_or(1, |e| e.progress.current_chapter),
                 "position": entry.map_or(0.0, |e| e.progress.position),
                 "bookmarks": bookmarks_json(entry),
+                "highlights": highlights_json(entry),
             });
             s.work = Some(work);
             s.pace.reset();
@@ -564,6 +623,42 @@ fn dispatch(method: &str, a: &Value) -> R {
             );
             Ok(bookmarks_json(s.library.get_entry(&id)))
         }),
+        // A new highlight (no id), or a new colour or note for one.
+        "highlight.save" => with_state(|s| {
+            let id = arg_str(a, "id")?.to_string();
+            let h = a.get("highlight").ok_or("missing highlight")?;
+            let hid = h.get("id").and_then(Value::as_str).filter(|i| !i.is_empty()).map(str::to_string);
+            let old = hid.as_ref().and_then(|hid| s.library.get_entry(&id)?.highlights.iter().find(|x| &x.id == hid).cloned());
+            let now = chrono::Utc::now();
+            s.library.save_highlight(
+                &id,
+                Highlight {
+                    id: hid.unwrap_or_else(|| format!("h{}", now.timestamp_millis())),
+                    chapter: arg_u64(h, "chapter")? as usize,
+                    start: arg_pair(h, "start")?,
+                    end: arg_pair(h, "end")?,
+                    color: h.get("color").and_then(Value::as_u64).unwrap_or(0).min(3) as u8,
+                    note: h.get("note").and_then(Value::as_str).unwrap_or("").trim().to_string(),
+                    text: h.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
+                    created_at: old.map_or(now, |o| o.created_at),
+                },
+            );
+            Ok(highlights_json(s.library.get_entry(&id)))
+        }),
+        "highlight.remove" => with_state(|s| {
+            let id = arg_str(a, "id")?;
+            s.library.remove_highlight(id, arg_str(a, "highlight")?);
+            Ok(highlights_json(s.library.get_entry(id)))
+        }),
+        // Wiktionary's meanings of a word (a network call: no lock held).
+        "define" => {
+            let word = ao3reader::sources::dictionary::word_of(arg_str(a, "word")?);
+            let meanings = ao3reader::sources::dictionary::define(&word)?;
+            Ok(json!({
+                "word": word,
+                "meanings": meanings.iter().map(|m| json!({"part": m.part, "definitions": m.definitions})).collect::<Vec<_>>(),
+            }))
+        }
         "bookmark.remove" => with_state(|s| {
             let id = arg_str(a, "id")?;
             s.library.remove_bookmark(id, arg_str(a, "bookmark")?);
@@ -751,6 +846,55 @@ fn dispatch(method: &str, a: &Value) -> R {
         "pdf.close" => {
             *PDF.lock().map_err(|_| "pdf poisoned")? = None;
             Ok(Value::Null)
+        }
+        "catalogs" => with_state(|s| Ok(catalogs_json(&s.config))),
+        "catalog.add" => with_state(|s| {
+            let url = arg_str(a, "url")?.trim().to_string();
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return Err("The address should start with http:// or https://".into());
+            }
+            let name = a.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
+            let host = url.split("://").nth(1).unwrap_or(&url).split('/').next().unwrap_or(&url).to_string();
+            s.config.catalogs.push(Catalog {
+                name: name.unwrap_or(host),
+                url,
+                user: a.get("user").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
+                password: a.get("password").and_then(Value::as_str).unwrap_or_default().to_string(),
+            });
+            s.config.save()?;
+            Ok(catalogs_json(&s.config))
+        }),
+        "catalog.remove" => with_state(|s| {
+            let i = (arg_u64(a, "index")? as usize).checked_sub(ao3reader::sources::builtin().len()).ok_or("built-in catalogs stay")?;
+            if i < s.config.catalogs.len() {
+                s.config.catalogs.remove(i);
+                s.config.save()?;
+            }
+            Ok(catalogs_json(&s.config))
+        }),
+        // Network calls: the state's lock is only held to read and save.
+        "catalog.feed" => {
+            let (catalog, client) = catalog_arg(a)?;
+            Ok(catalogue_json(&client.feed(arg_str(a, "url")?, &catalog)?))
+        }
+        "catalog.search" => {
+            let (catalog, client) = catalog_arg(a)?;
+            let search = match (a.pointer("/search/kind").and_then(Value::as_str), a.pointer("/search/url").and_then(Value::as_str)) {
+                (Some("template"), Some(u)) => Search::Template(u.to_string()),
+                (Some(_), Some(u)) => Search::Description(u.to_string()),
+                _ => return Err("This catalog can't be searched.".into()),
+            };
+            let feed = Catalogue { search: Some(search), ..Default::default() };
+            Ok(catalogue_json(&client.search(&feed, arg_str(a, "query")?, &catalog)?))
+        }
+        "catalog.get" => {
+            let (catalog, client) = catalog_arg(a)?;
+            let bytes = client.download(arg_str(a, "url")?, &catalog)?;
+            let work = ao3reader::ao3::epub::import_named(&bytes, a.get("title").and_then(Value::as_str))?;
+            with_state(|s| {
+                s.library.save_work(&work)?;
+                Ok(json!({ "id": work.meta.id, "meta": meta_json(&work.meta) }))
+            })
         }
         "epub" => {
             let id = arg_str(a, "id")?.to_string();

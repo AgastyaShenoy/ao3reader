@@ -1,20 +1,27 @@
 package org.ao3reader
 
+import android.app.Dialog
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.text.InputType
 import android.text.TextUtils
+import android.view.ContextThemeWrapper
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.Window
+import android.view.WindowManager
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.PopupMenu
+import android.widget.ScrollView
 import android.widget.TextView
 import kotlin.math.roundToInt
 
@@ -119,6 +126,8 @@ fun Context.input(hint: String, password: Boolean = false): EditText = EditText(
     textSize = 15f
     isSingleLine = true
     inputType = if (password) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD else InputType.TYPE_CLASS_TEXT
+    // After the input type: a password type switches the font to monospace.
+    typeface = Settings.face()
     background = rounded(p.inputBg, dpf(8), p.border, dp(1))
     setPadding(dp(12), dp(10), dp(12), dp(10))
 }
@@ -265,6 +274,47 @@ fun Context.segmented(options: List<String>, selected: Int, counts: List<Int> = 
     }
     return box
 }
+
+/** A dialog in the reader's theme (the platform's own are always dark grey, whatever the theme):
+ *  a title, a message or a form, Cancel and the one action. `onOk` returns false to stay open, for a
+ *  field to fix. */
+fun Context.dialog(
+    title: String,
+    message: String? = null,
+    body: View? = null,
+    ok: String? = null,
+    okKind: Kind = Kind.Primary,
+    cancel: String = "Cancel",
+    onOk: () -> Boolean = { true },
+): Dialog {
+    val p = Settings.pal
+    val d = Dialog(this)
+    d.requestWindowFeature(Window.FEATURE_NO_TITLE)
+    val box = column().apply {
+        background = rounded(p.card, dpf(16), p.border, dp(1))
+        setPadding(dp(22), dp(20), dp(22), dp(16))
+    }
+    box.addView(label(title, 19f, p.text, bold = true))
+    if (message != null) box.addView(label(message, 14.5f, alpha(p.text, 0.82f)).apply { setLineSpacing(0f, 1.15f) }, lp(top = dp(8)))
+    if (body != null) box.addView(body, lp(top = dp(16)))
+    val buttons = row().apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL }
+    buttons.addView(button(cancel, if (ok == null) Kind.Tonal else Kind.Ghost) { d.dismiss() })
+    if (ok != null) buttons.addView(button(ok, okKind) { if (onOk()) d.dismiss() }, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(8) })
+    box.addView(buttons, lp(top = dp(20)))
+    d.setContentView(ScrollView(this).apply { isVerticalScrollBarEnabled = false; addView(box) })
+    d.window?.apply {
+        setBackgroundDrawable(ColorDrawable(0))
+        setDimAmount(if (p.dark) 0.6f else 0.4f)
+        setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+    }
+    d.show()
+    d.window?.setLayout(minOf(resources.displayMetrics.widthPixels - dp(32), dp(440)), ViewGroup.LayoutParams.WRAP_CONTENT)
+    return d
+}
+
+/** A pop-up menu in the theme's light or dark. */
+fun Context.popupMenu(anchor: View): PopupMenu =
+    PopupMenu(ContextThemeWrapper(this, if (Settings.pal.dark) android.R.style.Theme_Material else android.R.style.Theme_Material_Light), anchor)
 
 fun lp(w: Int = ViewGroup.LayoutParams.MATCH_PARENT, h: Int = ViewGroup.LayoutParams.WRAP_CONTENT, top: Int = 0, bottom: Int = 0): LinearLayout.LayoutParams =
     LinearLayout.LayoutParams(w, h).apply { topMargin = top; bottomMargin = bottom }

@@ -92,6 +92,13 @@ fn work_link(q: &str) -> Option<String> {
     if q.contains("works/") { Ao3Parser::extract_work_id(q) } else { None }
 }
 
+impl SearchScreen {
+    /// "1,234 works", once a search has results.
+    pub fn summary(&self) -> Option<String> {
+        self.total.filter(|_| self.link.is_none()).map(|n| format!("{} works", thousands(n)))
+    }
+}
+
 #[derive(Default)]
 pub struct SearchScreen {
     pub query: SearchQuery,
@@ -177,14 +184,10 @@ impl SearchScreen {
         let c = ui.c;
         let w = (body.w - 48.0).min(MAX_W);
         let x = body.x + (body.w - w) / 2.0;
-        let t = ui.text("Search AO3", &TextStyle::ui(26.0).semibold(), x, body.y + 22.0, c.text);
-        if let Some(total) = self.total.filter(|_| self.link.is_none()) {
-            ui.text(&format!("{} works", thousands(total)), &TextStyle::ui(SMALL), x + t.w + 14.0, body.y + 22.0 + t.h - 18.0, c.muted);
-        }
 
         // Search box, then filters, sort and direction as three equal buttons, wide enough for
-        // the longest sort name.
-        let y = body.y + 22.0 + t.h + 14.0;
+        // the longest sort name. (The Browse screen above shows the source and the count.)
+        let y = body.y;
         let dir_w = ui.button_width("Descending", Some("\u{E74B}"));
         let tool_w = SortBy::ALL.iter().map(|s| ui.button_width(s.label(), Some("\u{E8CB}"))).fold(dir_w, f32::max).ceil();
         let tool_gap = 8.0;

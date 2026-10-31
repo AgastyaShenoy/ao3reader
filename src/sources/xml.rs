@@ -53,6 +53,9 @@ impl Element {
         for n in &self.children {
             match n {
                 Node::Text(t) => out.push_str(t),
+                // Inline markup sits inside words and sentences; <wbr> only marks where a long
+                // word may break.
+                Node::Element(e) if INLINE.contains(&e.local()) => e.collect_text(out),
                 Node::Element(e) => {
                     out.push(' ');
                     e.collect_text(out);
@@ -67,6 +70,9 @@ impl Element {
         self.first(name).map(Element::text).filter(|t| !t.is_empty())
     }
 }
+
+/// Elements that run on within text (XHTML in summaries).
+pub(crate) const INLINE: [&str; 14] = ["a", "abbr", "b", "cite", "code", "em", "i", "q", "s", "small", "span", "strong", "sub", "wbr"];
 
 fn local(name: &str) -> &str {
     name.rsplit(':').next().unwrap_or(name)
@@ -221,6 +227,12 @@ mod tests {
         assert_eq!(entry.child_text("title").as_deref(), Some("Pride & Prejudice"));
         assert_eq!(entry.child_text("language").as_deref(), Some("en"));
         assert_eq!(entry.first("link").and_then(|l| l.attr("href")), Some("/b/1.epub"));
+    }
+
+    #[test]
+    fn inline_markup_stays_inside_words() {
+        let doc = parse(r#"<summary type="xhtml"><div>See https://<wbr/>en.wikipedia.org/<wbr/>wiki and <em>this</em>.</div><p>Next</p></summary>"#).unwrap();
+        assert_eq!(doc.text(), "See https://en.wikipedia.org/wiki and this. Next");
     }
 
     #[test]

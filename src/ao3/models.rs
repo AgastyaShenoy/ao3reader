@@ -260,6 +260,38 @@ impl ShelfStatus {
     }
 }
 
+/// A highlighted passage, with a note if the reader wrote one. Its ends are (paragraph index,
+/// byte offset into that paragraph's text as shown), so it stays put through any change of font,
+/// size, spacing or layout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Highlight {
+    pub id: String,
+    /// 0-based chapter.
+    pub chapter: usize,
+    pub start: (usize, usize),
+    pub end: (usize, usize),
+    /// Which of the highlight colours: 0 yellow, 1 green, 2 blue, 3 pink.
+    #[serde(default)]
+    pub color: u8,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    /// The passage itself, for the list of highlights.
+    pub text: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl Highlight {
+    /// The part of paragraph `para` (whose text is `len` bytes) this covers, if any.
+    pub fn span_in(&self, para: usize, len: usize) -> Option<(usize, usize)> {
+        if para < self.start.0 || para > self.end.0 {
+            return None;
+        }
+        let s = if para == self.start.0 { self.start.1.min(len) } else { 0 };
+        let e = if para == self.end.0 { self.end.1.min(len) } else { len };
+        (s < e).then_some((s, e))
+    }
+}
+
 /// A reader bookmark placed in a work
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bookmark {
@@ -306,6 +338,8 @@ pub struct LibraryEntry {
     pub is_favorite: bool,
     pub progress: ReadingProgress,
     pub bookmarks: Vec<Bookmark>,
+    #[serde(default)]
+    pub highlights: Vec<Highlight>,
     pub downloaded_at: DateTime<Utc>,
     pub local_file_exists: bool,
     pub personal_notes: String,

@@ -1,5 +1,6 @@
-//! Settings screen: reading behaviour, typography with live preview, themes, importing files,
-//! shortcuts, storage and updates, about.
+//! Settings screen, in categories down the side (along the top when the window is narrow):
+//! appearance, text with a live preview, reading, accessibility, library and files, sources,
+//! updates, shortcuts and about.
 
 use super::app::{reader_family, reader_font_label};
 use super::gfx::*;
@@ -9,7 +10,7 @@ use crate::reader::rich_text::word_start_spans;
 use crate::reader::theme::{ReaderThemeType, Rgb, ThemePalette};
 use crate::reader::typography::{FontFamilyChoice, PageLayoutMode, ReadingMode, TextAlignment};
 use crate::storage::config::AppConfig;
-use crate::updater::{UpdateStatus, CURRENT_VERSION, GITHUB_REPO};
+use crate::updater::{UpdateStatus, CURRENT_VERSION, DISCORD_INVITE, GITHUB_REPO};
 
 const MAX_W: f32 = 960.0;
 const FONT_ROW_H: f32 = 34.0;
@@ -25,6 +26,12 @@ pub enum SettingsAction {
     OpenWork(String),
     /// Choose a "Your colours" colour: the text colour (true) or the page colour.
     PickColor(bool),
+    /// Go to Browse and add a catalog there.
+    AddCatalog,
+    /// A catalog was removed (Browse starts again from AO3).
+    CatalogsChanged,
+    /// Go to the Account page (signing in to AO3).
+    Account,
 }
 
 /// The Import page's progress.
@@ -56,20 +63,26 @@ pub struct SettingsScreen {
     pub import: ImportState,
 }
 
-const TABS: [(&str, &str); 8] = [
-    (icons::READING, "Reading"),
-    (icons::FONT, "Typography"),
-    (icons::COLOR, "Themes"),
-    (icons::ACCESSIBILITY, "Accessibility"),
-    (icons::IMPORT, "Import"),
-    (icons::KEYBOARD, "Shortcuts"),
-    (icons::STORAGE, "Storage & updates"),
-    (icons::INFO, "About"),
+/// The categories, most used first: (icon, name, what's in it).
+const TABS: [(&str, &str, &str); 9] = [
+    (icons::COLOR, "Appearance", "Colour themes, and your own colours."),
+    (icons::FONT, "Text", "The font, size and spacing of text in books."),
+    (icons::READING, "Reading", "Pages or scrolling, what chapters show, and reading speed."),
+    (icons::ACCESSIBILITY, "Accessibility", "Reading aids, easier text, colour and reading aloud."),
+    (icons::LIBRARY, "Library & files", "Bring in books you have, save works as files, and storage."),
+    (icons::GLOBE, "Sources", "Where books come from: AO3, Project Gutenberg and your catalogues."),
+    (icons::UPDATE, "Updates", "New versions of Flax Reader."),
+    (icons::KEYBOARD, "Shortcuts", "Keys for reading and getting around."),
+    (icons::INFO, "About", "Flax Reader, its community, privacy and credits."),
 ];
+const TAB_THEMES: usize = 0;
 const TAB_TYPOGRAPHY: usize = 1;
-const TAB_THEMES: usize = 2;
 const TAB_IMPORT: usize = 4;
-const TAB_STORAGE: usize = 6;
+const TAB_UPDATES: usize = 6;
+const TAB_ABOUT: usize = 8;
+/// Wide enough for the categories down the side.
+const SIDEBAR_MIN: f32 = 900.0;
+const SIDEBAR_W: f32 = 224.0;
 
 /// Page tints (coloured overlays): soft yellow, peach, rose, blue, green, grey.
 const TINTS: [(u32, &str); 6] = [
@@ -129,7 +142,7 @@ impl SettingsScreen {
     }
 
     pub fn show_updates(&mut self) {
-        self.tab = TAB_STORAGE;
+        self.tab = TAB_UPDATES;
     }
 
     pub fn show_typography(&mut self) {
@@ -143,37 +156,90 @@ impl SettingsScreen {
     pub fn frame(&mut self, ui: &mut Ui, body: Rect, ctx: &mut SettingsCtx) -> Vec<SettingsAction> {
         let mut out = Vec::new();
         let c = ui.c;
-        let w = (body.w - 48.0).min(MAX_W);
-        let x = body.x + (body.w - w) / 2.0;
-
-        let title = ui.text("Settings", &TextStyle::ui(26.0).semibold(), x, body.y + 22.0, c.text);
-
-        let tabs_y = body.y + 22.0 + title.h + 14.0;
-        let (tabs_h, changed) = ui.tab_strip(id("settings-tabs"), x - 4.0, tabs_y, w + 8.0, &TABS, &[], &mut self.tab);
         let scroll_id = id("settings-scroll");
-        if changed {
+        let before = self.tab;
+        let wide = body.w >= SIDEBAR_MIN;
+
+        // Where the page goes: beside the categories, or under them.
+        let (x, w, top) = if wide {
+            let total = (body.w - 48.0).min(MAX_W + SIDEBAR_W + 32.0);
+            let x0 = body.x + (body.w - total) / 2.0;
+            let title = ui.text("Settings", &TextStyle::ui(26.0).semibold(), x0, body.y + 22.0, c.text);
+            self.sidebar(ui, x0 - 8.0, body.y + 22.0 + title.h + 18.0);
+            let x = x0 + SIDEBAR_W + 32.0;
+            (x, (x0 + total - x).min(MAX_W), body.y + 14.0)
+        } else {
+            let w = (body.w - 48.0).min(MAX_W);
+            let x = body.x + (body.w - w) / 2.0;
+            let title = ui.text("Settings", &TextStyle::ui(26.0).semibold(), x, body.y + 22.0, c.text);
+            let tabs_y = body.y + 22.0 + title.h + 14.0;
+            // The strip wraps onto more rows when narrow; every category keeps its name.
+            let items: Vec<(&str, &str)> = TABS.iter().map(|(icon, name, _)| (*icon, *name)).collect();
+            let (tabs_h, _) = ui.tab_strip(id("settings-tabs"), x - 4.0, tabs_y, w + 8.0, &items, &[], &mut self.tab);
+            (x, w, tabs_y + tabs_h + 6.0)
+        };
+        if self.tab != before {
             ui.scroll_to_top(scroll_id);
             self.confirm_clear = false;
         }
 
-        let top = tabs_y + tabs_h + 14.0;
-        let area = Rect::new(body.x, top, body.w, (body.bottom() - top).max(0.0));
+        let area = Rect::new(x - 8.0, top, (body.right() - x + 8.0).max(0.0), (body.bottom() - top).max(0.0));
         let tab = self.tab;
         ui.scroll_area(scroll_id, area, |ui, _view, y0| {
-            let mut col = Col::new(x, y0 + 2.0, w);
+            let mut col = Col::new(x, y0 + 8.0, w);
+            // The category's name and what's in it.
+            let (_, name, what) = TABS[tab.min(TABS.len() - 1)];
+            if wide {
+                let t = ui.text(name, &TextStyle::ui(22.0).semibold(), col.x + 2.0, col.y, c.text);
+                col.gap(t.h + 2.0);
+            }
+            let t = ui.text_opts(what, &TextStyle::ui(SMALL), TextOpts::wrap(col.w - 4.0), col.x + 2.0, col.y, c.muted);
+            col.gap(t.h + 4.0);
             match tab {
-                0 => self.reading_tab(ui, &mut col, ctx, &mut out),
-                1 => self.typography_tab(ui, &mut col, ctx, &mut out),
-                2 => self.themes_tab(ui, &mut col, ctx, &mut out),
+                TAB_THEMES => self.themes_tab(ui, &mut col, ctx, &mut out),
+                TAB_TYPOGRAPHY => self.typography_tab(ui, &mut col, ctx, &mut out),
+                2 => self.reading_tab(ui, &mut col, ctx, &mut out),
                 3 => self.accessibility_tab(ui, &mut col, ctx, &mut out),
-                4 => self.import_tab(ui, &mut col, &mut out),
-                5 => self.shortcuts_tab(ui, &mut col),
-                6 => self.storage_tab(ui, &mut col, ctx, &mut out),
+                TAB_IMPORT => self.library_tab(ui, &mut col, ctx, &mut out),
+                5 => self.sources_tab(ui, &mut col, ctx, &mut out),
+                TAB_UPDATES => self.updates_tab(ui, &mut col, ctx, &mut out),
+                7 => self.shortcuts_tab(ui, &mut col),
                 _ => self.about_tab(ui, &mut col, &mut out),
             }
             col.y + 32.0 - y0
         });
         out
+    }
+
+    /// The categories down the side, About set apart at the end.
+    fn sidebar(&mut self, ui: &mut Ui, x: f32, mut y: f32) {
+        let c = ui.c;
+        for (i, (icon, name, _)) in TABS.iter().enumerate() {
+            if i == TAB_ABOUT {
+                ui.separator(x + 12.0, y + 5.0, SIDEBAR_W - 24.0);
+                y += 11.0;
+            }
+            let r = Rect::new(x, y, SIDEBAR_W, 38.0);
+            let resp = ui.interact_as(id2(id("settings-nav"), i), r, Role::Tab(self.tab == i), name);
+            if resp.clicked {
+                self.tab = i;
+            }
+            let sel = self.tab == i;
+            if sel {
+                ui.g.fill_round(r, 8.0, c.selected());
+                // A short accent mark at the left of the open category; the fill stays neutral.
+                ui.g.fill_round(Rect::new(r.x, r.y + 11.0, 3.0, 16.0), 1.5, c.accent_mark);
+            } else if resp.hovered {
+                ui.g.fill_round(r, 8.0, c.hover());
+            }
+            let fg = if sel { c.text } else { c.muted };
+            let it = ui.measure(icon, &TextStyle::icons(15.0), TextOpts::default());
+            ui.g.draw_text(it, r.x + 16.0, r.y + (r.h - it.h) / 2.0, fg);
+            let style = if sel { TextStyle::ui(14.0).semibold() } else { TextStyle::ui(14.0) };
+            let t = ui.measure(name, &style, TextOpts::default());
+            ui.g.draw_text(t, r.x + 46.0, r.y + (r.h - t.h) / 2.0, if sel { c.text } else { c.text.alpha(0.86) });
+            y += 40.0;
+        }
     }
 
     // ---- shared row helpers ------------------------------------------------------------
@@ -226,7 +292,7 @@ impl SettingsScreen {
         let t = &mut ctx.config.typography;
         let mut changed = false;
 
-        Self::section(ui, col, "Reading mode");
+        Self::section(ui, col, "Pages");
         let r = Self::row(ui, col, "Layout", "Turn pages like a book, or scroll through each chapter.", 280.0, 34.0);
         let mut mode = if t.reading_mode == ReadingMode::Paged { 0 } else { 1 };
         if ui.segmented(id("mode"), r, &["Pages", "Scroll"], &mut mode) {
@@ -639,8 +705,8 @@ impl SettingsScreen {
         if t.tint.is_some() {
             changed |= Self::slider_row(ui, col, "tint-strength", "Tint strength", &mut t.tint_strength, (0.05, 0.5, 0.01), |v| format!("{:.0}%", v * 100.0));
         }
-        let r = Self::row(ui, col, "Page and text colours", "High Contrast, your own colours, and matching Windows are in Themes.", 132.0, 32.0);
-        if ui.button(id("to-themes"), r, "Open Themes") {
+        let r = Self::row(ui, col, "Page and text colours", "High Contrast, your own colours, and matching Windows are in Appearance.", 150.0, 32.0);
+        if ui.button(id("to-themes"), r, "Open Appearance") {
             self.tab = TAB_THEMES;
         }
 
@@ -670,6 +736,11 @@ impl SettingsScreen {
         }
     }
 
+    fn library_tab(&mut self, ui: &mut Ui, col: &mut Col, ctx: &mut SettingsCtx, out: &mut Vec<SettingsAction>) {
+        self.import_tab(ui, col, out);
+        self.storage_section(ui, col, ctx, out);
+    }
+
     fn import_tab(&mut self, ui: &mut Ui, col: &mut Col, out: &mut Vec<SettingsAction>) {
         let c = ui.c;
         Self::section(ui, col, "Import a file");
@@ -679,7 +750,7 @@ impl SettingsScreen {
             ("EPUB books", "Including the EPUB files from AO3's Download button."),
             ("PDFs", "Shown page by page, as they were made."),
             ("AO3 web pages", "AO3's HTML downloads, or a work's page saved from a browser."),
-            ("AO3 Reader works", "Works saved by this app (.json)."),
+            ("Flax Reader works", "Works saved by this app (.json), including from AO3 Reader."),
         ];
         let card = col.take(it.h + 18.0 + formats.len() as f32 * 44.0 + 82.0);
         col.gap(4.0);
@@ -783,7 +854,7 @@ impl SettingsScreen {
         }
     }
 
-    fn storage_tab(&mut self, ui: &mut Ui, col: &mut Col, ctx: &mut SettingsCtx, out: &mut Vec<SettingsAction>) {
+    fn updates_tab(&mut self, ui: &mut Ui, col: &mut Col, ctx: &mut SettingsCtx, out: &mut Vec<SettingsAction>) {
         let c = ui.c;
         Self::section(ui, col, "Updates");
         if Self::toggle_row(ui, col, "auto-update", "Check for updates on startup", "Asks GitHub for the latest release when the app opens.", &mut ctx.config.check_updates_on_startup) {
@@ -827,7 +898,13 @@ impl SettingsScreen {
                 }
             }
         }
+        let r = Self::row(ui, col, "What's new", "Release notes for every version, on GitHub.", 130.0, 32.0);
+        if ui.button_ex(id("releases"), r, "Releases", Some(icons::HISTORY), ButtonKind::Secondary, true) {
+            out.push(SettingsAction::Open(format!("https://github.com/{GITHUB_REPO}/releases")));
+        }
+    }
 
+    fn storage_section(&mut self, ui: &mut Ui, col: &mut Col, ctx: &mut SettingsCtx, out: &mut Vec<SettingsAction>) {
         Self::section(ui, col, "Storage");
         let r = Self::row(ui, col, "Library folder", &ctx.storage_dir, 140.0, 32.0);
         if ui.button_ex(id("open-folder"), r, "Open folder", Some(icons::FOLDER), ButtonKind::Secondary, true) {
@@ -852,28 +929,95 @@ impl SettingsScreen {
         }
     }
 
+    fn sources_tab(&mut self, ui: &mut Ui, col: &mut Col, ctx: &mut SettingsCtx, out: &mut Vec<SettingsAction>) {
+        let s = &ctx.config.session;
+        let user = s.username.clone().filter(|_| s.is_logged_in && (s.session_cookie.is_some() || s.remember_token.is_some()));
+        Self::section(ui, col, "Archive of Our Own");
+        let sub = match &user {
+            Some(name) => format!("Signed in as {name}. Works only members can see, and kudos, use your account."),
+            None => "Not signed in. Sign in to read works only members can see, and to leave kudos.".to_string(),
+        };
+        let r = Self::row(ui, col, "AO3 account", &sub, 120.0, 32.0);
+        if ui.button_ex(id("src-account"), r, if user.is_some() { "Account" } else { "Sign in" }, Some(icons::CONTACT), ButtonKind::Secondary, true) {
+            out.push(SettingsAction::Account);
+        }
+
+        Self::section(ui, col, "Catalogues");
+        for cat in crate::sources::builtin() {
+            Self::row(ui, col, &cat.name, "Built in: tens of thousands of free books whose copyright has run out.", 0.0, 0.0);
+        }
+        let mut remove = None;
+        for (i, cat) in ctx.config.catalogs.iter().enumerate() {
+            let sub = if cat.user.is_empty() { cat.url.clone() } else { format!("{}  ·  signs in as {}", cat.url, cat.user) };
+            let r = Self::row(ui, col, &cat.name, &sub, 110.0, 32.0);
+            if ui.button_ex(id2(id("src-remove"), i), r, "Remove", Some(icons::DELETE), ButtonKind::Ghost, true) {
+                remove = Some(i);
+            }
+        }
+        if let Some(i) = remove {
+            ctx.config.catalogs.remove(i);
+            out.push(SettingsAction::ConfigChanged);
+            out.push(SettingsAction::CatalogsChanged);
+        }
+        let r = Self::row(ui, col, "Add a catalogue", "Calibre's content server, Kavita, Komga, a library's catalogue: any OPDS feed.", 110.0, 32.0);
+        if ui.button_ex(id("src-add"), r, "Add…", Some("\u{E710}"), ButtonKind::Secondary, true) {
+            out.push(SettingsAction::AddCatalog);
+        }
+
+        Self::section(ui, col, "Dictionary");
+        Self::row(ui, col, "Looking up words", "Double-click a word in a book (or select up to three), then Define. Definitions come from Wiktionary, so this needs the internet.", 0.0, 0.0);
+    }
+
     fn about_tab(&mut self, ui: &mut Ui, col: &mut Col, out: &mut Vec<SettingsAction>) {
         let c = ui.c;
-        col.gap(14.0);
-        let blurb = "A lightweight, unofficial reader for Archive of Our Own. Find works and save them to read offline, turn pages like a book or scroll, choose your own fonts and themes, and follow the authors and tags you love. It's small and quick, and your library stays on this PC.\n\nNot affiliated with the Organization for Transformative Works.";
-        let t = ui.measure(blurb, &TextStyle::ui(13.5), TextOpts::wrap(col.w - 32.0).line_height(1.45));
-        let card = col.take(t.h + 96.0);
+        let open = |out: &mut Vec<SettingsAction>, url: String| out.push(SettingsAction::Open(url));
+
+        // Who we are, and where to find us.
+        col.gap(10.0);
+        let blurb = "A small, quick e-reader for your own books and free ones. Read EPUBs and PDFs, browse Project Gutenberg and your own catalogues, and read Archive of Our Own, with themes, fonts and reading aids made for long, comfortable reading.";
+        let t = ui.measure(blurb, &TextStyle::ui(13.5), TextOpts::wrap(col.w - 36.0).line_height(1.45));
+        let note = "The Discord is aga2522's general server: come and chat about anything, and ask about Flax Reader there too.";
+        let nt = ui.measure(note, &TextStyle::ui(SMALL), TextOpts::wrap(col.w - 36.0));
+        let card = col.take(t.h + nt.h + 162.0);
         col.gap(4.0);
         ui.card(card);
-        ui.g.fill_path(super::mark::PATH, super::mark::SIZE, Rect::new(card.x + 18.0, card.y + 16.0, 40.0, 40.0), c.accent_mark);
-        ui.text("AO3 Reader", &TextStyle::ui(18.0).semibold(), card.x + 74.0, card.y + 16.0, c.text);
-        ui.text(&format!("Version {CURRENT_VERSION}"), &TextStyle::ui(SMALL), card.x + 74.0, card.y + 40.0, c.muted);
-        ui.g.draw_text(t, card.x + 16.0, card.y + 70.0, c.text);
+        ui.g.fill_path(super::mark::PATH, super::mark::SIZE, Rect::new(card.x + 18.0, card.y + 18.0, 48.0, 48.0), c.accent_mark);
+        let n = ui.text("Flax Reader", &TextStyle::ui(22.0).semibold(), card.x + 80.0, card.y + 16.0, c.text);
+        ui.text(&format!("Version {CURRENT_VERSION}  ·  Made by aga2522  ·  Free and open source (MIT)"), &TextStyle::ui(SMALL), card.x + 80.0, card.y + 18.0 + n.h, c.muted);
+        ui.g.draw_text(t, card.x + 18.0, card.y + 84.0, c.text);
+        let by = card.y + 84.0 + t.h + 16.0;
+        ui.g.draw_text(nt, card.x + 18.0, by + 48.0, c.muted);
+        let dw = ui.button_width("Join the Discord", Some(icons::CHAT));
+        if ui.button_ex(id("about-discord"), Rect::new(card.x + 18.0, by, dw, 36.0), "Join the Discord", Some(icons::CHAT), ButtonKind::Primary, true) {
+            open(out, DISCORD_INVITE.to_string());
+        }
+        let gw = ui.button_width("GitHub", Some(icons::CODE));
+        if ui.button_ex(id("about-github"), Rect::new(card.x + 26.0 + dw, by, gw, 36.0), "GitHub", Some(icons::CODE), ButtonKind::Secondary, true) {
+            open(out, format!("https://github.com/{GITHUB_REPO}"));
+        }
 
+        Self::section(ui, col, "Help");
+        let r = Self::row(ui, col, "Report a problem", "Something broken or confusing? Tell us on GitHub, or ask in the Discord.", 120.0, 32.0);
+        if ui.button_ex(id("about-issue"), r, "Report", Some(icons::BUG), ButtonKind::Secondary, true) {
+            open(out, format!("https://github.com/{GITHUB_REPO}/issues/new"));
+        }
+        let r = Self::row(ui, col, "What's new", "Release notes for every version.", 120.0, 32.0);
+        if ui.button_ex(id("about-releases"), r, "Releases", Some(icons::HISTORY), ButtonKind::Secondary, true) {
+            open(out, format!("https://github.com/{GITHUB_REPO}/releases"));
+        }
+
+        Self::section(ui, col, "Privacy");
+        Self::row(ui, col, "Your books stay yours", "Your library, highlights and notes stay on this PC. There are no ads, no tracking and no Flax account. The app goes online only for what you ask: AO3, catalogues, word definitions, and (if you allow it) checking GitHub for updates.", 0.0, 0.0);
+
+        Self::section(ui, col, "This app");
         let (private_ws, ws) = memory_mb();
-        let sub = format!("{private_ws:.1} MB private (what Task Manager shows) · {ws:.1} MB working set");
+        let sub = format!("{private_ws:.1} MB private (what Task Manager shows)  ·  {ws:.1} MB working set");
         Self::row(ui, col, "Memory in use", &sub, 0.0, 0.0);
         ui.wake_after(1000);
 
-        let r = Self::row(ui, col, "Source code", &format!("github.com/{GITHUB_REPO}"), 120.0, 32.0);
-        if ui.button_ex(id("github"), r, "GitHub", Some(icons::GLOBE), ButtonKind::Secondary, true) {
-            out.push(SettingsAction::Open(format!("https://github.com/{GITHUB_REPO}")));
-        }
+        Self::section(ui, col, "Credits");
+        Self::row(ui, col, "Thanks to", "Project Gutenberg for its free books, and Wiktionary for definitions (CC BY-SA). Atkinson Hyperlegible is by the Braille Institute and OpenDyslexic by Abbie Gonzalez, both under the SIL Open Font License.", 0.0, 0.0);
+        Self::row(ui, col, "Not affiliated with AO3", "Flax Reader is unofficial: it isn't made by Archive of Our Own or the Organization for Transformative Works.", 0.0, 0.0);
     }
 }
 

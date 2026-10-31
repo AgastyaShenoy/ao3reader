@@ -1,4 +1,4 @@
-use crate::ao3::models::{Bookmark, LibraryEntry, ReadingProgress, ShelfStatus, Work};
+use crate::ao3::models::{Highlight, Bookmark, LibraryEntry, ReadingProgress, ShelfStatus, Work};
 use crate::storage::config::AppConfig;
 use crate::storage::safe::{load_json, write_atomic};
 use chrono::Utc;
@@ -82,6 +82,7 @@ impl LibraryManager {
                 is_favorite: false,
                 progress: ReadingProgress::default(),
                 bookmarks: Vec::new(),
+                highlights: Vec::new(),
                 downloaded_at: Utc::now(),
                 local_file_exists: true,
                 personal_notes: String::new(),
@@ -137,6 +138,33 @@ impl LibraryManager {
         if let Some(entry) = self.data.entries.get_mut(work_id) {
             entry.bookmarks.retain(|b| b.id != bookmark.id);
             entry.bookmarks.push(bookmark);
+            let _ = self.save();
+        }
+    }
+
+    /// Adds a highlight, or replaces the one with its id (a new colour or note). A new one over
+    /// older ones takes their place, and their notes if it has none.
+    pub fn save_highlight(&mut self, work_id: &str, mut h: Highlight) {
+        if let Some(entry) = self.data.entries.get_mut(work_id) {
+            match entry.highlights.iter_mut().find(|x| x.id == h.id) {
+                Some(old) => *old = h,
+                None => {
+                    let (chapter, start, end) = (h.chapter, h.start, h.end);
+                    let overlaps = |x: &Highlight| x.chapter == chapter && x.start < end && start < x.end;
+                    if h.note.is_empty() {
+                        h.note = entry.highlights.iter().filter(|x| overlaps(x) && !x.note.is_empty()).map(|x| x.note.as_str()).collect::<Vec<_>>().join("\n\n");
+                    }
+                    entry.highlights.retain(|x| !overlaps(x));
+                    entry.highlights.push(h);
+                }
+            }
+            let _ = self.save();
+        }
+    }
+
+    pub fn remove_highlight(&mut self, work_id: &str, id: &str) {
+        if let Some(entry) = self.data.entries.get_mut(work_id) {
+            entry.highlights.retain(|h| h.id != id);
             let _ = self.save();
         }
     }

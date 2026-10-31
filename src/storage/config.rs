@@ -79,6 +79,9 @@ pub struct AppConfig {
     /// Read-aloud speed: 1.0 is the voice's normal pace.
     #[serde(default = "one")]
     pub speech_rate: f32,
+    /// Catalogs the reader added (Project Gutenberg is always there).
+    #[serde(default)]
+    pub catalogs: Vec<crate::sources::Catalog>,
 }
 
 impl Default for AppConfig {
@@ -105,6 +108,7 @@ impl Default for AppConfig {
             custom_text: default_custom_text(),
             larger_targets: false,
             speech_rate: 1.0,
+            catalogs: Vec::new(),
         }
     }
 }

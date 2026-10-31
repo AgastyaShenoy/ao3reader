@@ -1,6 +1,5 @@
 package org.ao3reader
 
-import android.app.AlertDialog
 import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
@@ -27,6 +26,15 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
     val meta: JSONObject = opened.getJSONObject("meta")
     private val chapters: List<JSONObject> = opened.getJSONArray("chapters").objects()
     private var bookmarks: JSONArray = opened.getJSONArray("bookmarks")
+    private var highlights: List<JSONObject> = opened.optJSONArray("highlights")?.objects() ?: emptyList()
+    /** This chapter's highlights (the page draws them). */
+    var chapterHighlights: List<JSONObject> = emptyList()
+        private set
+    private var highlightsVersion = 0
+    val highlightsKey get() = highlightsVersion
+    /** The bar of things to do with a selection or a highlight. */
+    private var bar: View? = null
+    val selectionBarShown get() = bar != null
     val chapterCount get() = chapters.size
     var chapter = (opened.getInt("chapter") - 1).coerceIn(0, chapters.size - 1)
         private set
@@ -131,6 +139,7 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
 
     private fun loadChapter(i: Int, anchor: Float) {
         chapter = i
+        chapterHighlights = highlights.filter { it.getInt("chapter") == i }
         chapterJson = Core.obj("work.chapter", json("index" to i))
         page.setChapter(anchor)
         dirty = true
@@ -292,10 +301,149 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         tts = null
     }
 
+    // ---- selection, highlights, notes and definitions ----------------------------------
+
+    /** Shows what can be done with the selection (or the highlight `existing`), above `top`, or
+     *  below `bottom` when there's no room above. */
+    fun showSelectionBar(x: Float, top: Float, bottom: Float, existing: JSONObject?) {
+        hideSelectionBar()
+        val p = Settings.pal
+        val row = a.row().apply {
+            background = rounded(p.card, a.dpf(14), p.border, a.dp(1))
+            elevation = a.dpf(6)
+            setPadding(a.dp(8), a.dp(2), a.dp(2), a.dp(2))
+        }
+        HIGHLIGHTS.forEachIndexed { i, c ->
+            val chosen = existing != null && existing.optInt("color") == i
+            row.addView(View(a).apply {
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.OVAL
+                    setColor(Pal.opaque(c))
+                    if (chosen) setStroke(a.dp(2), p.text)
+                }
+                contentDescription = "${HIGHLIGHT_NAMES[i]} highlight"
+                tooltipText = contentDescription
+                setOnClickListener { saveHighlight(existing?.let { JSONObject(it.toString()).put("color", i) } ?: page.selectionHighlight(i)) }
+            }, LinearLayout.LayoutParams(a.dp(26), a.dp(26)).apply { leftMargin = a.dp(5); rightMargin = a.dp(5) })
+        }
+        row.addView(View(a).apply { setBackgroundColor(p.border) }, LinearLayout.LayoutParams(a.dp(1), a.dp(24)).apply { leftMargin = a.dp(6); rightMargin = a.dp(2) })
+        row.addView(a.iconButton(R.drawable.ic_edit, p.text, if (existing?.optString("note").isNullOrEmpty()) "Add a note" else "Edit the note") { editNote(existing) })
+        row.addView(a.iconButton(R.drawable.ic_copy, p.text, "Copy") { copy(existing?.getString("text") ?: page.selectedText()) })
+        if (existing == null && page.selectedText().split(Regex("\\s+")).size <= 3) row.addView(a.iconButton(R.drawable.ic_book, p.text, "Define") { define(page.selectedText()) })
+        if (existing != null) row.addView(a.iconButton(R.drawable.ic_delete, p.text, "Remove highlight") {
+            highlights = Core.arr("highlight.remove", json("id" to workId, "highlight" to existing.getString("id"))).objects()
+            highlightsChanged()
+        })
+        row.measure(MeasureSpec.makeMeasureSpec(width, MeasureSpec.AT_MOST), MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED))
+        val w = row.measuredWidth
+        val h = row.measuredHeight
+        val gap = a.dp(10)
+        val y = if (top - h - gap > insetTop + a.dp(8)) top - h - gap else (bottom + gap).coerceAtMost((height - h - insetBottom - a.dp(8)).toFloat())
+        val lp = frame(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START).apply {
+            leftMargin = (x - w / 2).toInt().coerceIn(a.dp(8), (width - w - a.dp(8)).coerceAtLeast(a.dp(8)))
+            topMargin = y.toInt()
+        }
+        addView(row, lp)
+        bar = row
+        Anim.enter(row, dy = a.dpf(6), ms = 140)
+    }
+
+    fun hideSelectionBar() {
+        bar?.let { removeView(it) }
+        bar = null
+    }
+
+    private fun highlightsChanged() {
+        chapterHighlights = highlights.filter { it.getInt("chapter") == chapter }
+        highlightsVersion++
+        hideSelectionBar()
+        page.relayout()
+    }
+
+    private fun saveHighlight(h: JSONObject?) {
+        if (h == null) return
+        highlights = Core.arr("highlight.save", json("id" to workId, "highlight" to h)).objects()
+        highlightsChanged()
+    }
+
+    /** A note on a highlight (made yellow if the passage wasn't highlighted yet). */
+    private fun editNote(existing: JSONObject?) {
+        val h = existing?.let { JSONObject(it.toString()) } ?: page.selectionHighlight(0) ?: return
+        hideSelectionBar()
+        val p = Settings.pal
+        val box = a.column()
+        // The passage, with a bar of its highlight colour beside it.
+        val quote = a.row().apply { gravity = Gravity.TOP }
+        quote.addView(View(a).apply { background = rounded(Pal.opaque(HIGHLIGHTS[h.optInt("color").coerceIn(0, 3)]), a.dpf(1.5f)) },
+            LinearLayout.LayoutParams(a.dp(3), ViewGroup.LayoutParams.MATCH_PARENT).apply { rightMargin = a.dp(10) })
+        quote.addView(a.label(h.optString("text"), 13.5f, alpha(p.text, 0.8f), lines = 3).apply { setTypeface(typeface, android.graphics.Typeface.ITALIC) }, LinearLayout.LayoutParams(0, -2, 1f))
+        box.addView(quote, lp(bottom = a.dp(12)))
+        val input = a.input("Your note").apply {
+            isSingleLine = false
+            minLines = 3
+            gravity = Gravity.TOP or Gravity.START
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            setText(h.optString("note"))
+        }
+        box.addView(input, lp())
+        a.dialog(if (h.optString("note").isEmpty()) "Add a note" else "Edit the note", body = box, ok = "Save") {
+            h.put("note", input.text.toString().trim())
+            saveHighlight(h)
+            a.toast("Note saved")
+            true
+        }
+        input.requestFocus()
+    }
+
+    private fun copy(text: String) {
+        if (text.isEmpty()) return
+        a.getSystemService(android.content.ClipboardManager::class.java)?.setPrimaryClip(android.content.ClipData.newPlainText("Passage", text))
+        // Android 13 and later show their own notice.
+        if (android.os.Build.VERSION.SDK_INT < 33) a.toast("Copied")
+        page.clearSelection()
+    }
+
+    /** Wiktionary's meanings of a word, in a panel at the bottom. */
+    private fun define(text: String) {
+        val p = Settings.pal
+        page.clearSelection()
+        val word = text.trim().trim { !it.isLetterOrDigit() && it != '-' && it != '\'' }
+        val box = a.column().apply { setPadding(a.dp(20), a.dp(16), a.dp(20), insetBottom + a.dp(14)) }
+        val head = a.row()
+        head.addView(a.label(word, 21f, p.text, bold = true, lines = 1), LinearLayout.LayoutParams(0, -2, 1f))
+        head.addView(a.iconButton(R.drawable.ic_close, p.text, "Close") { closePanel() })
+        box.addView(head)
+        val body = a.column()
+        body.addView(a.label("Looking it up…", 14f, p.muted), lp(top = a.dp(8)))
+        val cap = (height * 0.6f).toInt()
+        val scroll = object : android.widget.ScrollView(a) {
+            override fun onMeasure(w: Int, h: Int) = super.onMeasure(w, MeasureSpec.makeMeasureSpec(cap, MeasureSpec.AT_MOST))
+        }
+        scroll.addView(body)
+        box.addView(scroll, lp())
+        box.addView(a.label("From Wiktionary", 11.5f, p.muted), lp(top = a.dp(10)))
+        showPanel(box, Gravity.BOTTOM, height = ViewGroup.LayoutParams.WRAP_CONTENT)
+        Core.background("define", json("word" to word)) { r ->
+            body.removeAllViews()
+            r.onSuccess { res ->
+                for (m in (res as JSONObject).getJSONArray("meanings").objects()) {
+                    body.addView(a.label(m.getString("part"), 13f, p.accentText, bold = true), lp(top = a.dp(12), bottom = a.dp(4)))
+                    m.getJSONArray("definitions").strings().take(6).forEachIndexed { i, d ->
+                        val line = a.row().apply { gravity = Gravity.TOP }
+                        line.addView(a.label("${i + 1}.", 14f, p.muted), LinearLayout.LayoutParams(a.dp(22), -2))
+                        line.addView(a.label(d, 14.5f, p.text).apply { setLineSpacing(0f, 1.15f) }, LinearLayout.LayoutParams(0, -2, 1f))
+                        body.addView(line, lp(bottom = a.dp(6)))
+                    }
+                }
+            }.onFailure { body.addView(a.label(it.message ?: "Couldn't look it up.", 14f, p.muted), lp(top = a.dp(8))) }
+        }
+    }
+
     // ---- chrome and panels --------------------------------------------------------------
 
     fun toggleChrome() {
         if (panel != null) return closePanel()
+        hideSelectionBar()
         chrome = !chrome
         showChrome(chrome, animate = true)
     }
@@ -329,6 +477,10 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
 
     /** Back button: closes a panel first. Returns false when the reader itself should close. */
     override fun back(): Boolean {
+        if (bar != null) {
+            page.clearSelection()
+            return true
+        }
         if (panel != null) {
             closePanel()
             return true
@@ -388,7 +540,7 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         val tabsHolder = FrameLayout(a)
         fun fill() {
             tabsHolder.removeAllViews()
-            tabsHolder.addView(a.segmented(listOf("Chapters", "Bookmarks (${bookmarks.length()})"), tab) { tab = it; fill() })
+            tabsHolder.addView(a.segmented(listOf("Chapters", "Bookmarks", "Highlights"), tab, counts = listOf(0, bookmarks.length(), highlights.size)) { tab = it; fill() })
             if (tab == 0) {
                 list.adapter = object : BaseAdapter() {
                     override fun getCount() = chapters.size
@@ -405,6 +557,33 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
                     }
                 }
                 list.setSelection((chapter - 2).coerceAtLeast(0))
+            } else if (tab == 2) {
+                val hs = highlights
+                list.adapter = object : BaseAdapter() {
+                    override fun getCount() = hs.size
+                    override fun getItem(i: Int) = hs[i]
+                    override fun getItemId(i: Int) = i.toLong()
+                    override fun getView(i: Int, c: View?, parent: ViewGroup?): View {
+                        val h = hs[i]
+                        val r = a.row().apply { setPadding(a.dp(10), a.dp(10), a.dp(4), a.dp(10)); gravity = Gravity.TOP }
+                        r.addView(View(a).apply { background = rounded(Pal.opaque(HIGHLIGHTS[h.optInt("color").coerceIn(0, 3)]), a.dpf(2)) },
+                            LinearLayout.LayoutParams(a.dp(4), ViewGroup.LayoutParams.MATCH_PARENT).apply { rightMargin = a.dp(10) })
+                        val t = a.column()
+                        val n = h.getInt("chapter")
+                        t.addView(a.label(chapters.getOrNull(n)?.getString("title")?.ifBlank { null } ?: "Chapter ${n + 1}", 12.5f, p.muted, bold = true, lines = 1))
+                        t.addView(a.label(h.optString("text"), 13.5f, p.text, lines = 3), lp(top = a.dp(2)))
+                        if (h.optString("note").isNotEmpty()) t.addView(a.label(h.getString("note"), 13f, alpha(p.text, 0.75f), lines = 2).apply { setTypeface(typeface, android.graphics.Typeface.ITALIC) }, lp(top = a.dp(4)))
+                        r.addView(t, LinearLayout.LayoutParams(0, -2, 1f))
+                        r.addView(a.iconButton(R.drawable.ic_delete, p.muted, "Remove highlight") {
+                            highlights = Core.arr("highlight.remove", json("id" to workId, "highlight" to h.getString("id"))).objects()
+                            highlightsChanged()
+                            fill()
+                        })
+                        r.setOnClickListener { closePanel(); jumpChapter(n, h.getJSONArray("start").getInt(0).toFloat()) }
+                        return r
+                    }
+                }
+                if (hs.isEmpty()) a.toast("No highlights yet. Press and hold on a word to start one.")
             } else {
                 val bms = bookmarks.objects()
                 list.adapter = object : BaseAdapter() {
@@ -566,15 +745,11 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
 
     private fun addBookmark() {
         val input = a.input("Add a note (optional)")
-        AlertDialog.Builder(a)
-            .setTitle("Bookmark this page")
-            .setView(FrameLayout(a).apply { setPadding(a.dp(20), a.dp(8), a.dp(20), 0); addView(input) })
-            .setPositiveButton("Add") { _, _ ->
-                bookmarks = Core.arr("bookmark.add", json("id" to workId, "chapter" to chapter + 1, "para" to page.anchor().toInt(), "note" to input.text.toString()))
-                a.toast("Bookmark added")
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
+        a.dialog("Bookmark this page", body = input, ok = "Add") {
+            bookmarks = Core.arr("bookmark.add", json("id" to workId, "chapter" to chapter + 1, "para" to page.anchor().toInt(), "note" to input.text.toString()))
+            a.toast("Bookmark added")
+            true
+        }
     }
 
     private fun kudos() {

@@ -7,6 +7,7 @@ use super::icons;
 use super::mark;
 use super::library::{ExportFormat, LibraryAction, LibraryScreen};
 use super::book::Book;
+use super::catalog::{CatalogAction, CatalogScreen, Getting};
 use super::pdf::PdfScreen;
 use super::reader::{ReaderAction, ReaderScreen};
 use super::settings::{SettingsAction, SettingsCtx, SettingsScreen};
@@ -46,6 +47,12 @@ pub enum AppEvent {
     /// First pages of followed feeds, by feed id.
     FollowsChecked(Vec<(String, Result<Listing, String>)>),
     FeedPage(Result<Listing, String>),
+    /// A page of a catalog (`url` is the page's address, or "search:…").
+    CatalogPage { url: String, append: bool, result: Result<crate::sources::opds::Feed, String> },
+    /// A book downloaded from a catalog, ready to save.
+    CatalogBook { key: String, result: Result<Work, String> },
+    /// A word's meanings, for the reader.
+    Defined { word: String, result: Result<Vec<crate::sources::dictionary::Meaning>, String> },
 }
 
 /// Work the window host runs after the frame, outside any borrow of the app
@@ -57,6 +64,8 @@ pub enum Deferred {
     PickColor { text: bool, current: u32 },
     SaveFile { name: String, filter: &'static str, ext: &'static str, data: Vec<u8> },
     Open(String),
+    /// Put text on the clipboard.
+    Copy(String),
     Fullscreen(bool),
     SetTitle(String),
 }
@@ -65,7 +74,8 @@ pub enum Deferred {
 pub enum Tab {
     Reader,
     Library,
-    Search,
+    /// Finding books: AO3 and catalogs.
+    Browse,
     Following,
     Account,
     Settings,
@@ -86,6 +96,8 @@ pub struct App {
     hwnd: usize,
     follows: FollowStore,
     search: SearchScreen,
+    catalogs: CatalogScreen,
+    catalog_client: crate::sources::CatalogClient,
     following: FollowingScreen,
     config_dirty_since: Option<Instant>,
     pub deferred: Vec<Deferred>,
@@ -160,6 +172,8 @@ impl App {
             hwnd: 0,
             follows: FollowStore::load(),
             search: SearchScreen::default(),
+            catalogs: CatalogScreen::default(),
+            catalog_client: crate::sources::CatalogClient::new(),
             following: FollowingScreen::default(),
             config_dirty_since: None,
             deferred: Vec::new(),
@@ -226,7 +240,7 @@ impl App {
                 }
             }
             AppEvent::Fetched { id, result: Err(e), .. } => {
-                if !self.search.link_done(&id, Err(e.clone()), false) || self.tab != Tab::Search {
+                if !self.search.link_done(&id, Err(e.clone()), false) || !self.on_ao3() {
                     self.set_toast(format!("Couldn't download: {e}"));
                 }
             }
@@ -255,6 +269,22 @@ impl App {
                     }
                 }
             }
+            AppEvent::CatalogPage { url, append, result } => self.catalogs.loaded(&url, append, result),
+            AppEvent::Defined { word, result } => {
+                if let Some(r) = &mut self.reader {
+                    r.defined(&word, result);
+                }
+            }
+            AppEvent::CatalogBook { key, result } => match result.and_then(|work| self.library.save_work(&work).map(|_| work)) {
+                Ok(work) => {
+                    self.set_toast(format!("Saved “{}” to your library", work.meta.title));
+                    self.catalogs.getting.insert(key, Getting::Done(work.meta.id));
+                }
+                Err(e) => {
+                    self.set_toast(e.clone());
+                    self.catalogs.getting.insert(key, Getting::Failed(e));
+                }
+            },
             AppEvent::Searched { page, result } => {
                 self.search.busy = false;
                 match result {
@@ -307,7 +337,7 @@ impl App {
             }
             AppEvent::Epub { result: Err(e), .. } => {
                 self.search.epub_done(Some(e.clone()));
-                if self.tab != Tab::Search {
+                if !self.on_ao3() {
                     self.set_toast(format!("Couldn't download the EPUB: {e}"));
                 }
             }
@@ -409,7 +439,7 @@ impl App {
         self.library.touch_history(&id);
         let _ = self.follows.mark_work_read(&id);
         self.tab = Tab::Reader;
-        self.deferred.push(Deferred::SetTitle(format!("{title} — AO3 Reader")));
+        self.deferred.push(Deferred::SetTitle(format!("{title} — Flax Reader")));
     }
 
     pub fn open_work(&mut self, work_id: &str) {
@@ -441,7 +471,7 @@ impl App {
             if r.fullscreen() {
                 self.deferred.push(Deferred::Fullscreen(false));
             }
-            self.deferred.push(Deferred::SetTitle("AO3 Reader".into()));
+            self.deferred.push(Deferred::SetTitle("Flax Reader".into()));
         }
         if self.tab == Tab::Reader {
             self.tab = Tab::Library;
@@ -453,8 +483,10 @@ impl App {
             self.tab = Tab::Library;
             return;
         };
-        let bookmarks = self.library.get_entry(reader.work_id()).map(|e| e.bookmarks.clone()).unwrap_or_default();
-        let actions = reader.frame(ui, r, &mut self.config, &bookmarks);
+        let entry = self.library.get_entry(reader.work_id());
+        let bookmarks = entry.map(|e| e.bookmarks.clone()).unwrap_or_default();
+        let highlights = entry.map(|e| e.highlights.clone()).unwrap_or_default();
+        let actions = reader.frame(ui, r, &mut self.config, &bookmarks, &highlights);
         let work_id = reader.work_id().to_string();
         for a in actions {
             match a {
@@ -490,6 +522,15 @@ impl App {
                     self.settings.show_typography();
                 }
                 ReaderAction::Notice(msg) => self.set_toast(msg),
+                ReaderAction::SaveHighlight(h) => self.library.save_highlight(&work_id, h),
+                ReaderAction::RemoveHighlight(hid) => self.library.remove_highlight(&work_id, &hid),
+                ReaderAction::Copy(text) => self.deferred.push(Deferred::Copy(text)),
+                ReaderAction::Define(word) => {
+                    self.run_job(move || {
+                        let result = crate::sources::dictionary::define(&word);
+                        AppEvent::Defined { word, result }
+                    });
+                }
             }
         }
         if self.reader.as_ref().is_some_and(|r| r.unsaved()) {
@@ -585,9 +626,13 @@ impl App {
             match self.tab {
                 Tab::Settings => self.settings_frame(ui, body),
                 Tab::Library => self.library_frame(ui, body),
-                Tab::Search => {
-                    let actions = self.search.frame(ui, body, &self.library, &self.follows, signed_in(&self.config.session));
-                    self.browse_actions(actions);
+                Tab::Browse => {
+                    let (actions, ao3) = self.catalogs.frame(ui, body, &self.config.catalogs, self.search.summary());
+                    self.catalog_actions(actions);
+                    if let Some(area) = ao3 {
+                        let actions = self.search.frame(ui, area, &self.library, &self.follows, signed_in(&self.config.session));
+                        self.browse_actions(actions);
+                    }
                 }
                 Tab::Following => {
                     let actions = self.following.frame(ui, body, &self.follows, &self.library);
@@ -621,17 +666,19 @@ impl App {
 
         // The flax flower, lightened on dark themes so it stays visible.
         ui.g.fill_path(mark::PATH, mark::SIZE, Rect::new(20.0, r.y + (r.h - 30.0) / 2.0, 30.0, 30.0), c.accent_mark);
-        ui.text_in("Reader", &TextStyle::ui(16.0).semibold(), Rect::new(60.0, r.y, 70.0, r.h), Align::Left, c.text);
+        let name = ui.measure("Flax Reader", &TextStyle::ui(16.0).semibold(), TextOpts::default());
+        ui.g.draw_text(name, 60.0, r.y + (r.h - name.h) / 2.0, c.text);
+        let nav_x = (60.0 + name.w + 24.0).round();
 
         let account_label = if signed_in(&self.config.session) { self.config.session.username.clone().unwrap_or_else(|| "Account".into()) } else { "Guest".into() };
         let mut items = vec![
             (icons::LIBRARY, "Library"),
-            (icons::SEARCH, "Search"),
+            (icons::SEARCH, "Browse"),
             (icons::BELL, "Following"),
             (icons::CONTACT, account_label.as_str()),
             (icons::SETTINGS, "Settings"),
         ];
-        let mut tabs = vec![Tab::Library, Tab::Search, Tab::Following, Tab::Account, Tab::Settings];
+        let mut tabs = vec![Tab::Library, Tab::Browse, Tab::Following, Tab::Account, Tab::Settings];
         // New works from follows show as a badge on Following.
         let mut badges = vec![0, 0, self.follows.unread_total(), 0, 0];
         if self.reader.is_some() {
@@ -643,7 +690,7 @@ impl App {
 
         let has_update = matches!(self.update_status, UpdateStatus::UpdateAvailable(_));
         let update_w = if has_update { if r.w > 860.0 { ui.button_width("Update available", Some(icons::UPDATE)) } else { 40.0 } } else { 0.0 };
-        let tabs_w = r.w - 156.0 - update_w - 16.0;
+        let tabs_w = r.w - nav_x - update_w - 16.0;
         let full: f32 = items.iter().zip(&badges).map(|((icon, label), n)| ui.button_width(label, Some(icon)) + ui.badge_width(*n) + 12.0).sum();
         if full > tabs_w {
             for (i, item) in items.iter_mut().enumerate() {
@@ -652,7 +699,7 @@ impl App {
                 }
             }
         }
-        let (_, changed) = ui.tab_strip(id("nav"), 156.0, 11.0, tabs_w, &items, &badges, &mut sel);
+        let (_, changed) = ui.tab_strip(id("nav"), nav_x, 11.0, tabs_w, &items, &badges, &mut sel);
         if changed {
             self.tab = tabs[sel];
         }
@@ -676,7 +723,10 @@ impl App {
                 LibraryAction::Open(id) => self.open_work(&id),
                 LibraryAction::ToggleFavorite(id) => self.library.toggle_favorite(&id),
                 LibraryAction::SetShelf(id, shelf) => self.library.set_shelf(&id, shelf),
-                LibraryAction::GoSearch => self.tab = Tab::Search,
+                LibraryAction::GoSearch => {
+                    self.tab = Tab::Browse;
+                    self.catalogs.show_ao3();
+                }
                 LibraryAction::GoImport => {
                     self.tab = Tab::Settings;
                     self.settings.show_import();
@@ -684,7 +734,7 @@ impl App {
                 LibraryAction::Delete(id) => {
                     if self.reader.as_ref().is_some_and(|r| r.work_id() == id) {
                         self.reader = None;
-                        self.deferred.push(Deferred::SetTitle("AO3 Reader".into()));
+                        self.deferred.push(Deferred::SetTitle("Flax Reader".into()));
                     }
                     let title = self.library.get_entry(&id).map(|e| e.meta.title.clone()).unwrap_or_default();
                     self.library.delete_work(&id);
@@ -736,6 +786,44 @@ impl App {
             }
             AppEvent::FollowsChecked(out)
         });
+    }
+
+    /// AO3's search is on screen.
+    fn on_ao3(&self) -> bool {
+        self.tab == Tab::Browse && self.catalogs.on_ao3()
+    }
+
+    fn catalog_actions(&mut self, actions: Vec<CatalogAction>) {
+        for a in actions {
+            match a {
+                CatalogAction::Load { catalog, url, append } => {
+                    let client = self.catalog_client.clone();
+                    self.run_job(move || {
+                        let result = client.feed(&url, &catalog);
+                        AppEvent::CatalogPage { url, append, result }
+                    });
+                }
+                CatalogAction::Search { catalog, feed, query } => {
+                    let client = self.catalog_client.clone();
+                    self.run_job(move || {
+                        let result = client.search(&feed, &query, &catalog);
+                        AppEvent::CatalogPage { url: format!("search:{query}"), append: false, result }
+                    });
+                }
+                CatalogAction::Get { catalog, url, key, title } => {
+                    let client = self.catalog_client.clone();
+                    self.run_job(move || {
+                        let result = client.download(&url, &catalog).and_then(|bytes| crate::ao3::epub::import_named(&bytes, Some(&title)));
+                        AppEvent::CatalogBook { key, result }
+                    });
+                }
+                CatalogAction::Read(id) => self.open_work(&id),
+                CatalogAction::Save(list) => {
+                    self.config.catalogs = list;
+                    self.mark_config_dirty();
+                }
+            }
+        }
     }
 
     fn browse_actions(&mut self, actions: Vec<BrowseAction>) {
@@ -855,6 +943,12 @@ impl App {
                 SettingsAction::Open(target) => self.deferred.push(Deferred::Open(target)),
                 SettingsAction::Import => self.deferred.push(Deferred::ImportFile),
                 SettingsAction::OpenWork(id) => self.open_work(&id),
+                SettingsAction::AddCatalog => {
+                    self.tab = Tab::Browse;
+                    self.catalogs.start_adding();
+                }
+                SettingsAction::CatalogsChanged => self.catalogs.reset(),
+                SettingsAction::Account => self.tab = Tab::Account,
                 SettingsAction::ClearCache => {
                     let works = storage_dir.join("works");
                     let _ = std::fs::remove_dir_all(&works);

@@ -1,6 +1,5 @@
 package org.ao3reader
 
-import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.text.Editable
@@ -129,12 +128,13 @@ private fun adapter(items: () -> List<JSONObject>, view: (JSONObject) -> View) =
 
 // ---- Search -------------------------------------------------------------------------------
 
-fun searchScreen(a: MainActivity): View {
+/** AO3's search. `embedded` in Browse, under its title and sources (which show the count). */
+fun searchScreen(a: MainActivity, embedded: Boolean = false): View {
     val p = Settings.pal
     val st = a.search
     val q = st.query
     val box = a.column()
-    box.addView(a.header("Search AO3", st.total?.takeIf { st.link == null }?.let { "${thousands(it)} works" }))
+    if (!embedded) box.addView(a.header("Search AO3", st.total?.takeIf { st.link == null }?.let { "${thousands(it)} works" }))
 
     val row = a.row().apply { setPadding(a.dp(16), 0, a.dp(8), 0) }
     val input = a.input("Search AO3, or paste a link to a work")
@@ -239,7 +239,7 @@ fun searchScreen(a: MainActivity): View {
     }, toolLp(true))
     val sortKey = q.optString("sort", "best_match")
     tools.addView(a.toolButton(SORTS.firstOrNull { it.first == sortKey }?.second ?: "Best match", R.drawable.ic_sort, false) { v ->
-        val m = PopupMenu(a, v)
+        val m = a.popupMenu(v)
         SORTS.forEachIndexed { i, (k, label) -> m.menu.add(0, i, i, label).apply { isCheckable = true; isChecked = k == sortKey } }
         m.setOnMenuItemClickListener {
             q.put("sort", SORTS[it.itemId].first)
@@ -593,7 +593,7 @@ private fun blurbCard(a: MainActivity, w: JSONObject, followed: Map<String, Stri
 }
 
 private fun blurbMenu(a: MainActivity, w: JSONObject, followed: Map<String, String>, anchor: View) {
-    val menu = PopupMenu(a, anchor)
+    val menu = a.popupMenu(anchor)
     val options = mutableListOf<Pair<String, () -> Unit>>()
     fun offer(kind: String, name: String, what: String) {
         val existing = followed["$kind:${name.lowercase()}"]
@@ -608,7 +608,7 @@ private fun blurbMenu(a: MainActivity, w: JSONObject, followed: Map<String, Stri
     menu.show()
 }
 
-private fun openUrl(a: MainActivity, url: String) {
+fun openUrl(a: MainActivity, url: String) {
     runCatching { a.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }.onFailure { a.toast("No browser found to open the link.") }
 }
 
@@ -761,14 +761,15 @@ fun followingScreen(a: MainActivity): View {
         c.addView(t, LinearLayout.LayoutParams(0, -2, 1f))
         lateinit var more: View
         more = a.iconButton(R.drawable.ic_more, p.text, "More") {
-            val m = PopupMenu(a, more)
+            val m = a.popupMenu(more)
             m.menu.add(0, 0, 0, "Open on AO3")
             m.menu.add(0, 1, 1, "Unfollow")
             m.setOnMenuItemClickListener {
-                if (it.itemId == 0) openUrl(a, sel.getString("url")) else AlertDialog.Builder(a)
-                    .setTitle("Unfollow ${sel.getString("name")}?")
-                    .setPositiveButton("Unfollow") { _, _ -> unfollow(a, sel.getString("id"), sel.getString("name")) }
-                    .setNegativeButton("Cancel", null).show()
+                if (it.itemId == 0) openUrl(a, sel.getString("url"))
+                else a.dialog("Unfollow ${sel.getString("name")}?", "Its works leave your Following list.", ok = "Unfollow", okKind = Kind.Danger) {
+                    unfollow(a, sel.getString("id"), sel.getString("name"))
+                    true
+                }
                 true
             }
             m.show()
@@ -826,11 +827,11 @@ private fun addFollowDialog(a: MainActivity) {
         "collection" to "Collection name, or a link to it",
     )
     var kind = KINDS.indexOfFirst { it.first == a.following.kind }.coerceAtLeast(0)
-    val col = a.column().apply { setPadding(a.dp(20), a.dp(8), a.dp(20), 0) }
+    val col = a.column()
     val input = a.input(hints.getValue(KINDS[kind].first))
     val seg = FrameLayout(a)
     val suggestions = FrameLayout(a)
-    lateinit var dialog: AlertDialog
+    lateinit var dialog: android.app.Dialog
     fun fill() {
         seg.removeAllViews()
         seg.addView(a.segmented(KINDS.map { it.second }, kind) { i -> kind = i; input.hint = hints.getValue(KINDS[i].first); fill() })
@@ -841,15 +842,10 @@ private fun addFollowDialog(a: MainActivity) {
     col.addView(input, lp(top = a.dp(12)))
     col.addView(a.label("Tag names must match AO3's exactly. A link copied from AO3 always works.", 12.5f, p.muted), lp(top = a.dp(8)))
     col.addView(suggestions, lp(top = a.dp(12)))
-    dialog = AlertDialog.Builder(a)
-        .setTitle("Follow on AO3")
-        .setView(col)
-        .setPositiveButton("Follow") { _, _ ->
-            val name = input.text.toString().trim()
-            if (name.isNotEmpty()) follow(a, KINDS[kind].first, name)
-        }
-        .setNegativeButton("Cancel", null)
-        .create()
     fill()
-    dialog.show()
+    dialog = a.dialog("Follow on AO3", body = col, ok = "Follow") {
+        val name = input.text.toString().trim()
+        if (name.isNotEmpty()) follow(a, KINDS[kind].first, name)
+        true
+    }
 }
