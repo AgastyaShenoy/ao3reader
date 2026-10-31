@@ -1,69 +1,169 @@
+<div align="center">
+
+<img src="docs/logo.svg" width="104" alt="The Flax Reader mark, a blue flax flower">
+
 # Flax Reader
 
-[![Release](https://img.shields.io/github/v/release/AgastyaShenoy/flax-reader?color=4a68b0&label=version)](https://github.com/AgastyaShenoy/flax-reader/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/core-Rust-orange.svg)](https://www.rust-lang.org/)
-[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Android-informational.svg)](https://github.com/AgastyaShenoy/flax-reader/releases)
-[![Discord](https://img.shields.io/badge/Discord-join-5865F2.svg)](https://discord.gg/3xuJY8UXKu)
+**A small, quick e-reader for Windows and Android, with Archive of Our Own built in.**
 
-**An unofficial Archive of Our Own (AO3) reader for Windows and Android.**
+Your EPUBs and PDFs · free classics · AO3 and the story forums · highlights, notes and a dictionary
 
-Flax Reader was built for reading fanfiction on AO3. Search the Archive with its own filters, follow the authors, tags and collections you love, save works to read offline, and leave kudos, all in a small, quick app with themes, fonts and reading aids made for long reading sessions. Each work opens with its rating, warnings, fandoms, tags, summary and notes, like on the Archive. Already have works downloaded from AO3? Import them and their tags and summaries come too.
+[![Version](https://img.shields.io/github/v/release/AgastyaShenoy/flax-reader?color=4a68b0&label=version&style=flat-square)](https://github.com/AgastyaShenoy/flax-reader/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/AgastyaShenoy/flax-reader/total?color=4a68b0&style=flat-square)](https://github.com/AgastyaShenoy/flax-reader/releases)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Android-4a68b0?style=flat-square)](https://github.com/AgastyaShenoy/flax-reader/releases/latest)
+[![Core: Rust](https://img.shields.io/badge/core-Rust-b7410e?style=flat-square)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square)](LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-join%20us-5865F2?style=flat-square)](https://discord.gg/3xuJY8UXKu)
 
-It reads everything else as well: your own EPUBs and PDFs, free books from Project Gutenberg and Standard Ebooks, and stories from SpaceBattles, Sufficient Velocity and Royal Road. Highlight passages, add notes and look words up as you read. Your books stay on your own device.
+<a href="https://github.com/AgastyaShenoy/flax-reader/releases/latest"><img src="https://img.shields.io/badge/Download_for-Windows-4a68b0?style=for-the-badge" alt="Download for Windows"></a>
+<a href="https://github.com/AgastyaShenoy/flax-reader/releases/latest"><img src="https://img.shields.io/badge/Download_for-Android-4a68b0?style=for-the-badge&logo=android&logoColor=white" alt="Download for Android"></a>
 
-- **Small:** the Windows app is a single exe and uses about 10–15 MB of memory while you read. There's no web view, no Electron and no GPU driver.
-- **Native:** Windows draws with Direct2D and DirectWrite; Android uses its own built-in views. Both share one Rust core.
-- **Offline:** books are saved on your device and open without internet.
-- **Private:** no ads, no tracking and no account. The app goes online only for what you ask it to.
+<br><br>
+
+<img src="docs/screenshots/windows/reader.png" width="92%" alt="Reading Alice's Adventures in Wonderland in two columns, with a yellow and a pink highlight, in the Dark Slate theme">
+
+</div>
+
+<br>
 
 > [!IMPORTANT]
-> **The AO3 features haven't been tested against the live site yet.** Archive of Our Own has been down for maintenance while they were built, so searching AO3, following authors and tags, downloading works, signing in and leaving kudos were only tested against saved pages. They'll be tested, and fixed where needed, once AO3 is back online. Reading AO3 works you've already downloaded works now, and so does everything else (your books, Project Gutenberg, Standard Ebooks, the story forums, Royal Road, catalogues, highlights, the dictionary).
+> **The AO3 features haven't been tested against the live site yet.** Archive of Our Own has been down for maintenance while they were built, so searching AO3, following authors and tags, downloading works, signing in and leaving kudos were only tested against saved pages. They'll be tested, and fixed where needed, once AO3 is back online. Everything else works now, including reading the AO3 works you've already downloaded.
 
-*Flax Reader is free and unofficial. It isn't affiliated with Archive of Our Own or the Organization for Transformative Works.*
+*Flax Reader used to be called AO3 Reader. Updating keeps your library, progress and settings.*
 
-<p>
-<img src="docs/screenshots/windows/reader.png" width="49%" alt="Reading Pride and Prejudice with two highlights">
-<img src="docs/screenshots/windows/library.png" width="49%" alt="The library">
+## ✨ At a glance
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+### 📚 Your books
+EPUBs with their pictures, headings and tables, and PDFs page by page. Open them from your file manager and they go straight into the reader.
+
+</td>
+<td width="33%" valign="top">
+
+### 🌐 Free books and stories
+Project Gutenberg and Standard Ebooks built in, SpaceBattles and Sufficient Velocity stories saved by their threadmarks, and any OPDS catalogue you add.
+
+</td>
+<td width="33%" valign="top">
+
+### 🎀 Archive of Our Own
+Search with AO3's own filters, follow authors, tags and collections, save works to read offline and leave kudos.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🖍️ Highlights and notes
+Four highlight colours, a note on any highlight, word lookups from Wiktionary, and copy for any passage.
+
+</td>
+<td valign="top">
+
+### 🔔 Following
+Stories update themselves as chapters come out. Shelves and AO3 feeds show what's new, with an unread badge.
+
+</td>
+<td valign="top">
+
+### ♿ Made for everyone
+Dyslexia-friendly fonts, a reading ruler, bold word starts, read aloud, your own colours, and screen reader support.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🪶 Light as a feather
+One 15 MB exe that uses about 10–15 MB of memory while you read. No web view, no Electron, no GPU driver.
+
+</td>
+<td valign="top">
+
+### 🎨 Nine themes
+Linen, Paper Light, Warm Sepia, Dark Slate, OLED Black, Nord Arctic, Midnight Blue, High Contrast and your own colours.
+
+</td>
+<td valign="top">
+
+### 🔒 Yours, offline
+Books stay on your device and open without internet. No ads, no tracking, no account.
+
+</td>
+</tr>
+</table>
+
+## 📸 A closer look
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/windows/library.png" alt="The library with seven classics, one marked as a favourite"></td>
+<td width="50%"><img src="docs/screenshots/windows/pictures.png" alt="Alice's Adventures in Wonderland opening on its illustrated cover"></td>
+</tr>
+<tr>
+<td align="center"><b>Library</b>: shelves, favourites, progress and search</td>
+<td align="center"><b>Pictures</b>: covers and illustrations, as the book has them</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/windows/define.png" alt="The definition of curiosity from Wiktionary, beside the book"></td>
+<td><img src="docs/screenshots/windows/browse.png" alt="Project Gutenberg's most popular books in Browse"></td>
+</tr>
+<tr>
+<td align="center"><b>Define</b>: meanings from Wiktionary, beside the page</td>
+<td align="center"><b>Browse</b>: Project Gutenberg, Standard Ebooks, AO3 and more</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/windows/themes.png" alt="Nine colour themes in Settings"></td>
+<td><img src="docs/screenshots/windows/accessibility.png" alt="Accessibility settings: reading ruler, bold word starts, focus mode and easier fonts"></td>
+</tr>
+<tr>
+<td align="center"><b>Themes</b>: nine of them, or your own colours</td>
+<td align="center"><b>Accessibility</b>: reading aids, easier text and colour</td>
+</tr>
+</table>
+
+### 📱 On Android
+
+<p align="center">
+<img src="docs/screenshots/android/library.png" width="19%" alt="Library on Android">
+<img src="docs/screenshots/android/ao3.png" width="19%" alt="Works with AO3 details: rating, category, relationship and summary">
+<img src="docs/screenshots/android/reader.png" width="19%" alt="Reading on Android with the menu bars shown">
+<img src="docs/screenshots/android/browse.png" width="19%" alt="Project Gutenberg on Android">
+<img src="docs/screenshots/android/settings.png" width="19%" alt="Themes on Android">
 </p>
 
-*Flax Reader used to be called AO3 Reader, and AO3 is still what it's built around. Updating keeps your library, progress and settings.*
+The same reader, highlights, dictionary, catalogues, Following and themes, built on the same Rust core. Big, thumb-friendly reader bars; tap the sides to turn pages.
 
 ---
 
-## Features
+## 🧭 Features
 
-### Made for AO3
-*Not yet tested against the live site; see above.*
-- **Search** the Archive with its own filters: title, author, fandoms, relationships, characters, tags, rating, category, completion, crossovers, word count and language, sorted the way you like.
-- **Paste a link** to any work to save it to your library, or open an AO3 page you saved.
-- **Follow** authors, tags and collections. New and updated works are marked, with a badge for how many are unread.
-- **Read offline:** works are saved on your device, chapters and all, and open without internet.
-- **The work's details** come first, as on the Archive: rating, warnings, category, fandoms, relationships, characters, tags, summary and the author's notes.
-- **Kudos:** leave kudos from the reader. Sign in to read works that are only for logged-in users.
-- **Your AO3 downloads:** import EPUBs you downloaded from AO3, and their tags, warnings and summaries come with them. *(Works now.)*
-
-### Reading
+### 📖 Reading
 - **EPUB and PDF:** EPUB books with their pictures, headings, lists and tables; PDFs page by page, as they were made (with zoom on Windows).
 - **Pages or scroll:** turn pages like a book, with two pages side by side on wide windows, or scroll through each chapter.
 - **Typography:** text size, line height, paragraph spacing, justified text and indents. Use any installed font or a font file on Windows; sans, serif or mono on Android.
 - **Getting around:** contents, bookmarks with notes, and search across the whole book.
 - **Progress:** chapter, page and time left. Your reading speed is learned from how fast you turn pages, or you can set it yourself.
-- **Read aloud:** with your system's own voices.
+- **Read aloud:** with your system's own voices, turning pages as it goes.
 
-### Highlights, notes and the dictionary
+### 🖍️ Highlights, notes and the dictionary
 - **Highlight:** select text (drag, double-click a word, or press and hold on Android) and pick one of four colours.
 - **Notes:** add a note to any highlight. Every highlight and note is listed in Contents, and takes you back to its place.
 - **Look words up:** select a word and choose Define for its meanings from Wiktionary.
 - **Copy:** copy any passage.
 
-<p>
-<img src="docs/screenshots/windows/define.png" width="49%" alt="A word's definition from Wiktionary">
-<img src="docs/screenshots/windows/browse.png" width="49%" alt="Browsing Project Gutenberg">
-</p>
+### 🎀 Archive of Our Own
+*Not yet tested against the live site; see the note at the top.*
+- **Search** with AO3's own filters: title, author, fandoms, relationships, characters, tags, rating, category, completion, crossovers, word count and language, sorted the way you like.
+- **Paste a link** to any work to save it to your library, or open an AO3 page you saved.
+- **The work's details** come first, as on the Archive: rating, warnings, category, fandoms, relationships, characters, tags, summary and the author's notes.
+- **Follow** authors, tags and collections, and **leave kudos** from the reader. Sign in to read works that are only for logged-in users.
+- **Your AO3 downloads:** import EPUBs you downloaded from AO3, and their tags, warnings and summaries come with them. *(Works now.)*
 
-### Finding books
-- **Archive of Our Own** *(not yet tested against the live site; see above)*: search with AO3's filters, paste a link to a work, and leave kudos.
+### 🌐 Finding books
 - **Your own files:** open EPUB books, PDFs and AO3 web pages, or open them with Flax Reader from your file manager.
 - **Project Gutenberg:** browse and search tens of thousands of free books, built in.
 - **Standard Ebooks:** carefully edited public-domain books, built in. Its newest releases are free to everyone; its patrons can add the full catalogue with their sign-in.
@@ -71,62 +171,70 @@ It reads everything else as well: your own EPUBs and PDFs, free books from Proje
 - **Your catalogues:** add any OPDS catalogue, such as Calibre's content server, Kavita, Komga or a library's catalogue, with a sign-in if it needs one.
 - **Other sites:** Flax Reader only fetches from sites that answer a plain request. Sites behind a bot check (FanFiction.net, Scribble Hub, Webnovel, Feedbooks) aren't fetched; save their pages or books and import them instead.
 
-### Following
-- **AO3** *(not yet tested against the live site)*: follow authors, tags and collections.
+### 🔔 Following
 - **Stories:** paste a link to a story on SpaceBattles or Sufficient Velocity and it's saved to your library and kept up to date as new chapters come out. Royal Road stories tell you about new chapters too, which open in your browser (Royal Road's chapter pages ask for a browser check).
 - **Shelves:** follow any catalogue shelf, such as Project Gutenberg's latest books, Standard Ebooks' new releases or a forum's newest stories, to see what's added.
+- **AO3:** follow authors, tags and collections.
 - **New and updated** works and chapters are marked, and a badge on Following shows how many are unread. Feeds are checked at most every 30 minutes, one at a time.
 
-### Library
+### 📚 Library
 - **Shelves:** Reading, Completed, For later and Favourites.
 - **Find and sort:** search your library by title, author or tag, and sort by recently read, title, date added or author.
 - **Export:** save a book as a web page, Markdown or plain text.
 
-### Accessibility
+### ♿ Accessibility
 - **Easier text:** Atkinson Hyperlegible and OpenDyslexic fonts are built in, with extra space between letters and words.
 - **Reading aids:** a reading ruler, bold word starts and focus mode.
 - **Colour:** a High Contrast theme, page tints and your own colours, each checked for readable contrast.
-- **Interface:** a larger interface size, larger touch targets on Android, and keyboard and screen reader support on Windows.
+- **Interface:** a larger interface size, larger touch targets on Android, and keyboard and screen reader support on Windows (Narrator and NVDA) and Android (TalkBack).
 
-### Themes and settings
+### 🎨 Themes and settings
 - **Nine themes:** Linen, Paper Light, Warm Sepia, Dark Slate, OLED Black, Nord Arctic, Midnight Blue, High Contrast and your own colours. They can follow your system's light or dark mode.
 - **Settings in categories:** Appearance, Text, Reading, Accessibility, Library & files, Sources and About (and Updates and Shortcuts on Windows).
 - **Updates:** the Windows app can check GitHub for new versions.
 
-<p>
-<img src="docs/screenshots/windows/themes.png" width="49%" alt="Themes in Settings">
-<img src="docs/screenshots/windows/reader-dark.png" width="49%" alt="The reader in Dark Slate">
-</p>
+---
 
-### Android
-The Android app has the same reader, highlights, dictionary, catalogues, library and themes, built on the same Rust core.
+## 🪶 Why it's so light
 
-<p>
-<img src="docs/screenshots/android/library.png" width="24%" alt="Library on Android">
-<img src="docs/screenshots/android/reader.png" width="24%" alt="A highlight in the reader on Android">
-<img src="docs/screenshots/android/browse.png" width="24%" alt="Project Gutenberg on Android">
-<img src="docs/screenshots/android/settings.png" width="24%" alt="Settings on Android">
-</p>
+| | Flax Reader |
+| :--- | :--- |
+| **Windows download** | One 15 MB exe in a 6.5 MB zip. No installer. |
+| **Windows memory** | About 10–15 MB while reading. |
+| **Android download** | An 11 MB APK. |
+| **Android memory** | About 21–26 MB with a 121,000-word novel open. |
+| **How** | Win32 with Direct2D drawn on the CPU and DirectWrite text; Android's own views with no AndroidX. One Rust core shared by both. |
 
 ---
 
-## Install
+## 📥 Install
 
-**Windows**
-1. Download `flax-reader-…-windows-x64.zip` from [Releases](https://github.com/AgastyaShenoy/flax-reader/releases).
+<table>
+<tr>
+<td width="50%" valign="top">
+
+**🪟 Windows**
+1. Download `flax-reader-…-windows-x64.zip` from [Releases](https://github.com/AgastyaShenoy/flax-reader/releases/latest).
 2. Extract it and run `FlaxReader.exe`. There's no installer.
 
 Requires 64-bit Windows 10 or 11. The exe isn't code-signed, so SmartScreen may ask you to confirm the first time.
 
-**Android**
-1. Download `flax-reader-…-android.apk` from [Releases](https://github.com/AgastyaShenoy/flax-reader/releases) on your phone.
+</td>
+<td width="50%" valign="top">
+
+**🤖 Android**
+1. Download `flax-reader-…-android.apk` from [Releases](https://github.com/AgastyaShenoy/flax-reader/releases/latest) on your phone.
 2. Open it. If Android asks, allow your browser or file manager to install apps. It installs over AO3 Reader and keeps your library.
 
-Requires Android 8.0 or newer on a 64-bit phone. The app isn't on the Play Store, so Play Protect may ask you to confirm.
+Requires Android 8.0 or newer on a 64-bit phone or tablet. The app isn't on the Play Store, so Play Protect may ask you to confirm.
+
+</td>
+</tr>
+</table>
 
 ---
 
-## Keyboard shortcuts (Windows)
+## ⌨️ Keyboard shortcuts (Windows)
 
 | Keys | Action |
 | :--- | :--- |
@@ -146,7 +254,7 @@ Requires Android 8.0 or newer on a 64-bit phone. The app isn't on the Play Store
 
 ---
 
-## Where your data is kept
+## 💾 Where your data is kept
 
 Everything is plain JSON in one folder: `%APPDATA%\ao3reader\ao3reader\data` on Windows (the folder kept its old name, so updates keep your library), and the app's private storage on Android. To use another folder (for a portable copy, say), set the `AO3READER_DATA_DIR` environment variable.
 
@@ -161,7 +269,7 @@ Saves are crash-safe. Each file is written to a temporary file first and then sw
 
 ---
 
-## How it's built
+## 🛠️ How it's built
 
 - **Shared core (Rust):** EPUB and PDF import, OPDS catalogues, the Wiktionary lookup, the AO3 client, library storage and theme colours. Both apps use it. PDFs are drawn by a pure-Rust engine in `crates/pdf-engine` and `crates/pdf-render`.
 - **Windows:** plain Win32 with Direct2D rendering on the CPU and DirectWrite text. Text boxes are native edit controls.
@@ -181,20 +289,20 @@ The Windows app is `target/release/ao3reader-native.exe` (released as `FlaxReade
 
 ---
 
-## Community
+## 💬 Community
 
 Come and chat on [Discord](https://discord.gg/3xuJY8UXKu). It's a general server, for talking about anything, and you can ask about Flax Reader there too. Found a bug? [Open an issue](https://github.com/AgastyaShenoy/flax-reader/issues).
 
-## Attribution
+## 🙏 Attribution
 
 > **Ideated, prompted and guided by:** [Agastya Shenoy](https://github.com/AgastyaShenoy) (aga2522)
 > **v1 developed majorly by AI:** Google **Gemini 3.8 Flash** via Antigravity
 > **v2 (native Windows rewrite, Android app) and Flax Reader:** developed with **Claude** (Anthropic) in Claude Code
 
-Sample books in the screenshots are public-domain novels from Project Gutenberg. Definitions come from Wiktionary (CC BY-SA). Atkinson Hyperlegible is by the Braille Institute and OpenDyslexic by Abbie Gonzalez, both under the SIL Open Font License.
+Sample books in the screenshots are public-domain novels from Project Gutenberg; the AO3-style details on the Android screenshot are made-up samples for the demo. Definitions come from Wiktionary (CC BY-SA). Atkinson Hyperlegible is by the Braille Institute and OpenDyslexic by Abbie Gonzalez, both under the SIL Open Font License.
 
 Flax Reader is unofficial and isn't affiliated with Archive of Our Own or the Organization for Transformative Works.
 
-## License
+## 📄 License
 
 [MIT](LICENSE). Copyright (c) 2026 Agastya Shenoy.

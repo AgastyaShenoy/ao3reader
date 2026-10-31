@@ -63,9 +63,15 @@ fun Context.icon(res: Int, color: Int, size: Int = 24): ImageView = ImageView(th
 fun Context.iconButton(res: Int, color: Int, tip: String, active: Boolean = false, large: Boolean = false, onClick: () -> Unit): FrameLayout {
     val p = Settings.pal
     return FrameLayout(this).apply {
-        // 42 dp, or the 48 dp Android recommends with larger touch targets; 58 or 64 dp large.
-        val glyph = if (large) 28 else 22
-        val pad = dp(if (large) (if (Settings.big) 18 else 15) else if (Settings.big) 13 else 10)
+        // 42 dp, or the 48 dp Android recommends with larger touch targets. Large is 58 or 64 dp on
+        // tablets, and 46 or 48 dp on phones, where seven in a row still leave room for the title.
+        val wide = resources.configuration.screenWidthDp >= 600
+        val glyph = if (large) (if (wide) 28 else 24) else 22
+        val pad = dp(when {
+            large && wide -> if (Settings.big) 18 else 15
+            large -> if (Settings.big) 12 else 11
+            else -> if (Settings.big) 13 else 10
+        })
         val radius = dpf(glyph / 2f) + pad
         setPadding(pad, pad, pad, pad)
         background = RippleDrawable(ColorStateList.valueOf(alpha(p.text, 0.15f)), if (active) rounded(p.selected, radius) else null, rounded(0xFFFFFFFF.toInt(), radius))

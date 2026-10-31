@@ -107,7 +107,7 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         // Big bars: they're reached for with a thumb while holding the phone or tablet.
         top.addView(a.iconButton(R.drawable.ic_back, p.text, "Back to library", large = true) { a.closeReader() })
         top.addView(a.iconButton(R.drawable.ic_list, p.text, "Contents and bookmarks", large = true) { openContents() })
-        top.addView(a.label(meta.getString("title"), 18f, p.text, bold = true, lines = 1).apply { gravity = Gravity.CENTER_VERTICAL },
+        top.addView(a.label(meta.getString("title"), if (a.resources.configuration.screenWidthDp >= 600) 18f else 16f, p.text, bold = true, lines = 1).apply { gravity = Gravity.CENTER_VERTICAL },
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = a.dp(6) })
         top.addView(a.iconButton(R.drawable.ic_search, p.text, "Search in this work", large = true) { openSearch() })
         top.addView(a.iconButton(R.drawable.ic_bookmark, p.text, "Bookmark this page", large = true) { addBookmark() })

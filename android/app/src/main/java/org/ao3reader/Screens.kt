@@ -614,7 +614,7 @@ private fun aboutPage(a: MainActivity, col: LinearLayout) {
     names.addView(a.label("Free and open source (MIT)", 12.5f, p.muted))
     top.addView(names, LinearLayout.LayoutParams(0, -2, 1f))
     hero.addView(top)
-    hero.addView(a.label("An unofficial Archive of Our Own reader. Search AO3, follow your favourite authors and tags, and save works to read offline, with themes, fonts and reading aids made for long, comfortable reading. It reads your own EPUBs and PDFs too, plus free books from Project Gutenberg and stories from SpaceBattles, Sufficient Velocity and Royal Road.", 14f, p.text).apply { setLineSpacing(0f, 1.15f) }, lp(top = a.dp(12)))
+    hero.addView(a.label("A small, quick e-reader with Archive of Our Own built in. Read your own EPUBs and PDFs, get free books from Project Gutenberg and Standard Ebooks, follow stories on SpaceBattles, Sufficient Velocity and Royal Road, and search, follow and save works from AO3. Themes, fonts and reading aids are made for long, comfortable reading.", 14f, p.text).apply { setLineSpacing(0f, 1.15f) }, lp(top = a.dp(12)))
     val buttons = a.row()
     buttons.addView(a.button("Join the Discord", Kind.Primary, R.drawable.ic_chat) { openUrl(a, DISCORD_INVITE) })
     buttons.addView(a.button("GitHub", Kind.Secondary, R.drawable.ic_code) { openUrl(a, GITHUB) }, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = a.dp(8) })
