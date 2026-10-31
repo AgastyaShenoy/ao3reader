@@ -16,7 +16,7 @@ fn one() -> f32 {
 }
 
 fn default_light() -> ReaderThemeType {
-    ReaderThemeType::PaperLight
+    ReaderThemeType::Linen
 }
 
 fn default_dark() -> ReaderThemeType {
@@ -84,7 +84,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            theme: ReaderThemeType::Dark,
+            theme: ReaderThemeType::Linen,
             typography: TypographySettings::default(),
             session: UserSession::default(),
             words_per_minute: 230,
@@ -97,7 +97,8 @@ impl Default for AppConfig {
             check_updates_on_startup: true,
             animations: true,
             ui_scale: 1.0,
-            follow_system: false,
+            // New installs match the system (settings saved before this keep their own theme).
+            follow_system: true,
             light_theme: default_light(),
             dark_theme: default_dark(),
             custom_bg: default_custom_bg(),

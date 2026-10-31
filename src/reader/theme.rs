@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ReaderThemeType {
+    /// Warm linen paper: the default light theme.
     #[default]
+    Linen,
     Dark,
     OledBlack,
     PaperLight,
@@ -17,10 +19,11 @@ pub enum ReaderThemeType {
 impl ReaderThemeType {
     pub fn all() -> &'static [ReaderThemeType] {
         &[
-            ReaderThemeType::Dark,
-            ReaderThemeType::OledBlack,
+            ReaderThemeType::Linen,
             ReaderThemeType::PaperLight,
             ReaderThemeType::WarmSepia,
+            ReaderThemeType::Dark,
+            ReaderThemeType::OledBlack,
             ReaderThemeType::Nord,
             ReaderThemeType::Midnight,
             ReaderThemeType::HighContrast,
@@ -30,6 +33,7 @@ impl ReaderThemeType {
 
     pub fn display_name(&self) -> &'static str {
         match self {
+            ReaderThemeType::Linen => "Linen",
             ReaderThemeType::Dark => "Dark Slate",
             ReaderThemeType::OledBlack => "OLED Black",
             ReaderThemeType::PaperLight => "Paper Light",
@@ -43,14 +47,27 @@ impl ReaderThemeType {
 
     pub fn palette(&self) -> ThemePalette {
         match self {
+            ReaderThemeType::Linen => ThemePalette {
+                bg: Rgb(250, 246, 238),
+                surface: Rgb(243, 237, 226),
+                card: Rgb(255, 252, 246),
+                text: Rgb(43, 40, 36),
+                text_muted: Rgb(102, 95, 86),
+                accent: Rgb(62, 94, 168), // Flax blue
+                accent_hover: Rgb(52, 82, 152),
+                border: Rgb(226, 218, 203),
+                quote_bg: Rgb(244, 239, 229),
+                notes_bg: Rgb(241, 235, 223),
+                is_dark: false,
+            },
             ReaderThemeType::Dark => ThemePalette {
                 bg: Rgb(24, 25, 28),
                 surface: Rgb(34, 36, 42),
                 card: Rgb(42, 45, 52),
                 text: Rgb(226, 232, 240),
                 text_muted: Rgb(148, 163, 184),
-                accent: Rgb(153, 34, 34), // AO3 Crimson
-                accent_hover: Rgb(180, 45, 45),
+                accent: Rgb(74, 104, 176), // Flax blue
+                accent_hover: Rgb(92, 122, 194),
                 border: Rgb(51, 56, 66),
                 quote_bg: Rgb(30, 32, 38),
                 notes_bg: Rgb(29, 31, 37),
@@ -62,8 +79,8 @@ impl ReaderThemeType {
                 card: Rgb(24, 24, 24),
                 text: Rgb(241, 245, 249),
                 text_muted: Rgb(130, 130, 130),
-                accent: Rgb(175, 40, 40),
-                accent_hover: Rgb(205, 50, 50),
+                accent: Rgb(78, 108, 182),
+                accent_hover: Rgb(98, 128, 202),
                 border: Rgb(38, 38, 38),
                 quote_bg: Rgb(12, 12, 12),
                 notes_bg: Rgb(14, 14, 14),
@@ -75,8 +92,8 @@ impl ReaderThemeType {
                 card: Rgb(255, 255, 255),
                 text: Rgb(33, 37, 41),
                 text_muted: Rgb(98, 106, 114),
-                accent: Rgb(153, 0, 0), // AO3 Crimson
-                accent_hover: Rgb(180, 20, 20),
+                accent: Rgb(62, 94, 168), // Flax blue
+                accent_hover: Rgb(52, 82, 152),
                 border: Rgb(222, 226, 230),
                 quote_bg: Rgb(243, 244, 247),
                 notes_bg: Rgb(238, 242, 246),
@@ -88,8 +105,8 @@ impl ReaderThemeType {
                 card: Rgb(247, 236, 211),
                 text: Rgb(74, 59, 50),
                 text_muted: Rgb(112, 95, 83),
-                accent: Rgb(160, 64, 48),
-                accent_hover: Rgb(180, 80, 60),
+                accent: Rgb(62, 94, 168),
+                accent_hover: Rgb(52, 82, 152),
                 border: Rgb(222, 207, 178),
                 quote_bg: Rgb(243, 231, 204),
                 notes_bg: Rgb(239, 225, 196),
@@ -101,8 +118,8 @@ impl ReaderThemeType {
                 card: Rgb(67, 76, 94),
                 text: Rgb(236, 239, 244),
                 text_muted: Rgb(184, 192, 208),
-                accent: Rgb(176, 82, 92), // Nord Red, deepened for white text
-                accent_hover: Rgb(191, 97, 106),
+                accent: Rgb(76, 106, 150), // Nord frost, deepened for white text
+                accent_hover: Rgb(94, 129, 172),
                 border: Rgb(76, 86, 106),
                 quote_bg: Rgb(51, 58, 72),
                 notes_bg: Rgb(54, 61, 76),
@@ -114,8 +131,8 @@ impl ReaderThemeType {
                 card: Rgb(40, 53, 76),
                 text: Rgb(241, 245, 249),
                 text_muted: Rgb(148, 163, 184),
-                accent: Rgb(225, 29, 72),
-                accent_hover: Rgb(244, 63, 94),
+                accent: Rgb(86, 112, 196),
+                accent_hover: Rgb(106, 132, 214),
                 border: Rgb(51, 65, 85),
                 quote_bg: Rgb(22, 33, 56),
                 notes_bg: Rgb(24, 36, 61),
@@ -202,7 +219,7 @@ impl ThemePalette {
         let text = text.readable_on(bg, Self::custom_toward(bg));
         let is_dark = bg.luminance() < text.luminance();
         let card = bg.mix(text, 0.07);
-        let accent = if is_dark { Rgb(176, 48, 48) } else { Rgb(153, 0, 0) };
+        let accent = if is_dark { Rgb(78, 108, 182) } else { Rgb(62, 94, 168) };
         ThemePalette {
             bg,
             surface: bg.mix(text, 0.04),
@@ -227,7 +244,7 @@ impl ThemePalette {
         }
     }
 
-    /// The accent as a text colour: the crimson itself on light themes, a softened tone of it
+    /// The accent as a text colour: the flax blue itself on light themes, a lighter tone of it
     /// on dark ones, where the raw accent is too dark to read.
     pub fn accent_text(&self) -> Rgb {
         self.accent.readable_on(self.card, self.text)
@@ -236,7 +253,7 @@ impl ThemePalette {
     /// The accent for marks that aren't text (the logo, progress bars, the current tab): kept
     /// saturated, and lightened on dark themes just enough to stand out (3:1).
     pub fn accent_mark(&self) -> Rgb {
-        self.accent.with_contrast(self.card, Rgb(255, 118, 118), 3.0)
+        self.accent.with_contrast(self.card, Rgb(150, 182, 245), 3.0)
     }
 
     /// Text on an accent fill: white, or black on a light accent (High Contrast's yellow).

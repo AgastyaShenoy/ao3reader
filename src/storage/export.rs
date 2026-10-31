@@ -190,7 +190,7 @@ body {
     .meta-box, .notes-box { background: #22242a !important; border-color: #333842 !important; }
     hr { border-color: #333842; }
 }
-h1 { font-size: 2.2em; margin-bottom: 0.2em; color: #990000; }
+h1 { font-size: 2.2em; margin-bottom: 0.2em; color: #3e5ea8; }
 h2 { font-size: 1.6em; border-bottom: 2px solid #eee; padding-bottom: 0.3em; margin-top: 2em; }
 .meta-box { background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 20px; margin-bottom: 30px; font-size: 0.95em; }
 .meta-row { margin-bottom: 8px; }

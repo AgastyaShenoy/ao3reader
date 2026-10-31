@@ -825,10 +825,9 @@ impl Gfx {
                 let rr = D2D1_ROUNDED_RECT { rect: Rect::new(0.0, 0.0, n, n).d2d(), radiusX: n * 0.22, radiusY: n * 0.22 };
                 rt.FillRoundedRectangle(&rr, &brush);
                 brush.SetColor(&mark.d2d());
-                // The arms reach the top corners: keep a margin so they stay on the tile (less at
-                // title-bar sizes, where every pixel of the mark counts).
-                let pad = n * if px <= 24 { 0.08 } else { 0.14 };
-                fill_scaled(&rt, &geo, &brush, size, Rect::new(pad, pad * 1.1, n - 2.0 * pad, n - 2.0 * pad));
+                // A margin around the mark (less at title-bar sizes, where every pixel counts).
+                let pad = n * if px <= 24 { 0.08 } else { 0.13 };
+                fill_scaled(&rt, &geo, &brush, size, Rect::new(pad, pad, n - 2.0 * pad, n - 2.0 * pad));
                 rt.EndDraw(None, None).is_ok()
             };
             SelectObject(dc, old);

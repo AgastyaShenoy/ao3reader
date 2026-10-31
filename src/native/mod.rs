@@ -14,7 +14,7 @@ mod fonts;
 mod gfx;
 mod icons;
 mod library;
-mod logo;
+mod mark;
 mod reader;
 mod settings;
 mod speech;
@@ -545,14 +545,14 @@ fn set_fullscreen(hwnd: HWND, on: bool) {
     }
 }
 
-/// Title bar and taskbar icons: the AO3 mark in white on an AO3-red tile, drawn at the sizes
+/// Title bar and taskbar icons: the flax flower in white on a flax-blue tile, drawn at the sizes
 /// Windows asks for at this DPI (the exe itself carries no icon resource).
 unsafe fn set_window_icons(hwnd: HWND, gfx: &mut Gfx, dpi: u32) {
-    let tile = gfx::Color::from_u8(153, 0, 0);
-    let mark = gfx::Color::from_u8(255, 255, 255);
+    let tile = gfx::Color::from_u8(79, 111, 184);
+    let flower = gfx::Color::from_u8(255, 255, 255);
     for (which, metric) in [(ICON_SMALL, SM_CXSMICON), (ICON_BIG, SM_CXICON)] {
         let px = GetSystemMetricsForDpi(metric, dpi).max(16);
-        if let Some(icon) = gfx.icon(logo::PATH, logo::SIZE, px, tile, mark) {
+        if let Some(icon) = gfx.icon(mark::PATH, mark::SIZE, px, tile, flower) {
             SendMessageW(hwnd, WM_SETICON, Some(WPARAM(which as usize)), Some(LPARAM(icon.0 as isize)));
         }
     }

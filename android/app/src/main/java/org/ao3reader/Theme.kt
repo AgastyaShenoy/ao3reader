@@ -50,7 +50,7 @@ object Settings {
     val themeId: String get() = when {
         !config.optBoolean("follow_system") -> config.optString("theme")
         night -> config.optString("dark_theme", "Dark")
-        else -> config.optString("light_theme", "PaperLight")
+        else -> config.optString("light_theme", "Linen")
     }
     val pal: Pal get() = themes.firstOrNull { it.id == themeId } ?: themes[0]
     /** Bigger buttons with more room between them (48 dp touch targets). */

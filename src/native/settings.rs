@@ -854,12 +854,12 @@ impl SettingsScreen {
     fn about_tab(&mut self, ui: &mut Ui, col: &mut Col, out: &mut Vec<SettingsAction>) {
         let c = ui.c;
         col.gap(14.0);
-        let blurb = "A lightweight, unofficial reader for Archive of Our Own. Find works and save them to read offline, turn pages like a book or scroll, choose your own fonts and themes, and follow the authors and tags you love. It's small and quick, and your library stays on this PC.\n\nNot affiliated with the Organization for Transformative Works. The AO3 logo is their trademark.";
+        let blurb = "A lightweight, unofficial reader for Archive of Our Own. Find works and save them to read offline, turn pages like a book or scroll, choose your own fonts and themes, and follow the authors and tags you love. It's small and quick, and your library stays on this PC.\n\nNot affiliated with the Organization for Transformative Works.";
         let t = ui.measure(blurb, &TextStyle::ui(13.5), TextOpts::wrap(col.w - 32.0).line_height(1.45));
         let card = col.take(t.h + 96.0);
         col.gap(4.0);
         ui.card(card);
-        ui.g.fill_path(super::logo::PATH, super::logo::SIZE, Rect::new(card.x + 16.0, card.y + 16.0, 48.0, 34.0), c.accent_mark);
+        ui.g.fill_path(super::mark::PATH, super::mark::SIZE, Rect::new(card.x + 18.0, card.y + 16.0, 40.0, 40.0), c.accent_mark);
         ui.text("AO3 Reader", &TextStyle::ui(18.0).semibold(), card.x + 74.0, card.y + 16.0, c.text);
         ui.text(&format!("Version {CURRENT_VERSION}"), &TextStyle::ui(SMALL), card.x + 74.0, card.y + 40.0, c.muted);
         ui.g.draw_text(t, card.x + 16.0, card.y + 70.0, c.text);

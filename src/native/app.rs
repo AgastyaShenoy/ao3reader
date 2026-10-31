@@ -4,7 +4,7 @@ use super::gfx::*;
 use super::account::{AccountAction, AccountScreen};
 use super::browse::{BrowseAction, FollowingScreen, SearchScreen, Target};
 use super::icons;
-use super::logo;
+use super::mark;
 use super::library::{ExportFormat, LibraryAction, LibraryScreen};
 use super::reader::{ReaderAction, ReaderScreen};
 use super::settings::{SettingsAction, SettingsCtx, SettingsScreen};
@@ -594,9 +594,9 @@ impl App {
         ui.g.fill_rect(r, c.surface);
         ui.separator(r.x, r.bottom() - 1.0, r.w);
 
-        // The Archive's own mark, lightened on dark themes so it stays visible.
-        ui.g.fill_path(logo::PATH, logo::SIZE, Rect::new(18.0, 13.0, 44.0, 30.0), c.accent_mark);
-        ui.text_in("Reader", &TextStyle::ui(16.0).semibold(), Rect::new(70.0, r.y, 70.0, r.h), Align::Left, c.text);
+        // The flax flower, lightened on dark themes so it stays visible.
+        ui.g.fill_path(mark::PATH, mark::SIZE, Rect::new(20.0, r.y + (r.h - 30.0) / 2.0, 30.0, 30.0), c.accent_mark);
+        ui.text_in("Reader", &TextStyle::ui(16.0).semibold(), Rect::new(60.0, r.y, 70.0, r.h), Align::Left, c.text);
 
         let account_label = if signed_in(&self.config.session) { self.config.session.username.clone().unwrap_or_else(|| "Account".into()) } else { "Guest".into() };
         let mut items = vec![

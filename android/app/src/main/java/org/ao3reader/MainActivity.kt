@@ -352,12 +352,12 @@ class MainActivity : Activity() {
         val p = Settings.pal
         val box = row().apply { setPadding(dp(20), dp(18), dp(20), dp(10)) }
         if (logo) {
-            // The Archive's mark on the home screen, top left, as on the desktop app.
+            // The flax flower on the home screen, top left, as on the desktop app.
             box.addView(ImageView(this).apply {
-                setImageResource(R.drawable.ao3_logo)
+                setImageResource(R.drawable.ic_flax)
                 imageTintList = android.content.res.ColorStateList.valueOf(p.accentMark)
-                contentDescription = "AO3"
-            }, LinearLayout.LayoutParams(dp(40), dp(28)).apply { rightMargin = dp(12) })
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }, LinearLayout.LayoutParams(dp(30), dp(30)).apply { rightMargin = dp(12) })
         }
         box.addView(label(title, 26f, p.text, bold = true))
         if (sub != null) box.addView(label(sub, 13f, p.muted).apply { setPadding(dp(10), dp(8), 0, 0) })
