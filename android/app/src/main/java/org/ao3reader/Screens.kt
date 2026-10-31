@@ -194,11 +194,12 @@ private fun settingRow(a: MainActivity, title: String, sub: String?, control: Vi
     return r
 }
 
-private fun toggle(a: MainActivity, parent: LinearLayout, title: String, sub: String?, key: String, inTypo: Boolean = true) {
+private fun toggle(a: MainActivity, parent: LinearLayout, title: String, sub: String?, key: String, inTypo: Boolean = true, then: (() -> Unit)? = null) {
     val obj = if (inTypo) Settings.typo else Settings.config
     val sw = Switch(a).apply {
         isChecked = obj.optBoolean(key)
-        setOnCheckedChangeListener { _, v -> obj.put(key, v); Settings.save() }
+        contentDescription = title
+        setOnCheckedChangeListener { _, v -> obj.put(key, v); Settings.save(); then?.invoke() }
         val p = Settings.pal
         thumbTintList = android.content.res.ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()), intArrayOf(p.onAccent, p.muted))
         trackTintList = android.content.res.ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()), intArrayOf(p.accent, p.border))
@@ -206,7 +207,7 @@ private fun toggle(a: MainActivity, parent: LinearLayout, title: String, sub: St
     parent.addView(settingRow(a, title, sub, sw), lp(bottom = a.dp(6)))
 }
 
-private fun slider(a: MainActivity, parent: LinearLayout, title: String, key: String, min: Float, max: Float, step: Float, inTypo: Boolean = true, fmt: (Float) -> String) {
+private fun slider(a: MainActivity, parent: LinearLayout, title: String, key: String, min: Float, max: Float, step: Float, inTypo: Boolean = true, whole: Boolean = !inTypo, fmt: (Float) -> String) {
     val p = Settings.pal
     val t = if (inTypo) Settings.typo else Settings.config
     val box = a.column().apply {
@@ -221,13 +222,14 @@ private fun slider(a: MainActivity, parent: LinearLayout, title: String, key: St
     val steps = ((max - min) / step).toInt()
     box.addView(SeekBar(a).apply {
         this.max = steps
-        progress = ((t.optDouble(key).toFloat() - min) / step).toInt().coerceIn(0, steps)
+        contentDescription = title
+        progress = Math.round((t.optDouble(key, min.toDouble()).toFloat() - min) / step).coerceIn(0, steps)
         progressTintList = android.content.res.ColorStateList.valueOf(p.accentMark)
         thumbTintList = android.content.res.ColorStateList.valueOf(p.accentMark)
         setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(s: SeekBar?, v: Int, user: Boolean) {
                 val f = min + v * step
-                if (inTypo) t.put(key, f.toDouble()) else t.put(key, f.toInt())
+                if (whole) t.put(key, f.toInt()) else t.put(key, f.toDouble())
                 value.text = fmt(f)
             }
             override fun onStartTrackingTouch(s: SeekBar?) {}
@@ -235,6 +237,52 @@ private fun slider(a: MainActivity, parent: LinearLayout, title: String, key: St
         })
     }, lp(top = a.dp(4)))
     parent.addView(box, lp(bottom = a.dp(6)))
+}
+
+/** Picks a "Your colours" colour with red, green and blue sliders, then makes it the theme. */
+private fun pickColour(a: MainActivity, title: String, key: String) {
+    val p = Settings.pal
+    var c = Settings.config.optInt(key) and 0xFFFFFF
+    val box = a.column().apply { setPadding(a.dp(20), a.dp(8), a.dp(20), 0) }
+    val swatch = View(a)
+    val hex = a.label("", 14f, p.text)
+    fun show() {
+        swatch.background = rounded(Pal.opaque(c), a.dpf(10), p.border, a.dp(1))
+        hex.text = "#%06X".format(c)
+    }
+    box.addView(swatch, lp(h = a.dp(56), bottom = a.dp(8)))
+    box.addView(hex, lp(bottom = a.dp(6)))
+    for ((name, shift) in listOf("Red" to 16, "Green" to 8, "Blue" to 0)) {
+        box.addView(a.label(name, 12.5f, p.muted))
+        box.addView(SeekBar(a).apply {
+            max = 255
+            progress = (c shr shift) and 0xFF
+            contentDescription = name
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, v: Int, u: Boolean) {
+                    c = (c and (0xFF shl shift).inv()) or (v shl shift)
+                    show()
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        }, lp(bottom = a.dp(6)))
+    }
+    show()
+    android.app.AlertDialog.Builder(a).setTitle(title).setView(box)
+        .setPositiveButton("Use") { _, _ ->
+            Settings.config.put(key, c)
+            Settings.save()
+            Settings.reloadThemes()
+            // "Your colours" becomes the theme (with Match system, for the mode it suits).
+            val custom = Settings.themes.firstOrNull { it.id == "Custom" }
+            if (Settings.config.optBoolean("follow_system") && custom != null) Settings.config.put(if (custom.dark) "dark_theme" else "light_theme", "Custom")
+            else Settings.config.put("theme", "Custom")
+            Settings.save()
+            a.rebuild()
+        }
+        .setNegativeButton("Cancel", null)
+        .show()
 }
 
 fun settingsScreen(a: MainActivity): View {
@@ -249,28 +297,54 @@ fun settingsScreen(a: MainActivity): View {
         col.addView(settingRow(a, "AO3 account", who, a.button(if (session.getBoolean("signed_in")) "Manage" else "Sign in") { a.show(MainActivity.ACCOUNT) }), lp(bottom = a.dp(6)))
 
         section(a, col, "Theme")
+        val follow = Settings.config.optBoolean("follow_system")
+        toggle(a, col, "Match system", if (follow) "Pick a light theme and a dark theme; the phone's dark mode chooses between them." else "Switch between a light and a dark theme with the phone's dark mode.", "follow_system", inTypo = false) {
+            // Start from the theme in use for whichever mode it suits.
+            if (Settings.config.optBoolean("follow_system")) {
+                val cur = Settings.themes.firstOrNull { it.id == Settings.config.optString("theme") }
+                if (cur != null) Settings.config.put(if (cur.dark) "dark_theme" else "light_theme", cur.id)
+                Settings.save()
+            }
+            a.rebuild()
+        }
         val themes = a.column()
         Settings.themes.chunked(2).forEach { pair ->
             val r = a.row()
             pair.forEach { th ->
-                val sel = th.id == Settings.pal.id
+                // Following the system, each card can be the light or the dark theme.
+                val slot = if (th.dark) "dark_theme" else "light_theme"
+                val sel = if (follow) Settings.config.optString(slot) == th.id else th.id == Settings.pal.id
                 val c = a.column().apply {
                     background = rounded(th.bg, a.dpf(12), if (sel) p.text else p.border, a.dp(if (sel) 2 else 1))
                     setPadding(a.dp(14), a.dp(12), a.dp(14), a.dp(12))
+                    contentDescription = th.name + if (sel) ", chosen" else ""
                     setOnClickListener {
-                        Settings.config.put("theme", th.id)
+                        Settings.config.put(if (follow) slot else "theme", th.id)
                         Settings.save()
                         a.rebuild()
                     }
                 }
                 c.addView(a.label(th.name, 15f, th.text, bold = true))
-                c.addView(a.label("The quick brown fox", 12.5f, th.muted, lines = 1))
+                c.addView(a.label(if (follow && sel) (if (th.dark) "Dark mode" else "Light mode") else "The quick brown fox", 12.5f, th.muted, lines = 1))
                 c.addView(View(a).apply { background = rounded(th.accent, a.dpf(3)) }, LinearLayout.LayoutParams(a.dp(40), a.dp(6)).apply { topMargin = a.dp(10) })
                 r.addView(c, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = a.dp(6); leftMargin = a.dp(6) })
             }
             themes.addView(r, lp(bottom = a.dp(10)))
         }
         col.addView(themes)
+        for ((key, title) in listOf("custom_bg" to "Page colour", "custom_text" to "Text colour")) {
+            val v = Settings.config.optInt(key)
+            val sw = View(a).apply { background = rounded(Pal.opaque(v), a.dpf(8), p.border, a.dp(1)) }
+            val ctl = a.row()
+            ctl.addView(sw, LinearLayout.LayoutParams(a.dp(30), a.dp(30)).apply { rightMargin = a.dp(10) })
+            ctl.addView(a.button("Choose…") { pickColour(a, title, key) })
+            col.addView(settingRow(a, "Your colours: $title", "#%06X".format(v and 0xFFFFFF), ctl), lp(bottom = a.dp(6)))
+        }
+        val ratio = contrast(Settings.config.optInt("custom_bg"), Settings.config.optInt("custom_text"))
+        col.addView(a.label(
+            if (ratio >= 4.5) "Contrast %.1f:1, easy to read.".format(ratio) else "Contrast %.1f:1 is too low to read, so the text is adjusted until it reaches 4.5:1.".format(ratio),
+            12.5f, if (ratio >= 4.5) p.muted else p.warningText,
+        ).apply { setPadding(a.dp(4), 0, a.dp(4), 0) }, lp(bottom = a.dp(6)))
 
         section(a, col, "Reading")
         val pagedNow = t.optString("reading_mode") != "Scroll"
@@ -316,6 +390,60 @@ fun settingsScreen(a: MainActivity): View {
             t.put("text_alignment", if (i == 1) "Justified" else "Left"); Settings.save(); a.rebuild()
         }.apply { layoutParams = LinearLayout.LayoutParams(a.dp(190), -2) }), lp(bottom = a.dp(6)))
         toggle(a, col, "Indent first line of paragraphs", null, "indent_paragraphs")
+
+        section(a, col, "Accessibility")
+        val easy = listOf("SansSerif" to "Default", "Atkinson" to "Atkinson", "OpenDyslexic" to "OpenDyslexic")
+        val easyBox = a.column().apply {
+            background = rounded(p.card, a.dpf(10), p.border, a.dp(1))
+            setPadding(a.dp(16), a.dp(12), a.dp(12), a.dp(12))
+        }
+        easyBox.addView(a.label("Easy-to-read font", 15f, p.text))
+        easyBox.addView(a.label("Atkinson Hyperlegible keeps similar letters distinct; OpenDyslexic weights the bottom of each letter.", 12.5f, p.muted))
+        easyBox.addView(a.segmented(easy.map { it.second }, easy.indexOfFirst { it.first == t.opt("font_family") }) { i ->
+            t.put("font_family", easy[i].first); Settings.save(); a.rebuild()
+        }, lp(top = a.dp(10)))
+        col.addView(easyBox, lp(bottom = a.dp(6)))
+        toggle(a, col, "Reading ruler", "Highlights one line and dims the rest. Drag up or down on the page to move it.", "reading_ruler")
+        toggle(a, col, "Bold word starts", "Bolds the first letters of each word, to lead the eye along the line.", "bold_word_starts")
+        toggle(a, col, "Focus mode", "Hides the running heads and page numbers: just the text.", "focus_mode")
+        val pct = { v: Float -> if (v < 0.005f) "Normal" else "+${Math.round(v * 100)}%" }
+        slider(a, col, "Space between letters", "letter_spacing", 0f, 0.3f, 0.01f, fmt = pct)
+        slider(a, col, "Space between words", "word_spacing", 0f, 1f, 0.05f, fmt = pct)
+
+        // Page tint: a coloured overlay.
+        val tintBox = a.column().apply {
+            background = rounded(p.card, a.dpf(10), p.border, a.dp(1))
+            setPadding(a.dp(16), a.dp(12), a.dp(12), a.dp(12))
+        }
+        tintBox.addView(a.label("Page tint", 15f, p.text))
+        tintBox.addView(a.label("A soft colour over the page, like a coloured overlay.", 12.5f, p.muted))
+        val tints = listOf(0xFFE680 to "Yellow", 0xFFB37A to "Peach", 0xF59AB4 to "Rose", 0x7FB2F0 to "Blue", 0x8ED39A to "Green", 0x9A9A9A to "Grey")
+        val current = if (t.isNull("tint") || !t.has("tint")) null else t.optInt("tint")
+        val swatches = a.row()
+        swatches.addView(a.button("None", if (current == null) Kind.Secondary else Kind.Ghost) { t.put("tint", org.json.JSONObject.NULL); Settings.save(); a.rebuild() })
+        for ((rgb, name) in tints) {
+            swatches.addView(View(a).apply {
+                background = rounded(Pal.opaque(rgb), a.dpf(17), if (current == rgb) p.text else 0, a.dp(if (current == rgb) 3 else 0))
+                contentDescription = "$name tint" + if (current == rgb) ", chosen" else ""
+                setOnClickListener { t.put("tint", rgb); Settings.save(); a.rebuild() }
+            }, LinearLayout.LayoutParams(a.dp(34), a.dp(34)).apply { leftMargin = a.dp(8) })
+        }
+        tintBox.addView(a.pillScroller(swatches), lp(top = a.dp(10)))
+        col.addView(tintBox, lp(bottom = a.dp(6)))
+        if (current != null) slider(a, col, "Tint strength", "tint_strength", 0.05f, 0.5f, 0.01f) { "${Math.round(it * 100)}%" }
+
+        toggle(a, col, "Larger touch targets", "Bigger buttons with more room between them.", "larger_targets", inTypo = false) { a.rebuild() }
+        val scales = listOf(0.9f, 1f, 1.1f, 1.25f, 1.5f)
+        val curScale = scales.indexOfFirst { Math.abs(it - Settings.config.optDouble("ui_scale", 1.0).toFloat()) < 0.01f }.let { if (it < 0) 1 else it }
+        val scaleBox = a.column().apply {
+            background = rounded(p.card, a.dpf(10), p.border, a.dp(1))
+            setPadding(a.dp(16), a.dp(12), a.dp(12), a.dp(12))
+        }
+        scaleBox.addView(a.label("Interface size", 15f, p.text))
+        scaleBox.addView(a.label("Menus, buttons and labels, on top of the phone's own size settings. Text in books has its own size.", 12.5f, p.muted))
+        scaleBox.addView(a.segmented(listOf("90%", "100%", "110%", "125%", "150%"), curScale) { i -> a.setUiScale(scales[i]) }, lp(top = a.dp(10)))
+        col.addView(scaleBox, lp(bottom = a.dp(6)))
+        slider(a, col, "Read-aloud speed", "speech_rate", 0.5f, 2f, 0.05f, inTypo = false, whole = false) { "%.2f×".format(it) }
 
         // The app's own interface font; most people never change it.
         section(a, col, "Advanced")

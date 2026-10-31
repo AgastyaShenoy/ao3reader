@@ -51,16 +51,20 @@ fun Context.icon(res: Int, color: Int, size: Int = 24): ImageView = ImageView(th
     layoutParams = LinearLayout.LayoutParams(dp(size), dp(size))
 }
 
-/** Round icon button with a ripple. */
-fun Context.iconButton(res: Int, color: Int, active: Boolean = false, onClick: () -> Unit): FrameLayout {
+/** Round icon button with a ripple. `tip` names it: shown on long-press (or mouse hover) and read
+ *  by screen readers. */
+fun Context.iconButton(res: Int, color: Int, tip: String, active: Boolean = false, onClick: () -> Unit): FrameLayout {
     val p = Settings.pal
     return FrameLayout(this).apply {
-        val pad = dp(10)
+        // 42 dp, or the 48 dp Android recommends with larger touch targets.
+        val pad = dp(if (Settings.big) 13 else 10)
         setPadding(pad, pad, pad, pad)
         background = RippleDrawable(ColorStateList.valueOf(alpha(p.text, 0.15f)), if (active) rounded(p.selected, dpf(22)) else null, rounded(0xFFFFFFFF.toInt(), dpf(22)))
         addView(icon(res, color, 22).apply { layoutParams = FrameLayout.LayoutParams(dp(22), dp(22)) })
         isClickable = true
         setOnClickListener { onClick() }
+        tooltipText = tip
+        contentDescription = tip
     }
 }
 
@@ -83,7 +87,9 @@ fun Context.button(text: String, kind: Kind = Kind.Secondary, iconRes: Int = 0, 
         setTextColor(fg)
         gravity = Gravity.CENTER
         typeface = Settings.face(kind == Kind.Primary || kind == Kind.Tonal)
-        setPadding(dp(if (iconRes != 0) 12 else 16), dp(9), dp(16), dp(9))
+        val padY = dp(if (Settings.big) 13 else 9)
+        setPadding(dp(if (iconRes != 0) 12 else 16), padY, dp(16), padY)
+        if (Settings.big) minHeight = dp(48)
         if (iconRes != 0) {
             val d = getDrawable(iconRes)!!.mutate()
             d.setTint(fg)
@@ -171,7 +177,8 @@ fun Context.countChip(text: String, n: Int, selected: Boolean, new: Boolean = fa
     val p = Settings.pal
     return row().apply {
         background = if (selected) rounded(p.selected, dpf(16)) else rounded(0, dpf(16), p.border, dp(1))
-        setPadding(dp(14), dp(7), dp(if (n > 0) 10 else 14), dp(7))
+        val padY = dp(if (Settings.big) 12 else 7)
+        setPadding(dp(14), padY, dp(if (n > 0) 10 else 14), padY)
         addView(label(text, 13.5f, p.text, bold = selected, lines = 1))
         if (n > 0) addView(countBadge(n, new, strong = selected), lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(6) })
         setOnClickListener { onClick() }
@@ -184,7 +191,8 @@ fun Context.toolButton(text: String, iconRes: Int, active: Boolean, onClick: (Vi
     return label(text, 13f, p.text, bold = active, lines = 1).apply {
         gravity = Gravity.CENTER
         background = if (active) rounded(p.selected, dpf(18)) else rounded(0, dpf(18), p.border, dp(1))
-        setPadding(dp(10), dp(8), dp(10), dp(8))
+        val padY = dp(if (Settings.big) 13 else 8)
+        setPadding(dp(10), padY, dp(10), padY)
         val d = getDrawable(iconRes)!!.mutate()
         d.setTint(p.text)
         d.setBounds(0, 0, dp(16), dp(16))
@@ -249,7 +257,8 @@ fun Context.segmented(options: List<String>, selected: Int, counts: List<Int> = 
             addView(countBadge(n, newCounts, sel), lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(6) })
         }
         seg.minimumWidth = minW
-        seg.setPadding(dp(8), dp(7), dp(8), dp(7))
+        val padY = dp(if (Settings.big) 12 else 7)
+        seg.setPadding(dp(8), padY, dp(8), padY)
         if (sel) seg.background = rounded(p.selected, dpf(6))
         seg.setOnClickListener { if (!sel) onPick(i) }
         box.addView(seg, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))

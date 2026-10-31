@@ -54,7 +54,12 @@ const PEOPLE: &str = "\u{E716}";
 /// Rating, categories, warnings (other than "none"), up to `rels` relationships and the
 /// complete/in-progress status: the pills on a work card.
 pub fn card_pills(m: &WorkMeta, rels: usize) -> Vec<Pill> {
-    let mut out = vec![Pill::Marker(m.rating.display_name().to_string(), rating_color(m))];
+    // Books from files have no AO3 rating or completion status: show only their real tags.
+    let ao3 = m.is_ao3();
+    let mut out = Vec::new();
+    if ao3 {
+        out.push(Pill::Marker(m.rating.display_name().to_string(), rating_color(m)));
+    }
     for cat in &m.categories {
         out.push(Pill::Marker(cat.display_name().to_string(), category_color(cat)));
     }
@@ -62,7 +67,9 @@ pub fn card_pills(m: &WorkMeta, rels: usize) -> Vec<Pill> {
         out.push(Pill::Marker(wn.clone(), WARNING_RED));
     }
     out.extend(m.relationships.iter().take(rels).map(|r| Pill::Ship(r.clone())));
-    out.push(Pill::Status(if m.is_complete { "Complete" } else { "In progress" }.to_string()));
+    if ao3 {
+        out.push(Pill::Status(if m.is_complete { "Complete" } else { "In progress" }.to_string()));
+    }
     out
 }
 
@@ -127,7 +134,10 @@ pub fn draw(ui: &mut Ui, m: &WorkMeta, x: f32, y: f32, w: f32, page_h: Option<f3
     ui.g.draw_text(t, x, cy, c.muted);
     cy += t.h + 16.0;
 
-    let mut badges = vec![Pill::Marker(m.rating.display_name().to_string(), rating_color(m))];
+    let mut badges = Vec::new();
+    if m.is_ao3() {
+        badges.push(Pill::Marker(m.rating.display_name().to_string(), rating_color(m)));
+    }
     for cat in &m.categories {
         badges.push(Pill::Marker(cat.display_name().to_string(), category_color(cat)));
     }
@@ -135,7 +145,7 @@ pub fn draw(ui: &mut Ui, m: &WorkMeta, x: f32, y: f32, w: f32, page_h: Option<f3
         let col = if wn.contains("No Archive Warnings") { Color::from_u8(34, 160, 84) } else { WARNING_RED };
         badges.push(Pill::Marker(wn.clone(), col));
     }
-    if m.is_complete {
+    if m.is_complete && m.is_ao3() {
         badges.push(Pill::Status("Complete".into()));
     }
     cy += pills(ui, x, cy, w, &badges) + 14.0;

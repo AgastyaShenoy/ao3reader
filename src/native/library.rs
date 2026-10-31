@@ -170,7 +170,8 @@ fn card(ui: &mut Ui, r: Rect, e: &LibraryEntry, confirming: bool, out: &mut Vec<
     // Title row with favourite toggle.
     let heart = Rect::new(r.right() - 48.0, r.y + 10.0, 36.0, 34.0);
     let heart_icon = if e.is_favorite { "\u{EB52}" } else { "\u{EB51}" };
-    if ui.icon_button(id2(id("lib-fav"), wid), heart, heart_icon, false) {
+    let fav_tip = if e.is_favorite { "Remove from favourites" } else { "Add to favourites" };
+    if ui.icon_button(id2(id("lib-fav"), wid), heart, heart_icon, fav_tip, false) {
         out.push(LibraryAction::ToggleFavorite(wid.clone()));
     }
     if e.is_favorite {
@@ -179,7 +180,7 @@ fn card(ui: &mut Ui, r: Rect, e: &LibraryEntry, confirming: bool, out: &mut Vec<
     }
     let tw = r.w - 92.0;
     let title_r = Rect::new(r.x + 16.0, r.y + 14.0, tw, 28.0);
-    let tresp = ui.interact(id2(id("lib-title"), wid), title_r);
+    let tresp = ui.interact_as(id2(id("lib-title"), wid), title_r, Role::Button, &m.title);
     let tt = ui.text_opts(&m.title, &TextStyle::ui(17.0).semibold(), TextOpts::ellipsize(tw), title_r.x, title_r.y, c.text);
     if tresp.hovered {
         ui.g.fill_rect(Rect::new(title_r.x, title_r.y + tt.h - 1.0, tt.w, 1.0), c.text.alpha(0.6));
@@ -241,6 +242,7 @@ fn card(ui: &mut Ui, r: Rect, e: &LibraryEntry, confirming: bool, out: &mut Vec<
         Some(3) => result = Some(Some(wid.clone())),
         _ => {}
     }
+    ui.tip(id2(id("lib-more"), wid), more, "More: export or delete");
 
     let total_ch = m.stats.chapters_published.max(1);
     let status = if p.completed {

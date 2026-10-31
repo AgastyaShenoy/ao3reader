@@ -132,7 +132,7 @@ private fun workCard(a: MainActivity, e: JSONObject): View {
     top.addView(a.label(m.getString("title"), 17f, p.text, bold = true, lines = 2).apply { setOnClickListener { a.openWork(id) } },
         LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     val fav = e.getBoolean("favorite")
-    top.addView(a.iconButton(if (fav) R.drawable.ic_heart_fill else R.drawable.ic_heart, if (fav) 0xFFE11D48.toInt() else p.muted) {
+    top.addView(a.iconButton(if (fav) R.drawable.ic_heart_fill else R.drawable.ic_heart, if (fav) 0xFFE11D48.toInt() else p.muted, if (fav) "Remove from favourites" else "Add to favourites") {
         Core.req("library.favorite", json("id" to id))
         a.rebuild()
     })
@@ -183,7 +183,7 @@ private fun workCard(a: MainActivity, e: JSONObject): View {
     actions.addView(shelfBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = a.dp(8) })
     actions.addView(View(a), LinearLayout.LayoutParams(0, 1, 1f))
     lateinit var more: View
-    more = a.iconButton(R.drawable.ic_more, p.text) {
+    more = a.iconButton(R.drawable.ic_more, p.text, "More: export or delete") {
         val menu = PopupMenu(a, more)
         EXPORTS.forEachIndexed { i, (_, name, _) -> menu.menu.add(0, i, i, "Export as $name") }
         menu.menu.add(0, 99, 99, "Delete from library")
@@ -203,11 +203,13 @@ private fun workCard(a: MainActivity, e: JSONObject): View {
 fun workPills(a: MainActivity, w: JSONObject, ships: Int = 3): LinearLayout {
     val pills = a.row()
     val gap = { lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = a.dp(6) } }
-    pills.addView(a.markerPill(w.getString("rating"), Pal.opaque(w.getInt("rating_color"))), gap())
+    // Books from files have no AO3 rating or completion status: only their real tags show.
+    val ao3 = w.optBoolean("ao3", true)
+    if (ao3) pills.addView(a.markerPill(w.getString("rating"), Pal.opaque(w.getInt("rating_color"))), gap())
     for (c in w.getJSONArray("categories").objects()) pills.addView(a.markerPill(c.getString("name"), Pal.opaque(c.getInt("color"))), gap())
     for (x in w.getJSONArray("warnings").strings().filter { !it.contains("No Archive Warnings") }) pills.addView(a.markerPill(x, WARNING_RED), gap())
     for (r in w.getJSONArray("relationships").strings().take(ships)) pills.addView(a.shipPill(r), gap())
-    pills.addView(a.tagPill(if (w.getBoolean("complete")) "Complete" else "In progress", quiet = true))
+    if (ao3) pills.addView(a.tagPill(if (w.getBoolean("complete")) "Complete" else "In progress", quiet = true))
     return pills
 }
 

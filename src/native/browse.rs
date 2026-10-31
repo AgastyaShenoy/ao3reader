@@ -125,7 +125,7 @@ fn chip(ui: &mut Ui, key: Id, x: f32, y: f32, label: &str, new: usize, selected:
     let c = ui.c;
     let t = ui.measure(label, &chip_style(selected), TextOpts::default());
     let r = Rect::new(x, y, chip_width(ui, label, new, selected), 30.0);
-    let resp = ui.interact(key, r);
+    let resp = ui.interact_as(key, r, Role::Choice(selected), label);
     if selected {
         ui.g.fill_round(r, 15.0, c.selected());
     } else {
@@ -195,7 +195,7 @@ impl SearchScreen {
             self.typed = Some(Instant::now());
         }
         let mut run = resp.submitted;
-        if ui.icon_button(id("search-go"), Rect::new(input.right() + 4.0, y, 40.0, 36.0), icons::SEARCH, false) {
+        if ui.icon_button(id("search-go"), Rect::new(input.right() + 4.0, y, 40.0, 36.0), icons::SEARCH, "Search", false) {
             run = true;
         }
         let n = self.filter_count();
@@ -410,7 +410,7 @@ impl SearchScreen {
         for (i, cat) in CATEGORIES.iter().enumerate() {
             let on = q.categories.iter().any(|c| c == cat);
             let cr = Rect::new(bar.x + cell_w * i as f32, bar.y, cell_w, bar.h).shrink(3.0);
-            let resp = ui.interact(id2(id("search-cat"), i), cr);
+            let resp = ui.interact_as(id2(id("search-cat"), i), cr, Role::Toggle(on), cat);
             if resp.clicked {
                 if on {
                     q.categories.retain(|c| c != cat);
@@ -646,6 +646,7 @@ fn blurb_card(ui: &mut Ui, r: Rect, b: &Blurb, in_library: bool, mark: Mark, fro
     if let Some(i) = ui.menu_button(id2(id("blurb-more"), wid), more, "", Some("\u{E712}"), &items, None) {
         out.push(menu.swap_remove(i).1);
     }
+    ui.tip(id2(id("blurb-more"), wid), more, "More: follow the author or tags, open on AO3");
     let tw = r.w - 92.0;
     let mut tx = r.x + 16.0;
     if mark != Mark::None {
@@ -659,7 +660,7 @@ fn blurb_card(ui: &mut Ui, r: Rect, b: &Blurb, in_library: bool, mark: Mark, fro
     }
     let title = if m.is_restricted { format!("{}  \u{1F512}", m.title) } else { m.title.clone() };
     let title_r = Rect::new(tx, r.y + 14.0, tw - (tx - r.x - 16.0), 28.0);
-    let tresp = ui.interact(id2(id("blurb-title"), wid), title_r);
+    let tresp = ui.interact_as(id2(id("blurb-title"), wid), title_r, Role::Button, &m.title);
     let tt = ui.text_opts(&title, &TextStyle::ui(17.0).semibold(), TextOpts::ellipsize(title_r.w), title_r.x, title_r.y, c.text);
     if tresp.hovered {
         ui.g.fill_rect(Rect::new(title_r.x, title_r.y + tt.h - 1.0, tt.w, 1.0), c.text.alpha(0.6));

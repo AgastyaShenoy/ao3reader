@@ -9,7 +9,7 @@
 use ao3reader::ao3::client::Ao3Client;
 use ao3reader::ao3::models::{Bookmark, Category, LibraryEntry, ReadingProgress, ShelfStatus, UserSession, Work};
 use ao3reader::reader::pace::PaceTracker;
-use ao3reader::reader::rich_text::{is_landmark, paragraph_display, parse_inline, word_count, ParagraphKind, RichText};
+use ao3reader::reader::rich_text::{image_source, is_landmark, paragraph_display, parse_inline, table_cells, with_word_starts, word_count, ParagraphKind, RichText};
 use ao3reader::reader::theme::{ReaderThemeType, Rgb};
 use ao3reader::storage::config::AppConfig;
 use ao3reader::ao3::search::{Blurb, Feed, FeedKind, Listing, SearchQuery};
@@ -163,6 +163,8 @@ fn meta_json(m: &ao3reader::ao3::models::WorkMeta) -> Value {
         "published": m.stats.published_date,
         "complete": m.is_complete,
         "restricted": m.is_restricted,
+        // From AO3 (ratings, kudos and "complete" apply) rather than a book from a file.
+        "ao3": m.is_ao3(),
     })
 }
 
@@ -277,12 +279,13 @@ fn progress_stats(work: &Work, ch: usize, position: f64) -> (f64, usize, usize) 
     (pct, (total as f64 - read).max(0.0) as usize, (ch_words - in_ch).max(0.0) as usize)
 }
 
-fn themes_json() -> Value {
+/// Every theme's colours; "Your colours" comes from the settings.
+fn themes_json(cfg: &AppConfig) -> Value {
     Value::Array(
         ReaderThemeType::all()
             .iter()
             .map(|t| {
-                let p = t.palette();
+                let p = cfg.palette_of(*t);
                 json!({
                     "id": serde_json::to_value(t).unwrap_or(Value::Null),
                     "name": t.display_name(),
@@ -326,9 +329,12 @@ fn dispatch(method: &str, a: &Value) -> R {
             let library = LibraryManager::new();
             let mut guard = STATE.lock().map_err(|_| "state poisoned")?;
             let follows = FollowStore::load();
+            let themes = themes_json(&config);
             *guard = Some(State { config, library, client, follows, work: None, pace: PaceTracker::default(), started: std::time::Instant::now() });
-            Ok(json!({ "themes": themes_json() }))
+            Ok(json!({ "themes": themes }))
         }
+        // After "Your colours" change.
+        "themes" => with_state(|s| Ok(themes_json(&s.config))),
         "config.get" => with_state(|s| serde_json::to_value(&s.config).map_err(|e| e.to_string())),
         "config.set" => with_state(|s| {
             let mut cfg: AppConfig = serde_json::from_value(a.get("config").cloned().unwrap_or(Value::Null)).map_err(|e| e.to_string())?;
@@ -404,32 +410,71 @@ fn dispatch(method: &str, a: &Value) -> R {
             let idx = arg_u64(a, "index")? as usize;
             let ch = work.chapters.get(idx).ok_or("no such chapter")?;
             let mut blocks = Vec::new();
-            let mut push = |kind: &str, para: usize, r: &RichText| {
-                let mut v = rich_json(r);
+            // "Bold word starts": the first letters of each word in running text.
+            let starts = s.config.typography.bold_word_starts;
+            let block = |kind: &str, para: usize, r: &RichText| {
+                let bold = starts && matches!(kind, "para" | "quote" | "item" | "center");
+                let mut v = if bold { rich_json(&with_word_starts(r.clone(), true)) } else { rich_json(r) };
                 v["kind"] = json!(kind);
                 v["para"] = json!(para);
-                blocks.push(v);
+                v
             };
             if let Some(t) = ch.summary.as_deref().filter(|t| !t.trim().is_empty()) {
-                push("summary", 0, &parse_inline(t.trim()));
+                blocks.push(block("summary", 0, &parse_inline(t.trim())));
             }
             if let Some(t) = ch.pre_notes.as_deref().filter(|t| !t.trim().is_empty()) {
-                push("notes", 0, &parse_inline(t.trim()));
+                blocks.push(block("notes", 0, &parse_inline(t.trim())));
             }
             for (i, p) in ch.paragraphs.iter().enumerate() {
                 if is_landmark(i, p) {
                     continue;
                 }
-                match paragraph_display(p) {
-                    (ParagraphKind::Divider, r) => push("divider", i, &r),
-                    (ParagraphKind::Quote, r) => push("quote", i, &r),
-                    (ParagraphKind::Text, r) => push("para", i, &r),
-                }
+                let v = match paragraph_display(p) {
+                    (ParagraphKind::Divider, r) => block("divider", i, &r),
+                    (ParagraphKind::Quote, r) => block("quote", i, &r),
+                    (ParagraphKind::Heading(level), r) => {
+                        let mut v = block("heading", i, &r);
+                        v["level"] = json!(level);
+                        v
+                    }
+                    (ParagraphKind::Bullet(depth), r) => {
+                        let mut v = block("item", i, &r);
+                        v["depth"] = json!(depth);
+                        v["marker"] = json!(["\u{2022}", "\u{25E6}", "\u{25AA}"][(depth as usize - 1).min(2)]);
+                        v
+                    }
+                    (ParagraphKind::Numbered(depth, n), r) => {
+                        let mut v = block("item", i, &r);
+                        v["depth"] = json!(depth);
+                        v["marker"] = json!(format!("{n}."));
+                        v
+                    }
+                    (ParagraphKind::Pre, r) => block("pre", i, &r),
+                    (ParagraphKind::Center, r) => block("center", i, &r),
+                    (ParagraphKind::Image, r) => {
+                        let mut v = block("image", i, &r);
+                        v["path"] = match image_source(p) {
+                            Some((name, _)) => json!(LibraryManager::resource_path(&work.meta.id, name).to_string_lossy()),
+                            None => Value::Null,
+                        };
+                        v
+                    }
+                    (ParagraphKind::TableRow(header), r) => {
+                        let mut v = block("row", i, &r);
+                        v["header"] = json!(header);
+                        v["cells"] = Value::Array(table_cells(p).iter().map(rich_json).collect());
+                        v
+                    }
+                    (ParagraphKind::Text, r) => block("para", i, &r),
+                };
+                blocks.push(v);
             }
             if let Some(t) = ch.post_notes.as_deref().filter(|t| !t.trim().is_empty()) {
-                push("endnotes", ch.paragraphs.len(), &parse_inline(t.trim()));
+                blocks.push(block("endnotes", ch.paragraphs.len(), &parse_inline(t.trim())));
             }
-            Ok(json!({ "title": ch.title, "paragraphs": ch.paragraphs.len(), "blocks": blocks }))
+            // A page that's only pictures (a cover) shows them without a chapter title.
+            let pictures_only = !ch.paragraphs.is_empty() && ch.paragraphs.iter().all(|p| image_source(p).is_some());
+            Ok(json!({ "title": ch.title, "paragraphs": ch.paragraphs.len(), "blocks": blocks, "pictures_only": pictures_only }))
         }),
         "progress.stats" => with_state(|s| {
             let work = s.work.as_ref().ok_or("no work open")?;
@@ -751,7 +796,7 @@ mod tests {
     fn library_round_trip_in_a_temp_folder() {
         let dir = std::env::temp_dir().join(format!("ao3core-test-{}", std::process::id()));
         let init: Value = serde_json::from_str(&handle("init", &json!({"dir": dir.to_string_lossy()}).to_string())).unwrap();
-        assert_eq!(init["ok"]["themes"].as_array().map(|t| t.len()), Some(6));
+        assert_eq!(init["ok"]["themes"].as_array().map(|t| t.len()), Some(ReaderThemeType::all().len()));
         let lib: Value = serde_json::from_str(&handle("library", "{}")).unwrap();
         assert_eq!(lib["ok"], json!([]));
         let bad: Value = serde_json::from_str(&handle("nope", "{}")).unwrap();

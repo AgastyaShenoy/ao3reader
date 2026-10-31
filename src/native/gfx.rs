@@ -17,11 +17,21 @@ use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::Graphics::Imaging::*;
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
 use windows_numerics::{Matrix3x2, Vector2};
 
 /// Layouts not used for this many frames are dropped from the cache.
 const LAYOUT_TTL_FRAMES: u64 = 4;
+/// Decoded pictures kept for redrawing, in bytes; the least recently drawn go first.
+const BITMAP_BUDGET: usize = 24 * 1024 * 1024;
+
+struct CachedBitmap {
+    bmp: ID2D1Bitmap,
+    bytes: usize,
+    last_used: u64,
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rect {
@@ -165,11 +175,13 @@ pub struct TextOpts {
     pub max_lines: Option<u32>,
     /// Single-line width limit with ellipsis (ignored when `wrap` is set).
     pub ellipsize: Option<f32>,
+    /// Extra space after every letter, and after every space, in DIPs.
+    pub spacing: (f32, f32),
 }
 
 impl Default for TextOpts {
     fn default() -> Self {
-        Self { wrap: None, align: Align::Left, line_height: None, max_lines: None, ellipsize: None }
+        Self { wrap: None, align: Align::Left, line_height: None, max_lines: None, ellipsize: None, spacing: (0.0, 0.0) }
     }
 }
 
@@ -190,6 +202,10 @@ impl TextOpts {
     }
     pub fn max_lines(mut self, n: u32) -> Self {
         self.max_lines = Some(n);
+        self
+    }
+    pub fn spacing(mut self, letter: f32, word: f32) -> Self {
+        self.spacing = (letter, word);
         self
     }
 }
@@ -227,6 +243,12 @@ pub struct Gfx {
     collections: HashMap<PathBuf, IDWriteFontCollection>,
     /// Built path geometries, keyed by the address of their static path data.
     paths: HashMap<usize, ID2D1PathGeometry>,
+    /// Windows Imaging Component, created the first time a picture is needed.
+    wic: Option<IWICImagingFactory>,
+    /// Pixel size of picture files (None: not a picture WIC can read).
+    image_sizes: HashMap<PathBuf, Option<(u32, u32)>>,
+    /// Pictures decoded at the size they're drawn: (file, width in pixels) → bitmap.
+    bitmaps: HashMap<(PathBuf, u32), CachedBitmap>,
     /// The interface face: the user's choice, or `default_ui_family`.
     ui_family: String,
     default_ui_family: &'static str,
@@ -249,6 +271,20 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
 
+unsafe fn has_family(c: &IDWriteFontCollection, name: &str) -> bool {
+    let (mut index, mut exists) = (0u32, BOOL(0));
+    c.FindFamilyName(&HSTRING::from(name), &mut index, &mut exists).is_ok() && exists.as_bool()
+}
+
+/// Name of the first family in a collection (a font file's own family name).
+unsafe fn first_family(c: &IDWriteFontCollection) -> Option<String> {
+    let names = c.GetFontFamily(0).ok()?.GetFamilyNames().ok()?;
+    let len = names.GetStringLength(0).ok()? as usize;
+    let mut buf = vec![0u16; len + 1];
+    names.GetString(0, &mut buf).ok()?;
+    Some(String::from_utf16_lossy(&buf[..len]))
+}
+
 impl Gfx {
     pub fn new(dpi: f32) -> Result<Self> {
         unsafe {
@@ -264,6 +300,9 @@ impl Gfx {
                 layouts: HashMap::new(),
                 collections: HashMap::new(),
                 paths: HashMap::new(),
+                wic: None,
+                image_sizes: HashMap::new(),
+                bitmaps: HashMap::new(),
                 ui_family: String::new(),
                 default_ui_family: "Segoe UI",
                 icon_family: "Segoe MDL2 Assets",
@@ -345,11 +384,24 @@ impl Gfx {
         if let Some(c) = self.collections.get(path) {
             return Some(c.clone());
         }
+        // A folder (a bundled family) contributes all its font files, so bold and italic are real.
+        let files: Vec<PathBuf> = if path.is_dir() {
+            std::fs::read_dir(path)
+                .ok()?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("ttf") || x.eq_ignore_ascii_case("otf")))
+                .collect()
+        } else {
+            vec![path.to_path_buf()]
+        };
         let coll = unsafe {
             let f5: IDWriteFactory5 = self.dw.cast().ok()?;
             let builder = f5.CreateFontSetBuilder().ok()?;
-            let file = f5.CreateFontFileReference(&HSTRING::from(path.as_os_str()), None).ok()?;
-            builder.AddFontFile(&file).ok()?;
+            for f in &files {
+                if let Ok(file) = f5.CreateFontFileReference(&HSTRING::from(f.as_os_str()), None) {
+                    let _ = builder.AddFontFile(&file);
+                }
+            }
             let set = builder.CreateFontSet().ok()?;
             let coll1 = f5.CreateFontCollectionFromFontSet(&set).ok()?;
             if coll1.GetFontFamilyCount() == 0 {
@@ -371,6 +423,11 @@ impl Gfx {
             Family::Icons => (self.icon_family.to_string(), None),
             Family::Mono => (self.mono_family.to_string(), None),
             Family::Named { name, file } => (name.clone(), file.as_deref().and_then(|p| self.collection_for(p))),
+        };
+        // A font file's family may be named differently from what we asked for: use its own.
+        let family = match &coll {
+            Some(c) if !unsafe { has_family(c, &family) } => unsafe { first_family(c) }.unwrap_or(family),
+            _ => family,
         };
         let fmt = unsafe {
             self.dw
@@ -401,14 +458,13 @@ impl Gfx {
             spans,
             &style.family,
             style.size.to_bits(),
-            style.bold,
-            style.semibold,
-            style.italic,
+            (style.bold, style.semibold, style.italic),
             opts.wrap.map(f32::to_bits),
             opts.align,
             opts.line_height.map(f32::to_bits),
             opts.max_lines,
             opts.ellipsize.map(f32::to_bits),
+            (opts.spacing.0.to_bits(), opts.spacing.1.to_bits()),
         ));
         if let Some(c) = self.layouts.get_mut(&key) {
             c.last_used = self.frame;
@@ -494,6 +550,19 @@ impl Gfx {
             let trimming = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, delimiter: 0, delimiterCount: 0 };
             layout.SetTrimming(&trimming, &sign)?;
         }
+        if opts.spacing != (0.0, 0.0) {
+            if let Ok(l1) = layout.cast::<IDWriteTextLayout1>() {
+                let (letter, word) = opts.spacing;
+                l1.SetCharacterSpacing(0.0, letter, 0.0, DWRITE_TEXT_RANGE { startPosition: 0, length: w16.len() as u32 })?;
+                if word != 0.0 {
+                    for (i, ch) in w16.iter().enumerate() {
+                        if *ch == 0x20 || *ch == 0xA0 {
+                            l1.SetCharacterSpacing(0.0, letter + word, 0.0, DWRITE_TEXT_RANGE { startPosition: i as u32, length: 1 })?;
+                        }
+                    }
+                }
+            }
+        }
         for span in spans {
             let start = span.start.min(text.len());
             let end = span.end.clamp(start, text.len());
@@ -534,6 +603,8 @@ impl Gfx {
                 if let Ok((rt, brush)) = unsafe { Self::create_target(&self.d2d) } {
                     self.rt = rt;
                     self.brush = brush;
+                    // Bitmaps belong to the old target.
+                    self.bitmaps.clear();
                 }
             }
         }
@@ -548,6 +619,82 @@ impl Gfx {
 
     pub fn set_dpi(&mut self, dpi: f32) {
         self.dpi = dpi;
+    }
+
+    // ---- pictures ----------------------------------------------------------------------
+
+    fn wic(&mut self) -> Option<IWICImagingFactory> {
+        if self.wic.is_none() {
+            unsafe {
+                // Harmless if COM is already set up on this thread.
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                self.wic = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok();
+            }
+        }
+        self.wic.clone()
+    }
+
+    unsafe fn first_frame(wic: &IWICImagingFactory, path: &Path) -> Result<IWICBitmapFrameDecode> {
+        let decoder = wic.CreateDecoderFromFilename(&HSTRING::from(path.as_os_str()), None, windows::Win32::Foundation::GENERIC_READ, WICDecodeMetadataCacheOnDemand)?;
+        decoder.GetFrame(0)
+    }
+
+    /// Pixel size of a picture file, or None if it's missing or can't be read.
+    pub fn image_size(&mut self, path: &Path) -> Option<(u32, u32)> {
+        if let Some(s) = self.image_sizes.get(path) {
+            return *s;
+        }
+        let size = self.wic().and_then(|wic| unsafe {
+            let frame = Self::first_frame(&wic, path).ok()?;
+            let (mut w, mut h) = (0u32, 0u32);
+            frame.GetSize(&mut w, &mut h).ok()?;
+            (w > 0 && h > 0).then_some((w, h))
+        });
+        self.image_sizes.insert(path.to_path_buf(), size);
+        size
+    }
+
+    /// Draws a picture scaled into `r` (DIPs). Decoding happens at the drawn size, so a large
+    /// illustration costs only what's on screen. Returns false if it couldn't be drawn.
+    pub fn draw_image(&mut self, path: &Path, r: Rect) -> bool {
+        if !self.drawing {
+            return true;
+        }
+        let scale = self.dpi / 96.0;
+        let (pw, ph) = (((r.w * scale).round() as u32).max(1), ((r.h * scale).round() as u32).max(1));
+        let key = (path.to_path_buf(), pw);
+        if !self.bitmaps.contains_key(&key) {
+            let Some(bmp) = self.decode(path, pw, ph) else { return false };
+            self.bitmaps.insert(key.clone(), CachedBitmap { bmp, bytes: pw as usize * ph as usize * 4, last_used: self.frame });
+            self.trim_bitmaps();
+        }
+        let Some(c) = self.bitmaps.get_mut(&key) else { return false };
+        c.last_used = self.frame;
+        unsafe { self.rt.DrawBitmap(&c.bmp, Some(&r.d2d()), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
+        true
+    }
+
+    fn decode(&mut self, path: &Path, w: u32, h: u32) -> Option<ID2D1Bitmap> {
+        let wic = self.wic()?;
+        unsafe {
+            let frame = Self::first_frame(&wic, path).ok()?;
+            let scaler = wic.CreateBitmapScaler().ok()?;
+            scaler.Initialize(&frame, w, h, WICBitmapInterpolationModeFant).ok()?;
+            let converter = wic.CreateFormatConverter().ok()?;
+            converter.Initialize(&scaler, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeMedianCut).ok()?;
+            self.rt.CreateBitmapFromWicBitmap(&converter, None).ok()
+        }
+    }
+
+    /// Keeps decoded pictures within `BITMAP_BUDGET`, dropping the least recently drawn.
+    fn trim_bitmaps(&mut self) {
+        let mut total: usize = self.bitmaps.values().map(|b| b.bytes).sum();
+        while total > BITMAP_BUDGET && self.bitmaps.len() > 1 {
+            let Some(oldest) = self.bitmaps.iter().min_by_key(|(_, b)| b.last_used).map(|(k, _)| k.clone()) else { break };
+            if let Some(b) = self.bitmaps.remove(&oldest) {
+                total -= b.bytes;
+            }
+        }
     }
 
     /// Switches the interface font (None, or a family that isn't installed, keeps the system

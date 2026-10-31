@@ -5,12 +5,13 @@ use super::app::{reader_family, reader_font_label};
 use super::gfx::*;
 use super::icons;
 use super::ui::*;
-use crate::reader::theme::ReaderThemeType;
+use crate::reader::rich_text::word_start_spans;
+use crate::reader::theme::{ReaderThemeType, Rgb, ThemePalette};
 use crate::reader::typography::{FontFamilyChoice, PageLayoutMode, ReadingMode, TextAlignment};
 use crate::storage::config::AppConfig;
 use crate::updater::{UpdateStatus, CURRENT_VERSION, GITHUB_REPO};
 
-const MAX_W: f32 = 860.0;
+const MAX_W: f32 = 960.0;
 const FONT_ROW_H: f32 = 34.0;
 
 pub enum SettingsAction {
@@ -22,6 +23,8 @@ pub enum SettingsAction {
     /// Pick a file to import.
     Import,
     OpenWork(String),
+    /// Choose a "Your colours" colour: the text colour (true) or the page colour.
+    PickColor(bool),
 }
 
 /// The Import page's progress.
@@ -34,6 +37,8 @@ pub struct ImportState {
 }
 
 pub struct SettingsCtx<'a> {
+    /// Windows is in dark mode (for "Match Windows").
+    pub system_dark: bool,
     pub config: &'a mut AppConfig,
     pub update: &'a UpdateStatus,
     pub fonts: &'a [String],
@@ -51,18 +56,37 @@ pub struct SettingsScreen {
     pub import: ImportState,
 }
 
-const TABS: [(&str, &str); 7] = [
+const TABS: [(&str, &str); 8] = [
     (icons::READING, "Reading"),
     (icons::FONT, "Typography"),
     (icons::COLOR, "Themes"),
+    (icons::ACCESSIBILITY, "Accessibility"),
     (icons::IMPORT, "Import"),
     (icons::KEYBOARD, "Shortcuts"),
     (icons::STORAGE, "Storage & updates"),
     (icons::INFO, "About"),
 ];
 const TAB_TYPOGRAPHY: usize = 1;
-const TAB_IMPORT: usize = 3;
-const TAB_STORAGE: usize = 5;
+const TAB_THEMES: usize = 2;
+const TAB_IMPORT: usize = 4;
+const TAB_STORAGE: usize = 6;
+
+/// Page tints (coloured overlays): soft yellow, peach, rose, blue, green, grey.
+const TINTS: [(u32, &str); 6] = [
+    (0xFFE680, "Yellow"),
+    (0xFFB37A, "Peach"),
+    (0xF59AB4, "Rose"),
+    (0x7FB2F0, "Blue"),
+    (0x8ED39A, "Green"),
+    (0x9A9A9A, "Grey"),
+];
+
+/// Interface sizes offered (1.0 is the system's own size).
+const UI_SCALES: [f32; 5] = [0.9, 1.0, 1.1, 1.25, 1.5];
+
+fn rgb(c: u32) -> Rgb {
+    Rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
+}
 
 const PREVIEW_TEXT: [&str; 2] = [
     "The library was quiet in the way only old libraries are quiet: not silent, but hushed, as though the books themselves were holding their breath between pages.",
@@ -86,6 +110,8 @@ fn choice_family(choice: &FontFamilyChoice) -> Family {
         FontFamilyChoice::Serif => Family::Named { name: "Georgia".into(), file: None },
         FontFamilyChoice::Monospace => Family::Mono,
         FontFamilyChoice::SansSerif => Family::Named { name: "Segoe UI".into(), file: None },
+        FontFamilyChoice::Atkinson => Family::Named { name: "Atkinson Hyperlegible".into(), file: super::fonts::atkinson() },
+        FontFamilyChoice::OpenDyslexic => Family::Named { name: "OpenDyslexic".into(), file: super::fonts::open_dyslexic() },
     }
 }
 
@@ -139,9 +165,10 @@ impl SettingsScreen {
                 0 => self.reading_tab(ui, &mut col, ctx, &mut out),
                 1 => self.typography_tab(ui, &mut col, ctx, &mut out),
                 2 => self.themes_tab(ui, &mut col, ctx, &mut out),
-                3 => self.import_tab(ui, &mut col, &mut out),
-                4 => self.shortcuts_tab(ui, &mut col),
-                5 => self.storage_tab(ui, &mut col, ctx, &mut out),
+                3 => self.accessibility_tab(ui, &mut col, ctx, &mut out),
+                4 => self.import_tab(ui, &mut col, &mut out),
+                5 => self.shortcuts_tab(ui, &mut col),
+                6 => self.storage_tab(ui, &mut col, ctx, &mut out),
                 _ => self.about_tab(ui, &mut col, &mut out),
             }
             col.y + 32.0 - y0
@@ -179,6 +206,7 @@ impl SettingsScreen {
 
     fn toggle_row(ui: &mut Ui, col: &mut Col, key: &str, title: &str, sub: &str, value: &mut bool) -> bool {
         let r = Self::row(ui, col, title, sub, 40.0, 20.0);
+        ui.name_next(title, "");
         ui.toggle(id(key), r.x, r.y, value)
     }
 
@@ -188,6 +216,7 @@ impl SettingsScreen {
         let r = Self::row(ui, col, title, "", ctrl_w, 32.0);
         let label = fmt(*value);
         ui.text_in(&label, &TextStyle::ui(13.0), Rect::new(r.right() - 64.0, r.y, 64.0, r.h), Align::Right, c.muted);
+        ui.name_next(title, &label);
         ui.slider(id(key), Rect::new(r.x, r.y, r.w - 72.0, r.h), value, range.0, range.1, range.2)
     }
 
@@ -285,6 +314,12 @@ impl SettingsScreen {
             entries.push(("Georgia".into(), FontFamilyChoice::Serif));
             entries.push(("Monospace".into(), FontFamilyChoice::Monospace));
         }
+        // The two bundled easy-to-read fonts come next, and turn up in searches too.
+        for (name, choice) in [("Atkinson Hyperlegible", FontFamilyChoice::Atkinson), ("OpenDyslexic", FontFamilyChoice::OpenDyslexic)] {
+            if q.is_empty() || name.to_lowercase().contains(&q) {
+                entries.push((name.into(), choice));
+            }
+        }
         entries.extend(ctx.fonts.iter().filter(|f| q.is_empty() || f.to_lowercase().contains(&q)).map(|f| (f.clone(), FontFamilyChoice::Custom(f.clone()))));
         let current = ctx.config.typography.font_family.clone();
         let rows: Vec<(String, Family, bool)> = entries.iter().map(|(n, ch)| (n.clone(), choice_family(ch), *ch == current)).collect();
@@ -316,15 +351,20 @@ impl SettingsScreen {
         changed |= Self::toggle_row(ui, col, "indent", "Indent first line of paragraphs", "", &mut t.indent_paragraphs);
 
         Self::section(ui, col, "Preview");
-        let pal = ctx.config.theme.palette();
+        let pal = ctx.config.palette();
+        let t = &ctx.config.typography;
         let page_bg = Color::rgb(pal.bg);
         let page_fg = Color::rgb(pal.text);
         let text_w = t.max_column_width.min(col.w - 64.0);
         let style = TextStyle { family: reader_family(t), ..TextStyle::ui(t.font_size) };
         let align = if t.text_alignment == TextAlignment::Justified { Align::Justify } else { Align::Left };
-        let opts = TextOpts::wrap(text_w).align(align).line_height(t.line_spacing_multiplier);
+        let opts = TextOpts::wrap(text_w)
+            .align(align)
+            .line_height(t.line_spacing_multiplier)
+            .spacing(t.letter_spacing * t.font_size, t.word_spacing * t.font_size);
         let paras: Vec<String> = PREVIEW_TEXT.iter().map(|p| if t.indent_paragraphs { format!("\u{2003}\u{2003}{p}") } else { p.to_string() }).collect();
-        let layouts: Vec<Text> = paras.iter().map(|p| ui.measure(p, &style, opts)).collect();
+        let layouts: Vec<Text> =
+            paras.iter().map(|p| ui.g.layout_rich(p, &if t.bold_word_starts { word_start_spans(p) } else { Vec::new() }, &style, opts)).collect();
         let body_h: f32 = layouts.iter().map(|l| l.h).sum::<f32>() + t.paragraph_spacing;
         let r = col.take(body_h + 64.0);
         ui.g.fill_round(r, 8.0, page_bg);
@@ -401,7 +441,7 @@ impl SettingsScreen {
             let last = ((((view.bottom() - y0) / FONT_ROW_H).ceil()) as usize).min(rows.len());
             for (i, (name, family, selected)) in rows.iter().enumerate().take(last).skip(first) {
                 let r = Rect::new(view.x + 4.0, y0 + i as f32 * FONT_ROW_H, view.w - 16.0, FONT_ROW_H);
-                let resp = ui.interact(id2(id(key), name), r);
+                let resp = ui.interact_as(id2(id(key), name), r, Role::Choice(*selected), name);
                 if *selected {
                     ui.g.fill_round(r.shrink2(0.0, 2.0), 4.0, c.selected());
                 } else if resp.hovered {
@@ -423,6 +463,27 @@ impl SettingsScreen {
     }
 
     fn themes_tab(&mut self, ui: &mut Ui, col: &mut Col, ctx: &mut SettingsCtx, out: &mut Vec<SettingsAction>) {
+        let follow = ctx.config.follow_system;
+        let mut on = follow;
+        let mode = if ctx.system_dark { "dark" } else { "light" };
+        let sub = if follow {
+            format!("Pick a light theme and a dark theme below; Windows is in {mode} mode now. High contrast in Windows uses High Contrast here.")
+        } else {
+            "Switch between a light and a dark theme with Windows' own setting.".to_string()
+        };
+        if Self::toggle_row(ui, col, "follow-system", "Match Windows", &sub, &mut on) {
+            ctx.config.follow_system = on;
+            if on {
+                // Start from the theme in use for whichever mode it suits.
+                if ctx.config.palette().is_dark {
+                    ctx.config.dark_theme = ctx.config.theme;
+                } else {
+                    ctx.config.light_theme = ctx.config.theme;
+                }
+            }
+            out.push(SettingsAction::ConfigChanged);
+        }
+
         Self::section(ui, col, "Colour theme");
         let cols = if col.w >= 600.0 { 3 } else { 2 };
         let gap = 10.0;
@@ -433,9 +494,18 @@ impl SettingsScreen {
         let grid = col.take(rows as f32 * (ch + gap));
         for (i, theme) in themes.iter().enumerate() {
             let r = Rect::new(grid.x + (i % cols) as f32 * (cw + gap), grid.y + (i / cols) as f32 * (ch + gap), cw, ch);
-            let p = theme.palette();
-            let resp = ui.interact(id2(id("theme"), i), r);
-            let selected = ctx.config.theme == *theme;
+            let p = ctx.config.palette_of(*theme);
+            let resp = ui.interact_as(id2(id("theme"), i), r, Role::Choice(false), theme.display_name());
+            // Following Windows, each card can be the light or the dark theme.
+            let slot = match (follow, p.is_dark) {
+                (false, _) => None,
+                (true, false) => Some((ctx.config.light_theme == *theme, "Light mode")),
+                (true, true) => Some((ctx.config.dark_theme == *theme, "Dark mode")),
+            };
+            let selected = match slot {
+                Some((s, _)) => s,
+                None => ctx.config.theme == *theme,
+            };
             ui.g.fill_round(r, 10.0, Color::rgb(p.bg));
             let border = if selected { Color::rgb(p.accent) } else if resp.hovered { ui.c.text.alpha(0.5) } else { ui.c.border };
             ui.g.stroke_round(r, 10.0, if selected { 2.5 } else { 1.0 }, border);
@@ -450,15 +520,153 @@ impl SettingsScreen {
             );
             ui.g.fill_round(Rect::new(r.x + 16.0, r.bottom() - 26.0, 44.0, 6.0), 3.0, Color::rgb(p.accent));
             ui.g.fill_round(Rect::new(r.x + 66.0, r.bottom() - 26.0, 28.0, 6.0), 3.0, Color::rgb(p.card));
+            if let Some((true, label)) = slot {
+                ui.text_in(label, &TextStyle::ui(12.0), Rect::new(r.x + 104.0, r.bottom() - 32.0, r.w - 120.0, 18.0), Align::Right, Color::rgb(p.text_muted));
+            }
             if selected {
                 let ck = Rect::new(r.right() - 34.0, r.y + 12.0, 22.0, 22.0);
                 ui.g.fill_circle(ck.x + 11.0, ck.y + 11.0, 11.0, Color::rgb(p.accent));
                 ui.text_in(icons::CHECK, &TextStyle::icons(11.0), ck, Align::Center, Color::rgb(p.on_accent()));
             }
             if resp.clicked && !selected {
-                ctx.config.theme = *theme;
+                match slot {
+                    Some(_) if p.is_dark => ctx.config.dark_theme = *theme,
+                    Some(_) => ctx.config.light_theme = *theme,
+                    None => ctx.config.theme = *theme,
+                }
                 out.push(SettingsAction::ConfigChanged);
             }
+        }
+
+        // "Your colours": any page and text colour, with the contrast between them.
+        Self::section(ui, col, "Your colours");
+        let c = ui.c;
+        for (text, title, value) in [(false, "Page colour", ctx.config.custom_bg), (true, "Text colour", ctx.config.custom_text)] {
+            let r = Self::row(ui, col, title, &format!("#{value:06X}"), 150.0, 32.0);
+            let sw = Rect::new(r.x, r.y + 2.0, 28.0, 28.0);
+            ui.g.fill_round(sw, 6.0, Color::rgb(rgb(value)));
+            ui.g.stroke_round(sw, 6.0, 1.0, c.border);
+            if ui.button_ex(id2(id("pick-color"), text as usize), Rect::new(r.x + 38.0, r.y, 112.0, r.h), "Choose…", None, ButtonKind::Secondary, true) {
+                out.push(SettingsAction::PickColor(text));
+            }
+        }
+        let bg = rgb(ctx.config.custom_bg);
+        let ratio = bg.contrast(rgb(ctx.config.custom_text));
+        let (note, colour) = if ratio >= 7.0 {
+            (format!("Contrast {ratio:.1}:1, very easy to read."), c.muted)
+        } else if ratio >= 4.5 {
+            (format!("Contrast {ratio:.1}:1, easy to read."), c.muted)
+        } else {
+            let way = if ThemePalette::custom_toward(bg) == Rgb(255, 255, 255) { "lighter" } else { "darker" };
+            (format!("Contrast {ratio:.1}:1 is too low to read, so the text is made {way} until it reaches 4.5:1."), c.warning_text)
+        };
+        ui.text_opts(&note, &TextStyle::ui(SMALL), TextOpts::wrap(col.w - 8.0), col.x + 4.0, col.y + 2.0, colour);
+        col.gap(26.0);
+    }
+
+    fn accessibility_tab(&mut self, ui: &mut Ui, col: &mut Col, ctx: &mut SettingsCtx, out: &mut Vec<SettingsAction>) {
+        let c = ui.c;
+        let mut changed = false;
+        let t = &mut ctx.config.typography;
+
+        Self::section(ui, col, "Reading aids");
+        changed |= Self::toggle_row(
+            ui,
+            col,
+            "ruler",
+            "Reading ruler",
+            "Highlights the line you're on and dims the rest. Move it with ↑ ↓ or the mouse.",
+            &mut t.reading_ruler,
+        );
+        changed |= Self::toggle_row(ui, col, "bold-starts", "Bold word starts", "Bolds the first letters of each word, to lead the eye along the line.", &mut t.bold_word_starts);
+        changed |= Self::toggle_row(
+            ui,
+            col,
+            "focus",
+            "Focus mode",
+            "Just the text: no toolbar, page numbers or progress bar. Press F in the reader to switch, Esc to leave.",
+            &mut t.focus_mode,
+        );
+
+        Self::section(ui, col, "Easier text");
+        let r = Self::row(
+            ui,
+            col,
+            "Easy-to-read font",
+            "Atkinson Hyperlegible keeps similar letters distinct; OpenDyslexic weights the bottom of each letter.",
+            316.0,
+            32.0,
+        );
+        for (i, (label, choice)) in [("Atkinson", FontFamilyChoice::Atkinson), ("OpenDyslexic", FontFamilyChoice::OpenDyslexic)].into_iter().enumerate() {
+            let active = t.font_family == choice;
+            let br = Rect::new(r.x + i as f32 * 162.0, r.y, 154.0, r.h);
+            if ui.button_ex(id2(id("easy-font"), i), br, label, active.then_some(icons::CHECK), ButtonKind::Secondary, true) {
+                // A second click goes back to the default font.
+                t.font_family = if active { FontFamilyChoice::SansSerif } else { choice };
+                t.custom_font_name = None;
+                t.custom_font_path = None;
+                changed = true;
+            }
+        }
+        let pct = |v: f32| if v < 0.005 { "Normal".to_string() } else { format!("+{:.0}%", v * 100.0) };
+        changed |= Self::slider_row(ui, col, "letter-spacing", "Space between letters", &mut t.letter_spacing, (0.0, 0.3, 0.01), pct);
+        changed |= Self::slider_row(ui, col, "word-spacing", "Space between words", &mut t.word_spacing, (0.0, 1.0, 0.05), pct);
+        changed |= Self::slider_row(ui, col, "line-a11y", "Line height", &mut t.line_spacing_multiplier, (1.2, 2.6, 0.05), |v| format!("{v:.2}×"));
+
+        Self::section(ui, col, "Colour");
+        let r = Self::row(ui, col, "Page tint", "A soft colour over the page, like a coloured overlay.", 6.0 * 34.0 + 64.0, 30.0);
+        let none_r = Rect::new(r.x, r.y, 56.0, r.h);
+        if ui.button_ex(id("tint-none"), none_r, "None", None, if t.tint.is_none() { ButtonKind::Secondary } else { ButtonKind::Ghost }, true) {
+            t.tint = None;
+            changed = true;
+        }
+        for (i, (rgbv, name)) in TINTS.iter().enumerate() {
+            let sr = Rect::new(r.x + 64.0 + i as f32 * 34.0, r.y, 30.0, 30.0);
+            let resp = ui.interact_as(id2(id("tint"), i), sr, Role::Choice(t.tint == Some(*rgbv)), &format!("{name} tint"));
+            let active = t.tint == Some(*rgbv);
+            ui.g.fill_circle(sr.x + 15.0, sr.y + 15.0, 12.0, Color::rgb(rgb(*rgbv)));
+            if active {
+                ui.g.stroke_round(sr.shrink(0.5), 14.5, 2.0, c.text);
+            } else if resp.hovered {
+                ui.g.stroke_round(sr.shrink(0.5), 14.5, 1.0, c.muted);
+            }
+            ui.tip(id2(id("tint"), i), sr, name);
+            if resp.clicked {
+                t.tint = Some(*rgbv);
+                changed = true;
+            }
+        }
+        if t.tint.is_some() {
+            changed |= Self::slider_row(ui, col, "tint-strength", "Tint strength", &mut t.tint_strength, (0.05, 0.5, 0.01), |v| format!("{:.0}%", v * 100.0));
+        }
+        let r = Self::row(ui, col, "Page and text colours", "High Contrast, your own colours, and matching Windows are in Themes.", 132.0, 32.0);
+        if ui.button(id("to-themes"), r, "Open Themes") {
+            self.tab = TAB_THEMES;
+        }
+
+        Self::section(ui, col, "Interface");
+        let r = Self::row(ui, col, "Interface size", "Menus, buttons and labels. Text in books has its own size.", 330.0, 34.0);
+        let labels = ["90%", "100%", "110%", "125%", "150%"];
+        let mut pick = UI_SCALES.iter().position(|s| (s - ctx.config.ui_scale).abs() < 0.01).unwrap_or(1);
+        if ui.segmented(id("ui-scale"), r, &labels, &mut pick) {
+            ctx.config.ui_scale = UI_SCALES[pick];
+            changed = true;
+        }
+
+        Self::section(ui, col, "Read aloud");
+        changed |= Self::slider_row(ui, col, "speech-rate", "Reading voice speed", &mut ctx.config.speech_rate, (0.5, 2.0, 0.05), |v| format!("{v:.2}×"));
+        ui.text_opts(
+            "Start reading aloud from the reader's toolbar, or press R. Voices come from Windows (Settings → Time & language → Speech).",
+            &TextStyle::ui(SMALL),
+            TextOpts::wrap(col.w - 8.0),
+            col.x + 4.0,
+            col.y + 2.0,
+            c.muted,
+        );
+        col.gap(40.0);
+
+        if changed {
+            out.push(SettingsAction::ConfigChanged);
         }
     }
 
@@ -520,7 +728,7 @@ impl SettingsScreen {
 
     fn shortcuts_tab(&mut self, ui: &mut Ui, col: &mut Col) {
         let c = ui.c;
-        let groups: [(&str, &[(&str, &str)]); 2] = [
+        let groups: [(&str, &[(&str, &str)]); 3] = [
             (
                 "Reader",
                 &[
@@ -528,11 +736,22 @@ impl SettingsScreen {
                     ("←  PgUp  Shift+Space", "Previous page"),
                     ("Home  End", "First / last page of the chapter"),
                     ("Ctrl+→  Ctrl+←", "Next / previous chapter"),
+                    ("↑  ↓", "Move the reading ruler a line (when it's on)"),
                     ("Ctrl+F", "Search in the work"),
                     ("Ctrl+B", "Bookmark this page"),
                     ("Ctrl+=  Ctrl+-", "Larger / smaller text"),
+                    ("R", "Read aloud, or stop"),
+                    ("F", "Focus mode"),
                     ("F11", "Full screen"),
-                    ("Esc", "Close panel or leave full screen"),
+                    ("Esc", "Stop reading aloud, close a panel, or leave focus mode or full screen"),
+                ],
+            ),
+            (
+                "Everywhere",
+                &[
+                    ("Tab  Shift+Tab", "Move between buttons and fields"),
+                    ("Enter  Space", "Press the highlighted button"),
+                    ("←  →", "Move a highlighted slider"),
                 ],
             ),
             ("Text fields", &[("Enter", "Submit"), ("Esc", "Cancel"), ("Ctrl+C  Ctrl+V  Ctrl+Z", "Copy, paste, undo")]),

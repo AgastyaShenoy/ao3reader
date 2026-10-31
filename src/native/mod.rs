@@ -10,12 +10,15 @@ mod account;
 mod browse;
 pub mod app;
 mod edit;
+mod fonts;
 mod gfx;
 mod icons;
 mod library;
 mod logo;
 mod reader;
 mod settings;
+mod speech;
+mod uia;
 mod ui;
 mod worker;
 
@@ -44,10 +47,14 @@ const EDIT_FONT_DIP: f32 = 13.5;
 
 thread_local! {
     static HOST: RefCell<Option<Host>> = const { RefCell::new(None) };
+    /// What screen readers see; kept apart from the host so they can ask at any time.
+    static A11Y: RefCell<Option<uia::Shared>> = const { RefCell::new(None) };
 }
 
 struct Host {
     hwnd: HWND,
+    /// The monitor's DPI; the renderer runs at this times the interface size.
+    win_dpi: f32,
     gfx: Gfx,
     input: Input,
     mem: Memory,
@@ -55,6 +62,9 @@ struct Host {
     hand_cursor: bool,
     edit_brush: HBRUSH,
     edit_brush_color: u32,
+    a11y: uia::Shared,
+    /// What the focused control said last (the page in the reader changes under the focus).
+    focus_said: String,
 }
 
 fn colorref(c: gfx::Color) -> COLORREF {
@@ -89,26 +99,76 @@ impl Host {
     }
 
     fn colors(&self) -> Colors {
-        Colors::from_palette(&self.app.config.theme.palette())
+        Colors::from_palette(&self.app.config.palette())
+    }
+
+    /// Reads the system's dark mode and high-contrast setting and passes them to the app.
+    fn read_system_look(&mut self) {
+        unsafe {
+            use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+            use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
+            let mut light: u32 = 1;
+            let mut size = 4u32;
+            let ok = RegGetValueW(
+                HKEY_CURRENT_USER,
+                w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+                w!("AppsUseLightTheme"),
+                RRF_RT_REG_DWORD,
+                None,
+                Some(&mut light as *mut u32 as *mut core::ffi::c_void),
+                Some(&mut size),
+            )
+            .is_ok();
+            let mut hc = HIGHCONTRASTW { cbSize: std::mem::size_of::<HIGHCONTRASTW>() as u32, ..Default::default() };
+            let hc_on = SystemParametersInfoW(SPI_GETHIGHCONTRAST, hc.cbSize, Some(&mut hc as *mut HIGHCONTRASTW as *mut core::ffi::c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).is_ok()
+                && hc.dwFlags.contains(HCF_HIGHCONTRASTON);
+            self.app.on_system_look(ok && light == 0, hc_on);
+        }
     }
 
     fn frame(&mut self) -> FrameOut {
         if self.gfx.set_ui_family(self.app.config.typography.ui_font.as_deref()) {
             self.set_edit_font();
         }
+        // The interface size the user chose (1.0 unless they changed it).
+        let want = self.win_dpi * self.app.config.ui_scale.clamp(0.75, 2.0);
+        if (self.gfx.dpi - want).abs() > 0.01 {
+            self.gfx.set_dpi(want);
+            self.set_edit_font();
+        }
         let colors = self.colors();
         let size = self.client_dips();
+        let moved = self.mem.keyboard(&mut self.input);
+        if moved && self.mem.focus.is_none_or(|f| !self.mem.edits.contains_key(&f)) && unsafe { GetFocus() } != self.hwnd {
+            // Tab left a text field.
+            unsafe {
+                let _ = SetFocus(Some(self.hwnd));
+            }
+        }
         let out = {
             let mut ui = Ui::new(&mut self.gfx, &self.input, &mut self.mem, colors, self.hwnd, size);
             self.app.frame(&mut ui);
             ui.finish()
         };
         self.input.clear_transient();
+        self.update_a11y(moved);
         self.hand_cursor = out.hand_cursor;
         if let Some(ms) = out.wake_ms {
             unsafe { SetTimer(Some(self.hwnd), TIMER_WAKE, ms.max(10), None) };
         }
         out
+    }
+
+    /// Hands this frame's controls to screen readers, and tells them when the keyboard focus
+    /// moved (or the focused page changed under it), so they read it out.
+    fn update_a11y(&mut self, moved: bool) {
+        self.a11y.update(&self.mem.nodes, self.mem.focus.filter(|_| self.mem.focus_ring), self.scale());
+        let Some(f) = self.mem.focus.filter(|_| self.mem.focus_ring) else { return };
+        let Some(node) = self.mem.nodes.iter().find(|n| n.id == f) else { return };
+        if moved || node.name != self.focus_said {
+            self.focus_said = node.name.clone();
+            self.a11y.focus_changed(f);
+        }
     }
 
     /// Rebuilds the text boxes' font for the current DPI and interface face.
@@ -298,9 +358,27 @@ impl Host {
                     SetBkColor(hdc, colorref(c.input_bg));
                     Some(LRESULT(self.edit_brush.0 as isize))
                 }
+                uia::WM_APP_A11Y => {
+                    // A screen reader pressed or focused a control.
+                    let id = lp.0 as u64;
+                    if wp.0 == uia::ACT_CLICK {
+                        self.mem.activate = Some(id);
+                    }
+                    self.mem.focus = Some(id);
+                    self.mem.focus_ring = true;
+                    self.input_frame();
+                    Some(LRESULT(0))
+                }
+                WM_SETTINGCHANGE => {
+                    // Light/dark mode or high contrast may have changed.
+                    self.read_system_look();
+                    self.invalidate();
+                    None
+                }
                 WM_DPICHANGED => {
                     let dpi = loword(wp.0) as f32;
-                    self.gfx.set_dpi(dpi);
+                    self.win_dpi = dpi;
+                    self.gfx.set_dpi(dpi * self.app.config.ui_scale.clamp(0.75, 2.0));
                     self.set_edit_font();
                     let r = &*(lp.0 as *const RECT);
                     let _ = SetWindowPos(self.hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -340,6 +418,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 return LRESULT(0);
             }
             WM_ERASEBKGND => return LRESULT(1),
+            // Screen readers asking for the window's controls.
+            WM_GETOBJECT if lp.0 as i32 == windows::Win32::UI::Accessibility::UiaRootObjectId => {
+                if let Some(root) = A11Y.with(|a| a.borrow().as_ref().map(|s| s.root())) {
+                    return windows::Win32::UI::Accessibility::UiaReturnRawElementProvider(hwnd, wp, lp, &root);
+                }
+            }
             WM_DESTROY => {
                 PostQuitMessage(0);
                 return LRESULT(0);
@@ -382,6 +466,24 @@ fn run_deferred() {
                 let _ = SetWindowTextW(hwnd, &HSTRING::from(title));
             },
             Deferred::Fullscreen(on) => set_fullscreen(hwnd, on),
+            Deferred::PickColor { text, current } => unsafe {
+                use windows::Win32::UI::Controls::Dialogs::{ChooseColorW, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW};
+                // COLORREF is 0x00BBGGRR.
+                let swap = |c: u32| ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF);
+                let mut custom = [COLORREF(0x00FF_FFFF); 16];
+                let mut cc = CHOOSECOLORW {
+                    lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
+                    hwndOwner: hwnd,
+                    rgbResult: COLORREF(swap(current)),
+                    lpCustColors: custom.as_mut_ptr(),
+                    Flags: CC_FULLOPEN | CC_RGBINIT,
+                    ..Default::default()
+                };
+                if ChooseColorW(&mut cc).as_bool() {
+                    let rgb = swap(cc.rgbResult.0);
+                    with_host(|host| host.app.on_color(text, rgb));
+                }
+            },
             Deferred::ImportFile => {
                 let picked = rfd::FileDialog::new()
                     .set_title("Import a work")
@@ -459,6 +561,8 @@ unsafe fn set_window_icons(hwnd: HWND, gfx: &mut Gfx, dpi: u32) {
 pub fn run() -> Result<()> {
     let config = AppConfig::load();
     unsafe {
+        // COM, for pictures (WIC), the reading voice and screen readers' names for text fields.
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         let hinst = GetModuleHandleW(None)?;
         let class = w!("AO3ReaderNative");
         let wc = WNDCLASSEXW {
@@ -497,11 +601,16 @@ pub fn run() -> Result<()> {
 
         let mut app = App::new(config);
         app.attach(hwnd);
+        // "Open with": the book's path is the first argument.
+        if let Some(path) = std::env::args_os().nth(1).map(std::path::PathBuf::from).filter(|p| p.is_file()) {
+            app.open_file(path);
+        }
         let mut gfx = Gfx::new(dpi as f32)?;
         set_window_icons(hwnd, &mut gfx, dpi);
         let edit_font = create_edit_font(dpi as f32, EDIT_FONT_DIP, gfx.ui_family());
         let host = Host {
             hwnd,
+            win_dpi: dpi as f32,
             gfx,
             input: Input::default(),
             mem: Memory::new(edit_font),
@@ -509,10 +618,14 @@ pub fn run() -> Result<()> {
             hand_cursor: false,
             edit_brush: CreateSolidBrush(COLORREF(0)),
             edit_brush_color: u32::MAX,
+            a11y: uia::Shared::new(hwnd),
+            focus_said: String::new(),
         };
+        A11Y.with(|a| *a.borrow_mut() = Some(host.a11y.clone()));
         HOST.with(|h| *h.borrow_mut() = Some(host));
         HOST.with(|h| {
             if let Some(host) = h.borrow_mut().as_mut() {
+                host.read_system_look();
                 host.sync_edit_colors();
             }
         });
@@ -525,6 +638,7 @@ pub fn run() -> Result<()> {
             DispatchMessageW(&msg);
         }
         HOST.with(|h| h.borrow_mut().take());
+        A11Y.with(|a| a.borrow_mut().take());
     }
     Ok(())
 }

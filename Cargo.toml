@@ -6,7 +6,7 @@ edition = "2024"
 [features]
 default = ["legacy-ui", "native-ui"]
 # The native Win32 interface: Direct2D software rendering + DirectWrite, no GPU driver.
-native-ui = ["dep:windows", "dep:windows-numerics"]
+native-ui = ["dep:windows", "dep:windows-core", "dep:windows-numerics"]
 # The original eframe/egui (wgpu DX12) interface. Kept building until the native
 # Win32 interface reaches feature parity, then removed together with this feature.
 legacy-ui = ["dep:eframe", "dep:egui", "dep:wgpu", "dep:arboard", "dep:webbrowser", "dep:ttf-parser"]
@@ -47,6 +47,8 @@ wgpu = { version = "27.0.1", optional = true, default-features = false, features
 
 [target.'cfg(windows)'.dependencies]
 windows-numerics = { version = "0.2", optional = true }
+# The COM objects screen readers talk to (`#[implement]` needs the crate by name).
+windows-core = { version = "0.61", optional = true }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.61.3"
@@ -58,10 +60,18 @@ features = [
     "Win32_Graphics_DirectWrite",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
+    "Win32_Media_Speech",
+    "Win32_System_Com",
     "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
+    "Win32_System_Registry",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
     "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",

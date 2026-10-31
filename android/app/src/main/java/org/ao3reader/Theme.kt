@@ -43,8 +43,23 @@ class Pal(j: JSONObject) {
 object Settings {
     lateinit var themes: List<Pal>
     lateinit var config: JSONObject
+    /** The phone is in dark mode (for "Match system"). */
+    var night = false
 
-    val pal: Pal get() = themes.firstOrNull { it.id == config.optString("theme") } ?: themes[0]
+    /** The theme in use: the one chosen, or with "Match system" the light or the dark one. */
+    val themeId: String get() = when {
+        !config.optBoolean("follow_system") -> config.optString("theme")
+        night -> config.optString("dark_theme", "Dark")
+        else -> config.optString("light_theme", "PaperLight")
+    }
+    val pal: Pal get() = themes.firstOrNull { it.id == themeId } ?: themes[0]
+    /** Bigger buttons with more room between them (48 dp touch targets). */
+    val big: Boolean get() = config.optBoolean("larger_targets")
+
+    /** Theme colours again, after "Your colours" change. */
+    fun reloadThemes() {
+        themes = Core.arr("themes").objects().map(::Pal)
+    }
     val typo: JSONObject get() = config.getJSONObject("typography")
 
     /** The interface font family ("serif", "monospace", …), or null for the system face. */
@@ -66,3 +81,13 @@ object Settings {
 }
 
 fun alpha(color: Int, a: Float): Int = (color and 0x00FFFFFF) or ((a * 255).toInt().coerceIn(0, 255) shl 24)
+
+/** WCAG contrast ratio of two colours (1–21). */
+fun contrast(a: Int, b: Int): Double {
+    fun lum(c: Int): Double {
+        fun ch(v: Int): Double = (v / 255.0).let { if (it <= 0.04045) it / 12.92 else Math.pow((it + 0.055) / 1.055, 2.4) }
+        return 0.2126 * ch((c shr 16) and 0xFF) + 0.7152 * ch((c shr 8) and 0xFF) + 0.0722 * ch(c and 0xFF)
+    }
+    val (x, y) = lum(a) to lum(b)
+    return (maxOf(x, y) + 0.05) / (minOf(x, y) + 0.05)
+}

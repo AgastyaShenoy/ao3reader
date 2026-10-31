@@ -10,6 +10,8 @@ pub enum ReaderThemeType {
     Nord,
     Midnight,
     HighContrast,
+    /// The reader's own page and text colours (Settings → Themes); see `AppConfig::palette`.
+    Custom,
 }
 
 impl ReaderThemeType {
@@ -22,6 +24,7 @@ impl ReaderThemeType {
             ReaderThemeType::Nord,
             ReaderThemeType::Midnight,
             ReaderThemeType::HighContrast,
+            ReaderThemeType::Custom,
         ]
     }
 
@@ -34,6 +37,7 @@ impl ReaderThemeType {
             ReaderThemeType::Nord => "Nord Arctic",
             ReaderThemeType::Midnight => "Midnight Blue",
             ReaderThemeType::HighContrast => "High Contrast",
+            ReaderThemeType::Custom => "Your colours",
         }
     }
 
@@ -117,6 +121,8 @@ impl ReaderThemeType {
                 notes_bg: Rgb(24, 36, 61),
                 is_dark: true,
             },
+            // The default "Your colours" (warm paper); the chosen colours come from the config.
+            ReaderThemeType::Custom => ThemePalette::custom(Rgb(250, 244, 230), Rgb(40, 36, 32)),
             // White on black with bright edges, and the classic high-contrast yellow for the
             // accent (with black text on it): every role is far past the WCAG minimums.
             ReaderThemeType::HighContrast => ThemePalette {
@@ -188,6 +194,39 @@ pub struct ThemePalette {
 }
 
 impl ThemePalette {
+    /// A full palette from just a page colour and a text colour: surfaces, borders and secondary
+    /// text are mixed from the two, and all text is kept readable. Colours too alike to read
+    /// (the app's own menus use them too) get the text moved toward black or white until it
+    /// reaches 4.5:1.
+    pub fn custom(bg: Rgb, text: Rgb) -> ThemePalette {
+        let text = text.readable_on(bg, Self::custom_toward(bg));
+        let is_dark = bg.luminance() < text.luminance();
+        let card = bg.mix(text, 0.07);
+        let accent = if is_dark { Rgb(176, 48, 48) } else { Rgb(153, 0, 0) };
+        ThemePalette {
+            bg,
+            surface: bg.mix(text, 0.04),
+            card,
+            text,
+            text_muted: text.mix(bg, 0.35).readable_on(card, text),
+            accent,
+            accent_hover: accent.mix(Rgb(255, 255, 255), 0.12),
+            border: bg.mix(text, 0.16),
+            quote_bg: bg.mix(text, 0.05),
+            notes_bg: bg.mix(text, 0.045),
+            is_dark,
+        }
+    }
+
+    /// Where `custom` moves text that's too faint on `bg`: white on dark pages, black on light.
+    pub fn custom_toward(bg: Rgb) -> Rgb {
+        if bg.contrast(Rgb(255, 255, 255)) > bg.contrast(Rgb(0, 0, 0)) {
+            Rgb(255, 255, 255)
+        } else {
+            Rgb(0, 0, 0)
+        }
+    }
+
     /// The accent as a text colour: the crimson itself on light themes, a softened tone of it
     /// on dark ones, where the raw accent is too dark to read.
     pub fn accent_text(&self) -> Rgb {
@@ -282,6 +321,17 @@ mod legacy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_colours_stay_readable() {
+        // Dark text on a dark page: the text is lightened, and the app reads as dark.
+        let p = ThemePalette::custom(Rgb(30, 42, 56), Rgb(40, 36, 32));
+        assert!(p.text.contrast(p.bg) >= 4.5 && p.is_dark);
+        // Already readable colours are kept as chosen.
+        let q = ThemePalette::custom(Rgb(250, 244, 230), Rgb(40, 36, 32));
+        assert_eq!(q.text, Rgb(40, 36, 32));
+        assert!(!q.is_dark && q.text_muted.contrast(q.card) >= 4.5);
+    }
 
     #[test]
     fn every_theme_keeps_text_readable() {

@@ -1,7 +1,9 @@
 package org.ao3reader
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
@@ -45,11 +47,47 @@ class MainActivity : Activity() {
     /** Called with the result of a document picker or creator started by a screen. */
     var onDocument: ((Int, Intent?) -> Unit)? = null
 
+    override fun attachBaseContext(base: Context) {
+        super.attachBaseContext(base)
+        // Interface size (Settings → Accessibility): every dp and sp in the app scales with it.
+        val scale = base.getSharedPreferences("ui", MODE_PRIVATE).getFloat("scale", 1f)
+        if (scale != 1f) {
+            applyOverrideConfiguration(Configuration().apply { densityDpi = (base.resources.configuration.densityDpi * scale).toInt() })
+        }
+    }
+
+    /** Sets the interface size and starts the screen again at it (back on Settings). */
+    fun setUiScale(scale: Float) {
+        getSharedPreferences("ui", MODE_PRIVATE).edit().putFloat("scale", scale).apply()
+        Settings.config.put("ui_scale", scale.toDouble())
+        Settings.save()
+        recreate()
+    }
+
+    override fun onSaveInstanceState(out: Bundle) {
+        super.onSaveInstanceState(out)
+        out.putInt("tab", if (tab == ACCOUNT || tab == IMPORT) SETTINGS else tab)
+    }
+
+    private fun isNight(c: Configuration) = (c.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+
+    /** Dark mode switched on or off: "Match system" follows it. */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val night = isNight(newConfig)
+        if (night != Settings.night) {
+            Settings.night = night
+            if (Settings.config.optBoolean("follow_system")) rebuild()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val init = Core.obj("init", json("dir" to filesDir.absolutePath))
         Settings.themes = init.getJSONArray("themes").objects().map(::Pal)
         Settings.load()
+        Settings.night = isNight(resources.configuration)
+        tab = savedInstanceState?.getInt("tab", LIBRARY) ?: LIBRARY
 
         root = FrameLayout(this)
         // Keep the first text field from taking focus (and the keyboard) on launch.
@@ -62,6 +100,26 @@ class MainActivity : Activity() {
 
         if (Build.VERSION.SDK_INT >= 33) {
             onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) { handleBack() }
+        }
+        openIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        openIntent(intent)
+    }
+
+    /** A book opened with the app from elsewhere ("Open with"): imported, then opened. */
+    private fun openIntent(i: Intent?) {
+        val uri = i?.takeIf { it.action == Intent.ACTION_VIEW }?.data ?: return
+        i.data = null // handled once, even if the activity is shown again
+        val tmp = java.io.File(cacheDir, "open.bin")
+        val copied = runCatching { contentResolver.openInputStream(uri)?.use { input -> tmp.outputStream().use { input.copyTo(it) } } != null }.getOrDefault(false)
+        if (!copied) return toast("Couldn't open that file")
+        toast("Opening the book…")
+        Core.background("import", json("path" to tmp.absolutePath)) { r ->
+            tmp.delete()
+            r.onSuccess { openWork((it as org.json.JSONObject).getString("id")) }.onFailure { toast(it.message ?: "Couldn't open that book") }
         }
     }
 
@@ -250,7 +308,7 @@ class MainActivity : Activity() {
         }
         runCatching { Core.req("follows.read", json("work" to id)) }
         val r = ReaderScreen(this, id, opened)
-        reader?.let { root.removeView(it) }
+        reader?.let { it.close(); root.removeView(it) }
         reader = r
         root.addView(r, frame())
         r.setInsets(insetTop, insetBottom, cutoutTop)
@@ -264,6 +322,7 @@ class MainActivity : Activity() {
     fun closeReader() {
         val r = reader ?: return
         r.saveProgress()
+        r.close()
         reader = null
         immersive(false)
         // Rebuild the screens underneath, then let the reader fade away on top of them.

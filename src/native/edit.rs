@@ -8,7 +8,7 @@ use windows::core::{w, HSTRING};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::Controls::EM_SETCUEBANNER;
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_ESCAPE, VK_RETURN};
+use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_ESCAPE, VK_RETURN, VK_TAB};
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -54,6 +54,12 @@ impl EditBox {
             if !placeholder.is_empty() {
                 let cue = HSTRING::from(placeholder);
                 SendMessageW(hwnd, EM_SETCUEBANNER, Some(WPARAM(0)), Some(LPARAM(cue.as_ptr() as isize)));
+                // Screen readers name the field by what it's for.
+                use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+                use windows::Win32::UI::Accessibility::{CAccPropServices, IAccPropServices, PROPID_ACC_NAME};
+                if let Ok(svc) = CoCreateInstance::<_, IAccPropServices>(&CAccPropServices, None, CLSCTX_INPROC_SERVER) {
+                    let _ = svc.SetHwndPropStr(hwnd, OBJID_CLIENT.0 as u32, 0, PROPID_ACC_NAME, &cue);
+                }
             }
             let _ = SetWindowSubclass(hwnd, Some(edit_subclass), 1, parent.0 as usize);
             Some(Self {
@@ -145,7 +151,14 @@ unsafe extern "system" fn edit_subclass(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 let _ = PostMessageW(Some(HWND(parent as *mut _)), WM_APP_EDIT_KEY, WPARAM(ctrl_id as usize), LPARAM(wp.0 as isize));
                 LRESULT(0)
             }
-            WM_CHAR if wp.0 == '\r' as usize || wp.0 == 0x1b => LRESULT(0),
+            // Tab leaves the field: the window moves the focus on.
+            WM_KEYDOWN if wp.0 as u16 == VK_TAB.0 => {
+                let parent = HWND(parent as *mut _);
+                let _ = SetFocus(Some(parent));
+                let _ = PostMessageW(Some(parent), WM_KEYDOWN, wp, LPARAM(0));
+                LRESULT(0)
+            }
+            WM_CHAR if wp.0 == '\r' as usize || wp.0 == 0x1b || wp.0 == '\t' as usize => LRESULT(0),
             _ => DefSubclassProc(hwnd, msg, wp, lp),
         }
     }

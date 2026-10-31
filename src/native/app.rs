@@ -51,6 +51,8 @@ pub enum AppEvent {
 pub enum Deferred {
     PickFontFile,
     ImportFile,
+    /// Windows' colour picker for "Your colours": the text colour (true) or the page colour.
+    PickColor { text: bool, current: u32 },
     SaveFile { name: String, filter: &'static str, ext: &'static str, data: Vec<u8> },
     Open(String),
     Fullscreen(bool),
@@ -90,6 +92,11 @@ pub struct App {
     account: AccountScreen,
     /// Cookie being verified with AO3 before it is saved.
     pending_cookie: Option<String>,
+    /// The file being imported was opened with the app ("Open with"), so read it once it's in.
+    open_imported: bool,
+    /// The system's dark mode and high-contrast setting, kept up to date by the window.
+    pub system_dark: bool,
+    pub system_hc: bool,
 }
 
 /// A file name that Windows accepts, from a work title.
@@ -117,6 +124,8 @@ pub fn reader_family(t: &TypographySettings) -> Family {
             let file = if t.custom_font_name.as_deref() == Some(name.as_str()) { t.custom_font_path.clone() } else { None };
             Family::Named { name: name.clone(), file }
         }
+        FontFamilyChoice::Atkinson => Family::Named { name: "Atkinson Hyperlegible".into(), file: super::fonts::atkinson() },
+        FontFamilyChoice::OpenDyslexic => Family::Named { name: "OpenDyslexic".into(), file: super::fonts::open_dyslexic() },
     }
 }
 
@@ -126,6 +135,8 @@ pub fn reader_font_label(t: &TypographySettings) -> String {
         FontFamilyChoice::Serif => "Georgia".into(),
         FontFamilyChoice::Monospace => "Monospace".into(),
         FontFamilyChoice::Custom(name) => name.clone(),
+        FontFamilyChoice::Atkinson => "Atkinson Hyperlegible".into(),
+        FontFamilyChoice::OpenDyslexic => "OpenDyslexic".into(),
     }
 }
 
@@ -153,6 +164,9 @@ impl App {
             library_screen: LibraryScreen::default(),
             account: AccountScreen::default(),
             pending_cookie: None,
+            open_imported: false,
+            system_dark: true,
+            system_hc: false,
         }
     }
 
@@ -216,11 +230,18 @@ impl App {
             AppEvent::Imported(result) => {
                 let imp = &mut self.settings.import;
                 imp.busy = false;
+                let open = std::mem::take(&mut self.open_imported);
                 match result.and_then(|work| self.library.save_work(&work).map(|_| work)) {
-                    Ok(work) => {
+                    Ok(mut work) => {
                         imp.error = None;
                         imp.done = Some((work.meta.id.clone(), work.meta.title.clone()));
-                        self.set_toast(format!("Imported “{}”", work.meta.title));
+                        // The pictures are on disk now; don't keep their bytes in memory.
+                        work.resources = Vec::new();
+                        if open {
+                            self.open_loaded(work);
+                        } else {
+                            self.set_toast(format!("Imported “{}”", work.meta.title));
+                        }
                     }
                     Err(e) => {
                         imp.error = Some(e);
@@ -323,6 +344,13 @@ impl App {
     fn start_fetch(&mut self, work_id: String, open: bool) {
         let client = self.client.clone();
         self.run_job(move || AppEvent::Fetched { result: client.fetch_work(&work_id), id: work_id, open });
+    }
+
+    /// A book opened with the app (its path on the command line, as "Open with" passes it):
+    /// imported, then opened in the reader.
+    pub fn open_file(&mut self, path: std::path::PathBuf) {
+        self.open_imported = true;
+        self.import_file(path);
     }
 
     /// Reads and parses an EPUB, AO3 .html download or saved .json work off the UI thread.
@@ -436,6 +464,7 @@ impl App {
                     self.tab = Tab::Settings;
                     self.settings.show_typography();
                 }
+                ReaderAction::Notice(msg) => self.set_toast(msg),
             }
         }
         if self.reader.as_ref().is_some_and(|r| r.progress_dirty) {
@@ -478,6 +507,43 @@ impl App {
         }
     }
 
+    /// The system's look changed (or is first known): follow it if asked to.
+    pub fn on_system_look(&mut self, dark: bool, high_contrast: bool) {
+        self.system_dark = dark;
+        self.system_hc = high_contrast;
+        self.follow_system();
+    }
+
+    fn follow_system(&mut self) {
+        let t = self.config.system_theme(self.system_dark, self.system_hc);
+        if self.config.theme != t {
+            self.config.theme = t;
+            self.mark_config_dirty();
+        }
+    }
+
+    /// A colour chosen for "Your colours".
+    pub fn on_color(&mut self, text: bool, rgb: u32) {
+        if text {
+            self.config.custom_text = rgb;
+        } else {
+            self.config.custom_bg = rgb;
+        }
+        let custom = crate::reader::theme::ReaderThemeType::Custom;
+        if self.config.follow_system {
+            // "Your colours" becomes the theme for the system mode its page colour suits.
+            if self.config.palette_of(custom).is_dark {
+                self.config.dark_theme = custom;
+            } else {
+                self.config.light_theme = custom;
+            }
+            self.follow_system();
+        } else {
+            self.config.theme = custom;
+        }
+        self.mark_config_dirty();
+    }
+
     pub fn frame(&mut self, ui: &mut Ui) {
         let (w, h) = ui.size;
         let c = ui.c;
@@ -505,8 +571,10 @@ impl App {
                 Tab::Account => self.account_frame(ui, body),
                 Tab::Reader => {}
             }
-            // Drawn last so it sits on top of the scrolled content.
+            // Drawn last so it sits on top of the scrolled content, but first for Tab.
+            let mark = ui.node_mark();
             self.header(ui, Rect::new(0.0, 0.0, w, HEADER_H));
+            ui.tab_first(mark);
         }
         self.toast_overlay(ui);
 
@@ -570,6 +638,9 @@ impl App {
             if ui.button_ex(id("nav-update"), br, label, Some(icons::UPDATE), ButtonKind::Primary, true) {
                 self.tab = Tab::Settings;
                 self.settings.show_updates();
+            }
+            if label.is_empty() {
+                ui.tip(id("nav-update"), br, "Update available");
             }
         }
     }
@@ -737,6 +808,7 @@ impl App {
         }
         let storage_dir = AppConfig::get_app_dir();
         let mut ctx = SettingsCtx {
+            system_dark: self.system_dark,
             config: &mut self.config,
             update: &self.update_status,
             fonts: self.font_families.as_deref().unwrap_or(&[]),
@@ -745,7 +817,14 @@ impl App {
         let actions = self.settings.frame(ui, body, &mut ctx);
         for a in actions {
             match a {
-                SettingsAction::ConfigChanged => self.mark_config_dirty(),
+                SettingsAction::ConfigChanged => {
+                    self.follow_system();
+                    self.mark_config_dirty();
+                }
+                SettingsAction::PickColor(text) => {
+                    let current = if text { self.config.custom_text } else { self.config.custom_bg };
+                    self.deferred.push(Deferred::PickColor { text, current });
+                }
                 SettingsAction::CheckUpdates => self.check_updates(),
                 SettingsAction::PickFontFile => self.deferred.push(Deferred::PickFontFile),
                 SettingsAction::Open(target) => self.deferred.push(Deferred::Open(target)),

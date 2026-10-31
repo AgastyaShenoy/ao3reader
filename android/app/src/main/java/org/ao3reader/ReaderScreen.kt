@@ -3,6 +3,8 @@ package org.ao3reader
 import android.app.AlertDialog
 import android.os.Handler
 import android.os.Looper
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
@@ -54,6 +56,18 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
     private val saveLater = Runnable { saveProgress() }
     private var dirty = false
 
+    // Read aloud, with the phone's own text-to-speech voice.
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private var reading = false
+    private var aloudButton: FrameLayout? = null
+    /** The block being read aloud (an index into the page's blocks), or -1. */
+    var aloudBlock = -1
+        private set
+    /** The word being said, as character positions in that block's text. */
+    var aloudWord: IntRange? = null
+        private set
+
     init {
         loadChapter(chapter, opened.getDouble("position").toFloat())
         rebuild()
@@ -80,14 +94,16 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         page.relayout()
 
         top = a.row().apply { setBackgroundColor(p.surface) }
-        top.addView(a.iconButton(R.drawable.ic_back, p.text) { a.closeReader() })
-        top.addView(a.iconButton(R.drawable.ic_list, p.text) { openContents() })
+        top.addView(a.iconButton(R.drawable.ic_back, p.text, "Back to library") { a.closeReader() })
+        top.addView(a.iconButton(R.drawable.ic_list, p.text, "Contents and bookmarks") { openContents() })
         top.addView(a.label(meta.getString("title"), 15f, p.text, bold = true, lines = 1).apply { gravity = Gravity.CENTER_VERTICAL },
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = a.dp(4) })
-        top.addView(a.iconButton(R.drawable.ic_search, p.text) { openSearch() })
-        top.addView(a.iconButton(R.drawable.ic_bookmark, p.text) { addBookmark() })
-        top.addView(a.iconButton(R.drawable.ic_heart, p.text) { kudos() })
-        top.addView(a.iconButton(R.drawable.ic_text, p.text) { openAppearance() })
+        top.addView(a.iconButton(R.drawable.ic_search, p.text, "Search in this work") { openSearch() })
+        top.addView(a.iconButton(R.drawable.ic_bookmark, p.text, "Bookmark this page") { addBookmark() })
+        if (meta.optBoolean("ao3", true)) top.addView(a.iconButton(R.drawable.ic_heart, p.text, "Leave kudos on AO3") { kudos() })
+        aloudButton = a.iconButton(if (reading) R.drawable.ic_stop else R.drawable.ic_volume, p.text, if (reading) "Stop reading aloud" else "Read aloud", reading) { toggleAloud() }
+        top.addView(aloudButton)
+        top.addView(a.iconButton(R.drawable.ic_text, p.text, "Text and theme") { openAppearance() })
         addView(top, frame(h = ViewGroup.LayoutParams.WRAP_CONTENT, gravity = Gravity.TOP))
 
         bottom = a.column().apply { setBackgroundColor(p.surface) }
@@ -96,10 +112,10 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         track.addView(progressLine, frame(0, a.dp(3)))
         bottom.addView(track, lp(h = a.dp(3)))
         val row = a.row()
-        row.addView(a.iconButton(R.drawable.ic_prev, p.text) { if (chapter > 0) jumpChapter(chapter - 1, 0f) })
+        row.addView(a.iconButton(R.drawable.ic_prev, p.text, "Previous chapter") { if (chapter > 0) jumpChapter(chapter - 1, 0f) })
         status = a.label("", 12.5f, p.muted, lines = 2).apply { gravity = Gravity.CENTER }
         row.addView(status, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        row.addView(a.iconButton(R.drawable.ic_next, p.text) { if (chapter + 1 < chapters.size) jumpChapter(chapter + 1, 0f) })
+        row.addView(a.iconButton(R.drawable.ic_next, p.text, "Next chapter") { if (chapter + 1 < chapters.size) jumpChapter(chapter + 1, 0f) })
         bottom.addView(row)
         addView(bottom, frame(h = ViewGroup.LayoutParams.WRAP_CONTENT, gravity = Gravity.BOTTOM))
         bottom.gone(!Settings.typo.optBoolean("show_reading_progress_bar", true))
@@ -156,6 +172,8 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
                 if (chapters.size > 1) "  ·  ${minutes(stats.getLong("chapter_words_left"), wpm)} in chapter" else ""
         } else ""
         status.text = parts.joinToString("  ·  ") + "\n" + second
+        // TalkBack reads the page's text.
+        page.contentDescription = page.visibleText()
         progressLine.post {
             val w = (progressLine.parent as? View)?.width ?: 0
             progressLine.layoutParams = FrameLayout.LayoutParams((w * pct / 100).toInt(), a.dp(3))
@@ -170,6 +188,106 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         dirty = false
         val done = chapter + 1 >= chapters.size && page.atEnd()
         runCatching { Core.req("progress.save", json("chapter" to chapter, "position" to page.anchor().toDouble(), "completed" to done)) }
+    }
+
+    // ---- read aloud ----------------------------------------------------------------------
+
+    private fun toggleAloud() = if (reading) stopAloud() else startAloud()
+
+    private fun startAloud() {
+        reading = true
+        updateAloudButton()
+        if (tts == null) {
+            tts = TextToSpeech(a) { status ->
+                if (status == TextToSpeech.SUCCESS) {
+                    ttsReady = true
+                    if (reading) sayFrom(page.firstSpeakable())
+                } else {
+                    // No voice to use: try again from scratch next time.
+                    tts?.shutdown()
+                    tts = null
+                    a.toast("Read aloud needs a voice: Settings → Accessibility → Text-to-speech")
+                    stopAloud()
+                }
+            }.apply { setOnUtteranceProgressListener(progress) }
+        } else if (ttsReady) sayFrom(page.firstSpeakable())
+    }
+
+    private fun say(block: Int) {
+        val text = page.speakText(block) ?: return stopAloud()
+        aloudBlock = block
+        aloudWord = null
+        tts?.setSpeechRate(Settings.config.optDouble("speech_rate", 1.0).toFloat().coerceIn(0.5f, 2f))
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "b$block")
+        page.followAloud()
+        page.invalidate()
+    }
+
+    private fun sayFrom(block: Int?) = if (block == null) aloudNext(-1) else say(block)
+
+    /** On to the next block worth reading, or into the next chapter. */
+    private fun aloudNext(after: Int) {
+        val next = page.nextSpeakable(after)
+        when {
+            next != null -> say(next)
+            chapter + 1 < chapters.size -> {
+                goChapter(chapter + 1, 0f)
+                page.nextSpeakable(-1)?.let { say(it) } ?: stopAloud()
+            }
+            else -> stopAloud()
+        }
+    }
+
+    fun stopAloud() {
+        reading = false
+        tts?.stop()
+        aloudBlock = -1
+        aloudWord = null
+        updateAloudButton()
+        page.invalidate()
+    }
+
+    /** The reader turned the page or scrolled away while reading aloud: carry on from there. */
+    fun userMoved() {
+        if (reading && ttsReady && !page.showing(aloudBlock)) sayFrom(page.firstSpeakable())
+    }
+
+    private fun updateAloudButton() {
+        val b = aloudButton ?: return
+        val p = Settings.pal
+        (b.getChildAt(0) as? android.widget.ImageView)?.setImageResource(if (reading) R.drawable.ic_stop else R.drawable.ic_volume)
+        val tip = if (reading) "Stop reading aloud" else "Read aloud"
+        b.tooltipText = tip
+        b.contentDescription = tip
+        (b.background as? android.graphics.drawable.RippleDrawable)?.setDrawable(0, if (reading) rounded(p.selected, a.dpf(22)) else null)
+    }
+
+    private val progress = object : UtteranceProgressListener() {
+        override fun onStart(id: String?) {}
+        override fun onDone(id: String?) {
+            handler.post { if (reading && id == "b$aloudBlock") aloudNext(aloudBlock) }
+        }
+        @Deprecated("Deprecated in Java")
+        override fun onError(id: String?) {
+            handler.post { stopAloud() }
+        }
+        override fun onRangeStart(id: String?, start: Int, end: Int, frame: Int) {
+            handler.post {
+                if (reading && id == "b$aloudBlock") {
+                    aloudWord = start until end
+                    page.followAloud()
+                    page.invalidate()
+                }
+            }
+        }
+    }
+
+    /** The reader is closing: let the voice go. */
+    fun close() {
+        reading = false
+        tts?.stop()
+        tts?.shutdown()
+        tts = null
     }
 
     // ---- chrome and panels --------------------------------------------------------------
@@ -298,7 +416,7 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
                         t.addView(a.label("Chapter ${b.getInt("chapter")}", 12.5f, p.accentText, bold = true))
                         t.addView(a.label(b.getString("note").ifBlank { b.getString("excerpt") }, 13.5f, p.text, lines = 2))
                         r.addView(t, LinearLayout.LayoutParams(0, -2, 1f))
-                        r.addView(a.iconButton(R.drawable.ic_delete, p.muted) {
+                        r.addView(a.iconButton(R.drawable.ic_delete, p.muted, "Delete bookmark") {
                             bookmarks = Core.arr("bookmark.remove", json("id" to workId, "bookmark" to b.getString("id")))
                             fill()
                         })
@@ -328,15 +446,17 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         val swatches = a.row()
         Settings.themes.forEach { th ->
             val sel = th.id == p.id
+            val slot = if (th.dark) "dark_theme" else "light_theme" 
             swatches.addView(View(a).apply {
                 background = rounded(th.bg, a.dpf(18), if (sel) p.text else p.border, a.dp(if (sel) 2 else 1))
+                contentDescription = th.name
                 setOnClickListener {
-                    Settings.config.put("theme", th.id)
+                    Settings.config.put(if (Settings.config.optBoolean("follow_system")) slot else "theme", th.id)
                     Settings.save()
                     closePanel()
                     a.rebuild()
                 }
-            }, LinearLayout.LayoutParams(a.dp(36), a.dp(36)).apply { rightMargin = a.dp(10) })
+            }, LinearLayout.LayoutParams(a.dp(36), a.dp(36)).apply { rightMargin = a.dp(8) })
         }
         box.addView(swatches, lp(top = a.dp(8), bottom = a.dp(14)))
 
@@ -367,7 +487,7 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
 
         val fonts = listOf("SansSerif" to "Sans", "Serif" to "Serif", "Monospace" to "Mono")
         box.addView(a.label("Font", 12.5f, p.muted, bold = true))
-        box.addView(a.segmented(fonts.map { it.second }, fonts.indexOfFirst { it.first == t.opt("font_family") }.coerceAtLeast(0)) { i ->
+        box.addView(a.segmented(fonts.map { it.second }, fonts.indexOfFirst { it.first == t.opt("font_family") }) { i ->
             t.put("font_family", fonts[i].first); changed(); openAppearance()
         }, lp(top = a.dp(6), bottom = a.dp(12)))
 
@@ -424,9 +544,9 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
             val first = hits.firstOrNull { it.chapter != chapter || it.para >= anchor.toInt() } ?: hits.firstOrNull()
             if (first != null) goto(first) else { page.relayout(); show() }
         }
-        row.addView(a.iconButton(R.drawable.ic_up, p.text) { if (hits.isNotEmpty()) goto(hits[(hits.indexOf(currentHit) - 1 + hits.size) % hits.size]) })
-        row.addView(a.iconButton(R.drawable.ic_down, p.text) { if (hits.isNotEmpty()) goto(hits[(hits.indexOf(currentHit) + 1) % hits.size]) })
-        row.addView(a.iconButton(R.drawable.ic_close, p.text) {
+        row.addView(a.iconButton(R.drawable.ic_up, p.text, "Previous match") { if (hits.isNotEmpty()) goto(hits[(hits.indexOf(currentHit) - 1 + hits.size) % hits.size]) })
+        row.addView(a.iconButton(R.drawable.ic_down, p.text, "Next match") { if (hits.isNotEmpty()) goto(hits[(hits.indexOf(currentHit) + 1) % hits.size]) })
+        row.addView(a.iconButton(R.drawable.ic_close, p.text, "Close search") {
             hits = emptyList(); currentHit = null; query = ""
             closePanel()
             page.relayout()

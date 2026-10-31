@@ -13,6 +13,7 @@ use std::hash::{Hash, Hasher};
 use std::time::Instant;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::HFONT;
+use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB};
 
 pub type Id = u64;
 
@@ -131,6 +132,49 @@ pub struct ScrollState {
     drag_grab: Option<f32>,
 }
 
+/// What a control is, for keyboard focus and screen readers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Role {
+    Button,
+    /// An on/off switch, and whether it is on.
+    Toggle(bool),
+    /// A tab, and whether it is the current one.
+    Tab(bool),
+    /// One of several choices (a segment, a theme), and whether it is chosen.
+    Choice(bool),
+    Slider,
+    MenuItem,
+    /// Text to read, like the page in the reader: Tab reaches it, nothing happens on Enter.
+    Text,
+    /// A text field (a native edit control, which screen readers see by itself).
+    Edit,
+}
+
+/// A control as the last frame showed it: the Tab order, the focus ring and what screen
+/// readers see all come from these.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Node {
+    pub id: Id,
+    /// Where it is, in window DIPs (whole, even if partly scrolled away).
+    pub rect: Rect,
+    /// The clip it was drawn in, if any.
+    pub clip: Option<Rect>,
+    pub role: Role,
+    pub name: String,
+    /// A slider's value, as shown next to it.
+    pub value: String,
+    /// The scroll area it sits in (id, area), so keyboard focus can scroll it into view.
+    pub scroll: Option<(Id, Rect)>,
+}
+
+impl Node {
+    /// The part on screen (empty when scrolled away).
+    pub fn visible(&self) -> Rect {
+        let r = self.clip.map_or(self.rect, |c| self.rect.intersect(&c));
+        if r.w > 0.0 && r.h > 0.0 { r } else { Rect::default() }
+    }
+}
+
 /// An open dropdown menu, drawn above everything at the end of the frame.
 #[derive(Clone)]
 pub struct MenuState {
@@ -155,6 +199,19 @@ pub struct Memory {
     pub menu: Option<MenuState>,
     /// Item picked from a menu, delivered to its button on the next frame.
     pub menu_pick: Option<(Id, usize)>,
+    /// The control whose tooltip is pending, and since when it has been hovered.
+    pub tip: Option<(Id, Instant)>,
+    /// A control clicked while hovered: its tooltip stays hidden until the mouse leaves it.
+    pub tip_off: Option<Id>,
+    /// Keyboard focus, and whether its ring shows (only once the keyboard has been used).
+    pub focus: Option<Id>,
+    pub focus_ring: bool,
+    /// The controls the last frame showed, in order.
+    pub nodes: Vec<Node>,
+    /// A control to click on the next frame (Enter or Space, or a screen reader's "invoke").
+    pub activate: Option<Id>,
+    /// A slider moved with the arrow keys: (slider, steps).
+    pub nudge: Option<(Id, i32)>,
 }
 
 impl Memory {
@@ -170,6 +227,77 @@ impl Memory {
             started: Instant::now(),
             menu: None,
             menu_pick: None,
+            tip: None,
+            tip_off: None,
+            focus: None,
+            focus_ring: false,
+            nodes: Vec::new(),
+            activate: None,
+            nudge: None,
+        }
+    }
+
+    /// Keyboard navigation, before a frame: Tab and Shift+Tab move the focus through the
+    /// controls the last frame showed (scrolling them into view), Enter or Space clicks the
+    /// focused one, and Left/Right move a focused slider. Those keys are taken out of `input`
+    /// so nothing else acts on them as well. A click with the mouse hides the focus ring.
+    /// Returns true when the focus moved.
+    pub fn keyboard(&mut self, input: &mut Input) -> bool {
+        if input.pressed {
+            self.focus_ring = false;
+        }
+        let before = self.focus;
+        let mut pos = self.focus.and_then(|f| self.nodes.iter().position(|n| n.id == f));
+        let mut keep = Vec::new();
+        for k in std::mem::take(&mut input.keys) {
+            let plain = !k.ctrl && !k.alt;
+            if k.vk == VK_TAB.0 && plain && !self.nodes.is_empty() {
+                let n = self.nodes.len();
+                let next = match (pos, k.shift) {
+                    (Some(i), false) => (i + 1) % n,
+                    (Some(i), true) => (i + n - 1) % n,
+                    (None, false) => 0,
+                    (None, true) => n - 1,
+                };
+                pos = Some(next);
+                let id = self.nodes[next].id;
+                self.focus = Some(id);
+                self.focus_ring = true;
+                self.reveal(next);
+                // Typing goes to a text field once Tab reaches it.
+                if let Some(e) = self.edits.get(&id) {
+                    e.focus();
+                }
+                continue;
+            }
+            if let (Some(i), true, true) = (pos, self.focus_ring, plain && !k.shift) {
+                let role = self.nodes[i].role;
+                if (k.vk == VK_RETURN.0 || k.vk == VK_SPACE.0) && !matches!(role, Role::Text | Role::Slider | Role::Edit) {
+                    self.activate = Some(self.nodes[i].id);
+                    continue;
+                }
+                if role == Role::Slider && (k.vk == VK_LEFT.0 || k.vk == VK_RIGHT.0) {
+                    self.nudge = Some((self.nodes[i].id, if k.vk == VK_RIGHT.0 { 1 } else { -1 }));
+                    continue;
+                }
+            }
+            keep.push(k);
+        }
+        input.keys = keep;
+        self.focus != before
+    }
+
+    /// Scrolls node `i` into its scroll area's view.
+    fn reveal(&mut self, i: usize) {
+        let n = &self.nodes[i];
+        let Some((sid, area)) = n.scroll else { return };
+        let r = n.rect;
+        if let Some(s) = self.scroll.get_mut(&sid) {
+            if r.y < area.y {
+                s.offset = (s.offset - (area.y - r.y) - 16.0).max(0.0);
+            } else if r.bottom() > area.bottom() {
+                s.offset += r.bottom() - area.bottom() + 16.0;
+            }
         }
     }
 }
@@ -231,12 +359,21 @@ pub struct Ui<'a> {
     repaint: bool,
     wake_ms: Option<u32>,
     hand: bool,
+    /// Tooltip to draw on top of everything this frame: (control, text).
+    tip_now: Option<(Rect, String)>,
+    /// Controls shown this frame (become `Memory::nodes`), and the scroll areas being drawn.
+    nodes: Vec<Node>,
+    scroll_stack: Vec<(Id, Rect)>,
+    /// Name (and value) for the next control, from `name_next`.
+    next_name: Option<(String, String)>,
 }
 
 pub const RADIUS: f32 = 6.0;
 pub const BODY: f32 = 14.0;
 pub const SMALL: f32 = 12.0;
 pub const CONTROL_H: f32 = 32.0;
+/// How long the mouse rests on a control before its tooltip shows.
+const TIP_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl<'a> Ui<'a> {
     pub fn new(g: &'a mut Gfx, input: &'a Input, mem: &'a mut Memory, c: Colors, hwnd: HWND, size: (f32, f32)) -> Self {
@@ -244,7 +381,27 @@ impl<'a> Ui<'a> {
             e.seen = false;
         }
         let menu_rect = mem.menu.as_ref().map(|m| m.rect);
-        let mut ui = Self { g, input, mem, c, hwnd, size, hot_now: None, wheel_used: false, blockers: Vec::new(), in_overlay: false, dry: false, menu_seen: false, repaint: false, wake_ms: None, hand: false };
+        let mut ui = Self {
+            g,
+            input,
+            mem,
+            c,
+            hwnd,
+            size,
+            hot_now: None,
+            wheel_used: false,
+            blockers: Vec::new(),
+            in_overlay: false,
+            dry: false,
+            menu_seen: false,
+            repaint: false,
+            wake_ms: None,
+            hand: false,
+            tip_now: None,
+            nodes: Vec::new(),
+            scroll_stack: Vec::new(),
+            next_name: None,
+        };
         ui.blockers.extend(menu_rect);
         ui
     }
@@ -253,6 +410,32 @@ impl<'a> Ui<'a> {
     /// tracks hover changes.
     pub fn finish(mut self) -> FrameOut {
         self.menu_overlay();
+        // The keyboard focus ring, over everything but tooltips.
+        if self.mem.focus_ring {
+            if let Some(n) = self.nodes.iter().find(|n| Some(n.id) == self.mem.focus).cloned() {
+                let c = self.c;
+                if let Some(clip) = n.clip {
+                    self.g.push_clip(clip.shrink(-3.0));
+                }
+                self.g.stroke_round(n.rect.shrink(-3.0), RADIUS + 2.0, 2.0, c.text);
+                if n.clip.is_some() {
+                    self.g.pop_clip();
+                }
+            }
+        }
+        self.mem.nodes = std::mem::take(&mut self.nodes);
+        // Tooltips: forget a control once the mouse leaves it; never over an open menu.
+        if self.mem.tip.is_some_and(|(t, _)| self.hot_now != Some(t)) {
+            self.mem.tip = None;
+        }
+        if self.mem.tip_off.is_some_and(|t| self.hot_now != Some(t)) {
+            self.mem.tip_off = None;
+        }
+        if let Some((r, text)) = self.tip_now.take() {
+            if self.mem.menu.is_none() {
+                self.draw_tip(r, &text);
+            }
+        }
         let gone: Vec<Id> = self.mem.edits.iter().filter(|(_, e)| !e.seen).map(|(k, _)| *k).collect();
         for k in gone {
             if let Some(e) = self.mem.edits.remove(&k) {
@@ -328,7 +511,67 @@ impl<'a> Ui<'a> {
         self.input.keys.iter().any(|k| k.vk == vk && k.ctrl == ctrl && k.shift == shift && !k.alt)
     }
 
+    /// Names the next control for screen readers, with a value for sliders; controls with a
+    /// label of their own use it when not named.
+    pub fn name_next(&mut self, name: &str, value: &str) {
+        self.next_name = Some((name.to_string(), value.to_string()));
+    }
+
+    /// A clickable control, known to screen readers as a button.
     pub fn interact(&mut self, id: Id, r: Rect) -> Resp {
+        self.interact_as(id, r, Role::Button, "")
+    }
+
+    /// A clickable control known to screen readers as `role`, called `name` (unless named
+    /// with `name_next`). It is also a stop for Tab, and Enter or Space clicks it.
+    pub fn interact_as(&mut self, id: Id, r: Rect, role: Role, name: &str) -> Resp {
+        self.register(id, r, role, name);
+        self.pointer(id, r)
+    }
+
+    /// Where the next control will go in the Tab order (see `tab_first`).
+    pub fn node_mark(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Moves the controls shown since `mark` to the front of the Tab order: for bars drawn
+    /// after the content they sit above.
+    pub fn tab_first(&mut self, mark: usize) {
+        let bar = self.nodes.split_off(mark.min(self.nodes.len()));
+        self.nodes.splice(0..0, bar);
+    }
+
+    /// Something to read rather than click (the reader's page): a stop for Tab, and what a
+    /// screen reader reads there.
+    pub fn text_node(&mut self, id: Id, r: Rect, text: &str) {
+        self.register(id, r, Role::Text, text);
+    }
+
+    fn register(&mut self, id: Id, r: Rect, role: Role, name: &str) {
+        let (name, value) = match self.next_name.take() {
+            Some((n, v)) => (n, v),
+            None => (name.to_string(), String::new()),
+        };
+        // Not while measuring, and not under a panel or menu drawn on top.
+        let centre = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        if self.dry || (!self.in_overlay && self.blockers.iter().any(|b| b.contains(centre))) {
+            return;
+        }
+        let clip = self.g.clip();
+        let scroll = self.scroll_stack.last().copied();
+        // Clipped away outside any scroll area (so focus couldn't bring it into view).
+        if scroll.is_none() && clip.is_some_and(|c| c.intersect(&r).w <= 0.0) {
+            return;
+        }
+        self.nodes.push(Node { id, rect: r, clip, role, name, value, scroll });
+    }
+
+    /// Mouse handling for a control (and keyboard or screen-reader clicks).
+    fn pointer(&mut self, id: Id, r: Rect) -> Resp {
+        let activated = !self.dry && self.mem.activate == Some(id);
+        if activated {
+            self.mem.activate = None;
+        }
         let hovered = self.hit(r) && self.mem.active.is_none_or(|a| a == id);
         if hovered {
             self.hot_now = Some(id);
@@ -336,9 +579,11 @@ impl<'a> Ui<'a> {
         }
         if hovered && self.input.pressed && self.mem.active.is_none() {
             self.mem.active = Some(id);
+            // Tab carries on from what was clicked.
+            self.mem.focus = Some(id);
         }
         let held = self.mem.active == Some(id);
-        let clicked = held && self.input.released && hovered;
+        let clicked = (held && self.input.released && hovered) || activated;
         if clicked {
             self.repaint = true;
         }
@@ -415,7 +660,7 @@ impl<'a> Ui<'a> {
         let thumb_y = if max > 0.0 { r.y + (r.h - thumb_h) * (offset / max) } else { r.y };
         let thumb = Rect::new(bar.x + 2.0, thumb_y, 6.0, thumb_h);
         let bar_id = id2(id, "bar");
-        let resp = if max > 0.0 { self.interact(bar_id, bar) } else { Resp::default() };
+        let resp = if max > 0.0 { self.pointer(bar_id, bar) } else { Resp::default() };
         if resp.held {
             let grab = {
                 let s = self.mem.scroll.entry(id).or_default();
@@ -430,7 +675,9 @@ impl<'a> Ui<'a> {
         offset = offset.clamp(0.0, max);
 
         self.g.push_clip(r);
+        self.scroll_stack.push((id, r));
         let h = content(self, r, r.y - offset);
+        self.scroll_stack.pop();
         self.g.pop_clip();
 
         let max = (h - r.h).max(0.0);
@@ -525,7 +772,7 @@ impl<'a> Ui<'a> {
         self.g.stroke_round(m.rect, 8.0, 1.0, c.border);
         for (i, (label, danger)) in m.items.iter().enumerate() {
             let row = Rect::new(m.rect.x + 4.0, m.rect.y + 4.0 + i as f32 * 34.0, m.rect.w - 8.0, 34.0);
-            let resp = self.interact(id2(m.id, ("menu-item", i)), row);
+            let resp = self.interact_as(id2(m.id, ("menu-item", i)), row, Role::MenuItem, label);
             if resp.hovered {
                 self.g.fill_round(row, 5.0, c.hover());
             }
@@ -547,13 +794,64 @@ impl<'a> Ui<'a> {
         self.in_overlay = false;
     }
 
-    /// Square icon-only ghost button.
-    pub fn icon_button(&mut self, id: Id, r: Rect, icon: &str, active: bool) -> bool {
+    /// Square icon-only ghost button; `tip` names it when the mouse rests on it.
+    pub fn icon_button(&mut self, id: Id, r: Rect, icon: &str, tip: &str, active: bool) -> bool {
         if active {
             let c = self.c.selected();
             self.g.fill_round(r, RADIUS, c);
         }
-        self.button_ex(id, r, "", Some(icon), ButtonKind::Ghost, true)
+        let clicked = self.button_ex(id, r, "", Some(icon), ButtonKind::Ghost, true);
+        self.tip(id, r, tip);
+        clicked
+    }
+
+    /// Shows `text` near `r` once the mouse has rested on the control `id` for a moment.
+    /// Call it right after the control itself.
+    pub fn tip(&mut self, id: Id, r: Rect, text: &str) {
+        // The tip names an icon-only control for screen readers too.
+        if let Some(n) = self.nodes.iter_mut().rev().find(|n| n.id == id) {
+            if n.name.is_empty() {
+                n.name = text.to_string();
+            }
+        }
+        if self.hot_now != Some(id) || self.dry || text.is_empty() {
+            return;
+        }
+        if self.input.pressed || self.input.down {
+            self.mem.tip_off = Some(id);
+        }
+        if self.mem.tip_off == Some(id) {
+            return;
+        }
+        let since = match self.mem.tip {
+            Some((t, s)) if t == id => s,
+            _ => {
+                let now = Instant::now();
+                self.mem.tip = Some((id, now));
+                now
+            }
+        };
+        let waited = since.elapsed();
+        if waited >= TIP_DELAY {
+            self.tip_now = Some((r, text.to_string()));
+        } else {
+            self.wake_after((TIP_DELAY - waited).as_millis() as u32 + 10);
+        }
+    }
+
+    /// A small label under (or, near the bottom edge, above) the control.
+    fn draw_tip(&mut self, anchor: Rect, text: &str) {
+        let c = self.c;
+        let t = self.measure(text, &TextStyle::ui(12.5), TextOpts::wrap(300.0));
+        let (w, h) = (t.w + 20.0, t.h + 12.0);
+        let x = (anchor.x + (anchor.w - w) / 2.0).clamp(4.0, (self.size.0 - w - 4.0).max(4.0));
+        let below = anchor.bottom() + 6.0;
+        let y = if below + h > self.size.1 - 4.0 { anchor.y - 6.0 - h } else { below };
+        let r = Rect::new(x, y, w, h);
+        self.g.fill_round(Rect::new(r.x, r.y + 2.0, r.w, r.h), 6.0, Color::from_u8(0, 0, 0).alpha(0.18));
+        self.g.fill_round(r, 6.0, c.surface);
+        self.g.stroke_round(r, 6.0, 1.0, c.border);
+        self.g.draw_text(t, r.x + 10.0, r.y + 6.0, c.text);
     }
 
     pub fn button(&mut self, id: Id, r: Rect, label: &str) -> bool {
@@ -561,7 +859,12 @@ impl<'a> Ui<'a> {
     }
 
     pub fn button_ex(&mut self, id: Id, r: Rect, label: &str, icon: Option<&str>, kind: ButtonKind, enabled: bool) -> bool {
-        let resp = if enabled { self.interact(id, r) } else { Resp::default() };
+        let resp = if enabled {
+            self.interact_as(id, r, Role::Button, label)
+        } else {
+            self.next_name = None;
+            Resp::default()
+        };
         let c = self.c;
         let (fill, fg, border) = match kind {
             ButtonKind::Primary => (c.accent, c.on_accent, None),
@@ -601,7 +904,7 @@ impl<'a> Ui<'a> {
     /// Windows 11 style on/off switch (40×20) at (x, y).
     pub fn toggle(&mut self, id: Id, x: f32, y: f32, value: &mut bool) -> bool {
         let r = Rect::new(x, y, 40.0, 20.0);
-        let resp = self.interact(id, r.shrink(-4.0));
+        let resp = self.interact_as(id, r.shrink(-4.0), Role::Toggle(*value), "");
         let mut changed = false;
         if resp.clicked {
             *value = !*value;
@@ -623,8 +926,25 @@ impl<'a> Ui<'a> {
 
     /// Horizontal slider over `min..=max`, snapped to `step`.
     pub fn slider(&mut self, id: Id, r: Rect, value: &mut f32, min: f32, max: f32, step: f32) -> bool {
-        let resp = self.interact(id, r);
+        if self.next_name.as_ref().is_some_and(|(_, v)| v.is_empty()) || self.next_name.is_none() {
+            let name = self.next_name.take().map(|(n, _)| n).unwrap_or_default();
+            self.next_name = Some((name, format!("{value:.2}")));
+        }
+        let resp = self.interact_as(id, r, Role::Slider, "");
         let mut changed = false;
+        // Left and Right on a focused slider move it a step.
+        if let Some((nid, steps)) = self.mem.nudge {
+            if nid == id && !self.dry {
+                self.mem.nudge = None;
+                let st = if step > 0.0 { step } else { (max - min) / 20.0 };
+                let v = (*value + st * steps as f32).clamp(min, max);
+                if (v - *value).abs() > f32::EPSILON {
+                    *value = v;
+                    changed = true;
+                    self.repaint = true;
+                }
+            }
+        }
         if resp.held {
             let t = ((self.input.mouse.0 - r.x - 8.0) / (r.w - 16.0).max(1.0)).clamp(0.0, 1.0);
             let mut v = min + t * (max - min);
@@ -697,7 +1017,7 @@ impl<'a> Ui<'a> {
         let mut changed = false;
         for (i, (label, count)) in options.iter().enumerate() {
             let sr = Rect::new(r.x + seg_w * i as f32, r.y, seg_w, r.h).shrink(3.0);
-            let resp = self.interact(id2(id, i), sr);
+            let resp = self.interact_as(id2(id, i), sr, Role::Choice(*selected == i), label);
             if resp.clicked && *selected != i {
                 *selected = i;
                 changed = true;
@@ -739,7 +1059,7 @@ impl<'a> Ui<'a> {
                 cy += h + 6.0;
             }
             let r = Rect::new(cx, cy, bw, h);
-            let resp = self.interact(id2(id, i), r);
+            let resp = self.interact_as(id2(id, i), r, Role::Tab(*selected == i), label);
             if resp.clicked && *selected != i {
                 *selected = i;
                 changed = true;
@@ -772,6 +1092,10 @@ impl<'a> Ui<'a> {
     pub fn text_input(&mut self, id: Id, r: Rect, value: &mut String, placeholder: &str, password: bool) -> InputResp {
         let c = self.c;
         let focused = self.mem.edits.get(&id).is_some_and(|e| unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == e.hwnd);
+        self.register(id, r, Role::Edit, placeholder);
+        if focused {
+            self.mem.focus = Some(id);
+        }
         self.g.fill_round(r, RADIUS, c.input_bg);
         self.g.stroke_round(r, RADIUS, if focused { 2.0 } else { 1.0 }, if focused { c.accent_mark } else { c.border });
 

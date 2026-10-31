@@ -9,12 +9,13 @@ use crate::ao3::models::{Bookmark, ReadingProgress, Work};
 use crate::native::app::{reader_family, reader_font_label};
 use crate::native::gfx::*;
 use crate::native::icons;
+use crate::native::speech::{Progress, Voice};
 use crate::native::ui::*;
 use crate::reader::pace::PaceTracker;
 use crate::reader::theme::ReaderThemeType;
 use crate::reader::typography::{PageLayoutMode, ReadingMode, TextAlignment, TypographySettings};
 use crate::storage::config::AppConfig;
-use layout::{is_landmark, paragraph_rich, ChapterLayout, Kind, CARD_PAD, INDENT};
+use layout::{is_landmark, paragraph_rich, Block, ChapterLayout, Extra, Kind, CARD_PAD, INDENT};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
@@ -42,6 +43,7 @@ const VK_OEM_PLUS: u16 = 0xBB;
 const VK_OEM_MINUS: u16 = 0xBD;
 const VK_F: u16 = 0x46;
 const VK_B: u16 = 0x42;
+const VK_R: u16 = 0x52;
 
 pub enum ReaderAction {
     Close,
@@ -51,6 +53,8 @@ pub enum ReaderAction {
     ConfigChanged,
     ToggleFullscreen,
     OpenTypographySettings,
+    /// A short message for the toast.
+    Notice(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +77,23 @@ struct Match {
 enum EndAction {
     NextChapter,
     Kudos,
+}
+
+/// Where reading aloud has got to.
+#[derive(Debug, Clone, Copy)]
+struct Aloud {
+    chapter: usize,
+    /// The block being said; None starts at the first one on screen once the chapter is laid out.
+    block: Option<usize>,
+    /// The word being said: a byte range of the block's text.
+    word: Option<(usize, usize)>,
+    /// The page last seen, to notice the reader turning pages themselves.
+    page: usize,
+}
+
+/// Blocks worth reading aloud.
+fn speakable(kind: Kind) -> bool {
+    kind.searchable() || matches!(kind, Kind::Title | Kind::Summary | Kind::PreNotes | Kind::EndNotes)
 }
 
 pub struct ReaderScreen {
@@ -104,6 +125,16 @@ pub struct ReaderScreen {
     pace: PaceTracker,
     opened: Instant,
     pace_words: f32,
+    /// Reading ruler: the highlighted line (paged mode), the text lines on screen last frame,
+    /// and where the mouse was (the ruler follows it when it moves).
+    ruler: usize,
+    ruler_lines: Vec<Rect>,
+    ruler_mouse: (f32, f32),
+    /// Blocks on screen last frame, in order (for reading aloud and screen readers).
+    visible: Vec<usize>,
+    /// Read aloud: the voice (made on first use) and where it has got to.
+    voice: Option<Voice>,
+    aloud: Option<Aloud>,
 }
 
 fn hash_of<T: Hash>(v: &T) -> u64 {
@@ -123,6 +154,7 @@ fn layout_key(chapter: usize, t: &TypographySettings, family: &Family, width: f3
         t.paragraph_spacing.to_bits(),
         t.indent_paragraphs,
         t.text_alignment == TextAlignment::Justified,
+        (t.letter_spacing.to_bits(), t.word_spacing.to_bits(), t.bold_word_starts),
         (t.show_chapter_summary, t.show_chapter_pre_notes, t.show_chapter_post_notes),
     ))
 }
@@ -169,6 +201,12 @@ impl ReaderScreen {
             pace: PaceTracker::default(),
             opened: Instant::now(),
             pace_words: -1.0,
+            ruler: 0,
+            ruler_lines: Vec::new(),
+            ruler_mouse: (-1.0, -1.0),
+            visible: Vec::new(),
+            voice: None,
+            aloud: None,
         }
     }
 
@@ -251,7 +289,8 @@ impl ReaderScreen {
         self.global_keys(ui, config, &mut out);
         let t = config.typography.clone();
         let c = ui.c;
-        let chrome = !self.fullscreen;
+        // Focus mode: only the text, like full screen but in the window.
+        let chrome = !self.fullscreen && !t.focus_mode;
         let top = if chrome { TOOLBAR_H } else { 0.0 };
         let bottom = if chrome && t.show_reading_progress_bar { BOTTOM_H } else { 0.0 };
         let area = Rect::new(r.x, r.y + top, r.w, (r.h - top - bottom).max(100.0));
@@ -275,6 +314,19 @@ impl ReaderScreen {
             Some(EndAction::Kudos) => out.push(ReaderAction::Kudos),
             None => {}
         }
+        // What's on the page, for screen readers (Tab reaches it).
+        if let Some(layout) = &self.layout {
+            let text: Vec<&str> = self.visible.iter().map(|&b| layout.blocks[b].rich.text.trim()).filter(|s| !s.is_empty()).collect();
+            ui.text_node(id("rd-page"), area, &text.join("\n"));
+        }
+        self.read_aloud(ui, area, &t, config.speech_rate);
+        // A soft colour over the page, then the reading ruler on top.
+        if let Some(tint) = t.tint {
+            ui.g.fill_rect(area, Color::from_u8((tint >> 16) as u8, (tint >> 8) as u8, tint as u8).alpha(t.tint_strength.clamp(0.0, 0.5)));
+        }
+        if t.reading_ruler && self.panel == Panel::None {
+            self.draw_ruler(ui, area, t.reading_mode == ReadingMode::Scroll);
+        }
 
         // Each move through the work teaches the reading speed (jumps and pauses are ignored).
         let (read, _) = self.words_read();
@@ -286,7 +338,9 @@ impl ReaderScreen {
         }
 
         if chrome {
+            let mark = ui.node_mark();
             self.toolbar(ui, Rect::new(r.x, r.y, r.w, TOOLBAR_H), config, &mut out);
+            ui.tab_first(mark);
             if bottom > 0.0 {
                 self.bottom_bar(ui, Rect::new(r.x, area.bottom(), r.w, bottom), &t, config.wpm());
             }
@@ -343,12 +397,23 @@ impl ReaderScreen {
     }
 
     fn global_keys(&mut self, ui: &mut Ui, config: &mut AppConfig, out: &mut Vec<ReaderAction>) {
+        if self.panel == Panel::None && ui.key_combo(VK_R, false, false) {
+            self.toggle_aloud(out);
+        }
         if ui.key_combo(VK_ESCAPE, false, false) {
-            if self.panel != Panel::None {
+            if self.aloud.is_some() {
+                self.stop_aloud();
+            } else if self.panel != Panel::None {
                 self.close_panel();
+            } else if config.typography.focus_mode {
+                config.typography.focus_mode = false;
+                out.push(ReaderAction::ConfigChanged);
             } else if self.fullscreen {
                 out.push(ReaderAction::ToggleFullscreen);
             }
+        }
+        if self.panel == Panel::None && ui.key_combo(VK_F, false, false) {
+            self.toggle_focus(config, out);
         }
         if ui.key_combo(VK_F11, false, false) {
             out.push(ReaderAction::ToggleFullscreen);
@@ -374,6 +439,210 @@ impl ReaderScreen {
         if ui.key_combo(VK_LEFT, true, false) && self.chapter > 0 {
             self.go_chapter(self.chapter - 1, 0.0);
         }
+    }
+
+    fn toggle_focus(&mut self, config: &mut AppConfig, out: &mut Vec<ReaderAction>) {
+        let t = &mut config.typography;
+        t.focus_mode = !t.focus_mode;
+        out.push(ReaderAction::ConfigChanged);
+        if t.focus_mode {
+            out.push(ReaderAction::Notice("Focus mode: press F or Esc to bring back the menus".into()));
+        }
+    }
+
+    // ---- read aloud --------------------------------------------------------------------
+
+    fn toggle_aloud(&mut self, out: &mut Vec<ReaderAction>) {
+        if self.aloud.is_some() {
+            self.stop_aloud();
+            return;
+        }
+        if self.voice.is_none() {
+            self.voice = Voice::new();
+        }
+        if self.voice.is_none() {
+            out.push(ReaderAction::Notice("Read aloud needs a Windows voice (Settings → Time & language → Speech)".into()));
+            return;
+        }
+        self.aloud = Some(Aloud { chapter: self.chapter, block: None, word: None, page: self.page });
+    }
+
+    fn stop_aloud(&mut self) {
+        self.aloud = None;
+        if let Some(v) = &mut self.voice {
+            v.stop();
+        }
+    }
+
+    /// Starts saying block `b`.
+    fn say(&mut self, b: usize, rate: f32) {
+        let (Some(layout), Some(voice), Some(a)) = (&self.layout, &mut self.voice, &mut self.aloud) else { return };
+        voice.speak(&layout.blocks[b].rich.text, rate);
+        a.block = Some(b);
+        a.word = None;
+    }
+
+    /// Keeps reading aloud going: follows the voice word by word, moves to the next block when
+    /// one is done (turning pages and chapters as needed), and starts over from what's on
+    /// screen when the reader moves somewhere else.
+    fn read_aloud(&mut self, ui: &mut Ui, area: Rect, t: &TypographySettings, rate: f32) {
+        let Some(mut a) = self.aloud else { return };
+        let Some(layout) = &self.layout else { return };
+        if layout.chapter != self.chapter {
+            return;
+        }
+        let paged = t.reading_mode == ReadingMode::Paged;
+        let first_on_screen = self.visible.iter().copied().find(|&b| speakable(layout.blocks[b].kind));
+        let moved = a.chapter != self.chapter || (paged && a.page != self.page) || a.block.is_some_and(|b| !self.visible.contains(&b));
+        if a.block.is_none() || moved {
+            a = Aloud { chapter: self.chapter, block: None, word: None, page: self.page };
+            self.aloud = Some(a);
+            match first_on_screen {
+                Some(b) => self.say(b, rate),
+                None => {
+                    // Nothing to read here (a picture page): go on.
+                    self.aloud_next(ui, area, t, rate, None);
+                }
+            }
+            ui.wake_after(60);
+            return;
+        }
+        let Some(progress) = self.voice.as_ref().map(|v| v.progress()) else { return };
+        match progress {
+            Progress::Done => self.aloud_next(ui, area, t, rate, a.block),
+            Progress::Starting => {}
+            Progress::Word(s, e) => {
+                if a.word != Some((s, e)) {
+                    if let Some(x) = &mut self.aloud {
+                        x.word = Some((s, e));
+                    }
+                    self.follow_word(ui, area, t);
+                    ui.request_repaint();
+                }
+            }
+        }
+        if let Some(x) = &mut self.aloud {
+            x.page = self.page;
+        }
+        ui.wake_after(60);
+    }
+
+    /// Goes on to the next block after `after` worth reading, or into the next chapter.
+    fn aloud_next(&mut self, ui: &mut Ui, area: Rect, t: &TypographySettings, rate: f32, after: Option<usize>) {
+        let Some(layout) = &self.layout else { return };
+        let from = after.map_or(self.visible.last().map_or(0, |b| b + 1), |b| b + 1);
+        match (from..layout.blocks.len()).find(|&b| speakable(layout.blocks[b].kind)) {
+            Some(b) => {
+                self.say(b, rate);
+                self.follow_word(ui, area, t);
+            }
+            None if self.chapter + 1 < self.chapter_count() => {
+                self.go_chapter(self.chapter + 1, 0.0);
+                if let Some(a) = &mut self.aloud {
+                    *a = Aloud { chapter: self.chapter, block: None, word: None, page: 0 };
+                }
+            }
+            None => self.stop_aloud(),
+        }
+        ui.request_repaint();
+    }
+
+    /// Keeps the word being said on screen: turns the page, or scrolls.
+    fn follow_word(&mut self, ui: &mut Ui, area: Rect, t: &TypographySettings) {
+        let (Some(layout), Some(a)) = (&self.layout, self.aloud) else { return };
+        let Some(bi) = a.block else { return };
+        let b = &layout.blocks[bi];
+        // Where the word (or the block's start) is in the chapter's column.
+        let mut y = b.y + b.text_y;
+        if let Some((s, e)) = a.word {
+            let (style, opts) = layout.styles.get(b.style);
+            let opts = TextOpts { wrap: Some(b.text_w), ..opts };
+            let th = ui.g.layout_rich(&b.rich.text, &b.rich.spans, style, opts);
+            if let Some(r) = ui.g.range_rects(th, &b.rich.text, s, e).first() {
+                y += r.y + r.h / 2.0;
+            }
+        }
+        if t.reading_mode == ReadingMode::Paged {
+            let n = layout.pages.len();
+            let dual = self.spread_shown;
+            let last = (self.page + if dual { 1 } else { 0 }).min(n - 1);
+            if last + 1 < n && y >= layout.pages[last + 1].y {
+                self.turn(true, dual);
+                if let Some(a) = &mut self.aloud {
+                    a.page = self.page;
+                }
+            }
+        } else {
+            let sid = id2(id("reader-scroll"), self.chapter);
+            if let Some(s) = ui.mem.scroll.get_mut(&sid) {
+                let pad_top = 36.0;
+                let at = y + pad_top;
+                if at < s.offset + area.h * 0.15 || at > s.offset + area.h * 0.75 {
+                    s.offset = (at - area.h * 0.35).max(0.0);
+                }
+            }
+        }
+    }
+
+    // ---- reading ruler -----------------------------------------------------------------
+
+    /// Screen rectangles of block `b`'s text lines when its top is drawn at `y`, within `clip`
+    /// (top, bottom).
+    fn block_lines(b: &Block, x: f32, y: f32, clip: (f32, f32), out: &mut Vec<Rect>) {
+        let mut top = b.text_y;
+        for &bottom in &b.lines {
+            if y + bottom > clip.0 + 1.0 && y + top < clip.1 - 1.0 {
+                out.push(Rect::new(x + b.text_x - 8.0, y + top, b.text_w + 16.0, bottom - top));
+            }
+            top = bottom;
+        }
+    }
+
+    /// Moves the ruler a line (paged mode), turning the page at either end.
+    fn ruler_step(&mut self, down: bool, dual: bool) {
+        let n = self.ruler_lines.len();
+        if down {
+            if self.ruler + 1 < n {
+                self.ruler += 1;
+            } else {
+                self.turn(true, dual);
+                self.ruler = 0;
+            }
+        } else if self.ruler > 0 {
+            self.ruler = self.ruler.min(n.saturating_sub(1)) - 1;
+        } else {
+            self.turn(false, dual);
+            self.ruler = usize::MAX;
+        }
+    }
+
+    /// Highlights one line and dims the rest of the page. Scrolling keeps the band still at a
+    /// comfortable height and moves the text under it.
+    fn draw_ruler(&mut self, ui: &mut Ui, area: Rect, scroll: bool) {
+        let lines = &self.ruler_lines;
+        if lines.is_empty() {
+            return;
+        }
+        let c = ui.c;
+        let idx = if scroll {
+            let band_y = area.y + area.h * 0.38;
+            lines
+                .iter()
+                .enumerate()
+                .min_by(|a, b| (a.1.y + a.1.h / 2.0 - band_y).abs().total_cmp(&(b.1.y + b.1.h / 2.0 - band_y).abs()))
+                .map_or(0, |(i, _)| i)
+        } else {
+            self.ruler.min(lines.len() - 1)
+        };
+        self.ruler = idx;
+        let l = lines[idx];
+        let band = Rect::new(l.x, l.y - 3.0, l.w, l.h + 6.0);
+        let dim = c.bg.alpha(0.62);
+        ui.g.fill_rect(Rect::new(area.x, area.y, area.w, (band.y - area.y).max(0.0)), dim);
+        ui.g.fill_rect(Rect::new(area.x, band.bottom(), area.w, (area.bottom() - band.bottom()).max(0.0)), dim);
+        ui.g.fill_rect(Rect::new(area.x, band.y, (band.x - area.x).max(0.0), band.h), dim);
+        ui.g.fill_rect(Rect::new(band.right(), band.y, (area.right() - band.right()).max(0.0), band.h), dim);
+        ui.g.fill_round(Rect::new(band.x - 2.0, band.y + 2.0, 3.0, band.h - 4.0), 1.5, c.accent_mark);
     }
 
     // ---- paged mode --------------------------------------------------------------------
@@ -406,8 +675,25 @@ impl ReaderScreen {
 
         // Navigation keys and the wheel act on the layout from the previous frame.
         if self.panel == Panel::None && self.layout.is_some() {
-            let fwd = ui.key_combo(VK_RIGHT, false, false) || ui.key_combo(VK_NEXT, false, false) || ui.key_combo(VK_SPACE, false, false) || ui.key_combo(VK_DOWN, false, false);
-            let back = ui.key_combo(VK_LEFT, false, false) || ui.key_combo(VK_PRIOR, false, false) || ui.key_combo(VK_SPACE, false, true) || ui.key_combo(VK_UP, false, false);
+            // With the ruler on, up and down move it a line (and turn the page at the ends),
+            // and it follows the mouse.
+            let ruler = t.reading_ruler;
+            if ruler {
+                if ui.key_combo(VK_DOWN, false, false) {
+                    self.ruler_step(true, dual);
+                } else if ui.key_combo(VK_UP, false, false) {
+                    self.ruler_step(false, dual);
+                }
+                let m = ui.input.mouse;
+                if m != self.ruler_mouse && ui.hit(area) {
+                    self.ruler_mouse = m;
+                    if let Some(i) = self.ruler_lines.iter().position(|l| m.1 >= l.y - 4.0 && m.1 < l.bottom() + 4.0 && m.0 >= l.x && m.0 <= l.right()) {
+                        self.ruler = i;
+                    }
+                }
+            }
+            let fwd = ui.key_combo(VK_RIGHT, false, false) || ui.key_combo(VK_NEXT, false, false) || ui.key_combo(VK_SPACE, false, false) || (!ruler && ui.key_combo(VK_DOWN, false, false));
+            let back = ui.key_combo(VK_LEFT, false, false) || ui.key_combo(VK_PRIOR, false, false) || ui.key_combo(VK_SPACE, false, true) || (!ruler && ui.key_combo(VK_UP, false, false));
             if fwd {
                 self.turn(true, dual);
             } else if back {
@@ -448,14 +734,19 @@ impl ReaderScreen {
         let x0 = area.x + (area.w - total_w) / 2.0;
         let small = TextStyle::ui(12.0);
         let mut end = None;
+        let mut lines = Vec::new();
+        let mut visible = Vec::new();
         for k in 0..if dual { 2 } else { 1 } {
             let p = self.page + k;
             if p >= n {
                 break;
             }
             let px = x0 + k as f32 * (col_w + gutter);
-            let head_text = if dual && k == 0 { self.work.meta.title.clone() } else { self.work.chapters[self.chapter].title.clone() };
-            ui.text_in(&head_text, &small, Rect::new(px, area.y + 12.0, col_w, 20.0), Align::Center, c.muted.alpha(0.8));
+            // Running heads and page numbers stay hidden in focus mode.
+            if !t.focus_mode {
+                let head_text = if dual && k == 0 { self.work.meta.title.clone() } else { self.work.chapters[self.chapter].title.clone() };
+                ui.text_in(&head_text, &small, Rect::new(px, area.y + 12.0, col_w, 20.0), Align::Center, c.muted.alpha(0.8));
+            }
             let mut y = page_top;
             for s in &layout.pages[p].slices {
                 let h = s.to - s.from;
@@ -464,10 +755,18 @@ impl ReaderScreen {
                     end = Some(e);
                 }
                 ui.g.pop_clip();
+                Self::block_lines(&layout.blocks[s.block], px, y - s.from, (y, y + h), &mut lines);
+                if visible.last() != Some(&s.block) {
+                    visible.push(s.block);
+                }
                 y += h;
             }
-            ui.text_in(&format!("{}", p + 1), &small, Rect::new(px, area.bottom() - foot + 12.0, col_w, 20.0), Align::Center, c.muted);
+            if !t.focus_mode {
+                ui.text_in(&format!("{}", p + 1), &small, Rect::new(px, area.bottom() - foot + 12.0, col_w, 20.0), Align::Center, c.muted);
+            }
         }
+        self.ruler_lines = lines;
+        self.visible = visible;
         if dual {
             let mx = x0 + col_w + gutter / 2.0;
             ui.g.line(mx, page_top, mx, page_top + page_h, 1.0, c.border);
@@ -476,18 +775,26 @@ impl ReaderScreen {
         let last_visible = (self.page + if dual { 1 } else { 0 }).min(n - 1);
         self.spread_shown = last_visible > self.page;
 
-        if t.show_page_turn_indicators {
+        if t.show_page_turn_indicators && !t.focus_mode {
             let size = 40.0;
             let cy = area.y + area.h / 2.0 - size / 2.0;
             let can_back = self.page > 0 || self.chapter > 0;
             let can_fwd = last_visible + 1 < n || self.chapter + 1 < self.chapter_count();
             let left = Rect::new(area.x + 12.0, cy, size, size);
             let right = Rect::new(area.right() - 12.0 - size, cy, size, size);
-            if can_back && ui.button_ex(id("page-back"), left, "", Some("\u{E76B}"), ButtonKind::Ghost, true) {
-                self.turn(false, dual);
+            if can_back {
+                let back = ui.button_ex(id("page-back"), left, "", Some("\u{E76B}"), ButtonKind::Ghost, true);
+                ui.tip(id("page-back"), left, "Previous page");
+                if back {
+                    self.turn(false, dual);
+                }
             }
-            if can_fwd && ui.button_ex(id("page-fwd"), right, "", Some("\u{E76C}"), ButtonKind::Ghost, true) {
-                self.turn(true, dual);
+            if can_fwd {
+                let fwd = ui.button_ex(id("page-fwd"), right, "", Some("\u{E76C}"), ButtonKind::Ghost, true);
+                ui.tip(id("page-fwd"), right, "Next page");
+                if fwd {
+                    self.turn(true, dual);
+                }
             }
         }
 
@@ -555,18 +862,24 @@ impl ReaderScreen {
         let layout = self.layout.as_ref().unwrap();
         let x = area.x + (area.w - col_w) / 2.0;
         let mut end = None;
+        let mut lines = Vec::new();
+        let mut visible = Vec::new();
         ui.scroll_area(sid, area, |ui, view, y0| {
             let top = y0 + pad_top;
             for (i, b) in layout.blocks.iter().enumerate() {
                 if top + b.y + b.h < view.y || top + b.y > view.bottom() {
                     continue;
                 }
+                visible.push(i);
                 if let Some(e) = self.draw_block(ui, layout, i, x, top + b.y) {
                     end = Some(e);
                 }
+                Self::block_lines(b, x, top + b.y, (view.y, view.bottom()), &mut lines);
             }
             total
         });
+        self.ruler_lines = lines;
+        self.visible = visible;
         let offset = ui.mem.scroll.get(&sid).map_or(0.0, |s| s.offset);
         let anchor = if offset >= max - 1.0 && max > 0.0 { layout.para_count as f32 } else { layout.anchor_at(offset) };
         self.set_anchor(anchor);
@@ -594,10 +907,53 @@ impl ReaderScreen {
                 ui.g.draw_text(t, x + (w - t.w) / 2.0, y + (b.text_h - t.h) / 2.0, c.muted);
                 None
             }
+            Kind::Image if matches!(b.extra, Extra::Image(Some(_))) => {
+                let r = Rect::new(x + b.text_x, y + b.text_y, b.text_w, b.text_h);
+                if let Extra::Image(Some(path)) = &b.extra {
+                    if !ui.g.draw_image(path, r) {
+                        ui.g.stroke_round(r, 6.0, 1.0, c.border);
+                        let label = if b.rich.text.is_empty() { "Picture" } else { b.rich.text.as_str() };
+                        ui.text_in(label, &TextStyle::ui(13.0), r, Align::Center, c.muted);
+                    }
+                }
+                None
+            }
+            Kind::TableRow => {
+                if let Extra::Row(cells, col_w, header) = &b.extra {
+                    let row = Rect::new(x, y, w, b.text_h + 16.0);
+                    if *header {
+                        ui.g.fill_rect(row, c.text.alpha(0.07));
+                    }
+                    // Top edge only on a table's first row; every row draws its bottom edge.
+                    let first = bi == 0 || layout.blocks[bi - 1].kind != Kind::TableRow;
+                    if first {
+                        ui.g.fill_rect(Rect::new(x, y, w, 1.0), c.border);
+                    }
+                    ui.g.fill_rect(Rect::new(x, row.bottom() - 1.0, w, 1.0), c.border);
+                    let (style, opts) = layout.styles.get(b.style);
+                    let style = if *header { style.clone().semibold() } else { style.clone() };
+                    let opts = TextOpts { wrap: Some(b.text_w), ..opts };
+                    for (ci, cell) in cells.iter().enumerate() {
+                        let cx = x + ci as f32 * col_w;
+                        if ci > 0 {
+                            ui.g.fill_rect(Rect::new(cx, y, 1.0, row.h), c.border);
+                        }
+                        let th = ui.g.layout_rich(&cell.text, &cell.spans, &style, opts);
+                        ui.g.draw_text(th, cx + b.text_x, y + b.text_y, c.text);
+                    }
+                    ui.g.fill_rect(Rect::new(x, y, 1.0, row.h), c.border);
+                    ui.g.fill_rect(Rect::new(x + w - 1.0, y, 1.0, row.h), c.border);
+                }
+                None
+            }
             Kind::End => {
                 let last = self.chapter + 1 >= self.chapter_count();
                 let label = if last { "The end" } else { "End of chapter" };
                 ui.text_in(label, &TextStyle::ui(13.0), Rect::new(x, y + 24.0, w, 20.0), Align::Center, c.muted);
+                // Kudos are an AO3 thing; other books just end.
+                if last && !self.work.meta.is_ao3() {
+                    return None;
+                }
                 let (text, icon) = if last { ("Leave kudos", "\u{EB51}") } else { ("Next chapter", "\u{E76C}") };
                 let bw = ui.button_width(text, Some(icon));
                 let r = Rect::new(x + (w - bw) / 2.0, y + 56.0, bw, 36.0);
@@ -619,11 +975,28 @@ impl ReaderScreen {
                     ui.g.fill_round(r, 6.0, c.quote_bg);
                     ui.g.fill_round(Rect::new(r.x, r.y, 3.0, r.h), 1.5, c.text.alpha(0.22));
                 }
+                if kind == Kind::Pre {
+                    let r = Rect::new(x, y, w, b.text_y + b.text_h + 12.0);
+                    ui.g.fill_round(r, 6.0, c.quote_bg);
+                    ui.g.stroke_round(r, 6.0, 1.0, c.border);
+                }
+                if let Extra::Marker(marker) = &b.extra {
+                    let (style, _) = layout.styles.get(b.style);
+                    let m = ui.g.layout(marker, style, TextOpts::default());
+                    ui.g.draw_text(m, x + b.text_x - 10.0 - m.w, y + b.text_y, c.muted);
+                }
                 let (style, opts) = layout.styles.get(b.style);
                 let opts = TextOpts { wrap: Some(b.text_w), ..opts };
                 let th = ui.g.layout_rich(&b.rich.text, &b.rich.spans, style, opts);
                 let (tx, ty) = (x + b.text_x, y + b.text_y);
-                if matches!(kind, Kind::Para | Kind::Quote) && !self.matches.is_empty() {
+                if let Some(Aloud { chapter, block: Some(ab), word: Some((s, e)), .. }) = self.aloud {
+                    if chapter == layout.chapter && ab == bi {
+                        for rr in ui.g.range_rects(th, &b.rich.text, s, e) {
+                            ui.g.fill_round(Rect::new(tx + rr.x - 2.0, ty + rr.y, rr.w + 4.0, rr.h), 4.0, c.accent_mark.alpha(0.3));
+                        }
+                    }
+                }
+                if kind.searchable() && !self.matches.is_empty() {
                     let shift = if kind == Kind::Para && b.rich.text.starts_with(INDENT) { INDENT.len() } else { 0 };
                     for (mi, m) in self.matches.iter().enumerate() {
                         if m.chapter != layout.chapter || m.para != b.para {
@@ -636,7 +1009,12 @@ impl ReaderScreen {
                         }
                     }
                 }
-                let color = if matches!(kind, Kind::Summary | Kind::PreNotes | Kind::EndNotes) { c.text.alpha(0.9) } else { c.text };
+                let color = match kind {
+                    Kind::Summary | Kind::PreNotes | Kind::EndNotes => c.text.alpha(0.9),
+                    // A picture that couldn't be shown: its description, quietly.
+                    Kind::Image => c.muted,
+                    _ => c.text,
+                };
                 ui.g.draw_text(th, tx, ty, color);
                 None
             }
@@ -653,35 +1031,49 @@ impl ReaderScreen {
         if ui.button_ex(id("rd-back"), Rect::new(r.x + 8.0, r.y + 8.0, 96.0, 32.0), "Library", Some("\u{E72B}"), ButtonKind::Ghost, true) {
             out.push(ReaderAction::Close);
         }
-        if ui.icon_button(id("rd-contents"), b(r.x + 108.0), "\u{E8FD}", self.panel == Panel::Contents) {
+        if ui.icon_button(id("rd-contents"), b(r.x + 108.0), "\u{E8FD}", "Contents and bookmarks", self.panel == Panel::Contents) {
             self.open_panel(Panel::Contents);
         }
 
         let mut x = r.right() - 8.0 - 34.0;
         let paged = config.typography.reading_mode == ReadingMode::Paged;
         let fs_icon = if self.fullscreen { "\u{E73F}" } else { "\u{E740}" };
-        if ui.icon_button(id("rd-full"), b(x), fs_icon, false) {
+        let fs_tip = if self.fullscreen { "Leave full screen (F11)" } else { "Full screen (F11)" };
+        if ui.icon_button(id("rd-full"), b(x), fs_icon, fs_tip, false) {
             out.push(ReaderAction::ToggleFullscreen);
         }
         x -= 38.0;
-        if ui.icon_button(id("rd-mode"), b(x), if paged { "\u{E8A1}" } else { "\u{E8A9}" }, false) {
+        if ui.icon_button(id("rd-focus"), b(x), "\u{E890}", "Focus mode: just the text (F)", false) {
+            self.toggle_focus(config, out);
+        }
+        x -= 38.0;
+        let reading = self.aloud.is_some();
+        let tip = if reading { "Stop reading aloud (R)" } else { "Read aloud (R)" };
+        if ui.icon_button(id("rd-aloud"), b(x), "\u{E767}", tip, reading) {
+            self.toggle_aloud(out);
+        }
+        x -= 38.0;
+        let mode_tip = if paged { "Switch to scrolling" } else { "Switch to pages" };
+        if ui.icon_button(id("rd-mode"), b(x), if paged { "\u{E8A1}" } else { "\u{E8A9}" }, mode_tip, false) {
             config.typography.reading_mode = if paged { ReadingMode::Scroll } else { ReadingMode::Paged };
             out.push(ReaderAction::ConfigChanged);
         }
         x -= 38.0;
-        if ui.icon_button(id("rd-appearance"), b(x), icons::FONT, self.panel == Panel::Appearance) {
+        if ui.icon_button(id("rd-appearance"), b(x), icons::FONT, "Text and theme", self.panel == Panel::Appearance) {
             self.open_panel(Panel::Appearance);
         }
-        x -= 38.0;
-        if ui.icon_button(id("rd-kudos"), b(x), "\u{EB51}", false) {
-            out.push(ReaderAction::Kudos);
+        if self.work.meta.is_ao3() {
+            x -= 38.0;
+            if ui.icon_button(id("rd-kudos"), b(x), "\u{EB51}", "Leave kudos on AO3", false) {
+                out.push(ReaderAction::Kudos);
+            }
         }
         x -= 38.0;
-        if ui.icon_button(id("rd-bookmark"), b(x), "\u{E734}", self.panel == Panel::Bookmark) {
+        if ui.icon_button(id("rd-bookmark"), b(x), "\u{E734}", "Bookmark this page (Ctrl+B)", self.panel == Panel::Bookmark) {
             self.open_panel(Panel::Bookmark);
         }
         x -= 38.0;
-        if ui.icon_button(id("rd-search"), b(x), icons::SEARCH, self.panel == Panel::Search) {
+        if ui.icon_button(id("rd-search"), b(x), icons::SEARCH, "Search in this work (Ctrl+F)", self.panel == Panel::Search) {
             self.open_panel(Panel::Search);
         }
 
@@ -702,12 +1094,16 @@ impl ReaderScreen {
         let n = self.chapter_count();
         let has_prev = self.chapter > 0;
         let has_next = self.chapter + 1 < n;
-        if ui.button_ex(id("ch-prev"), Rect::new(r.x + 8.0, r.y + 7.0, 34.0, 32.0), "", Some("\u{E76B}"), ButtonKind::Ghost, has_prev) {
+        let prev_r = Rect::new(r.x + 8.0, r.y + 7.0, 34.0, 32.0);
+        if ui.button_ex(id("ch-prev"), prev_r, "", Some("\u{E76B}"), ButtonKind::Ghost, has_prev) {
             self.go_chapter(self.chapter - 1, 0.0);
         }
-        if ui.button_ex(id("ch-next"), Rect::new(r.right() - 42.0, r.y + 7.0, 34.0, 32.0), "", Some("\u{E76C}"), ButtonKind::Ghost, has_next) {
+        ui.tip(id("ch-prev"), prev_r, "Previous chapter (Ctrl+←)");
+        let next_r = Rect::new(r.right() - 42.0, r.y + 7.0, 34.0, 32.0);
+        if ui.button_ex(id("ch-next"), next_r, "", Some("\u{E76C}"), ButtonKind::Ghost, has_next) {
             self.go_chapter(self.chapter + 1, 0.0);
         }
+        ui.tip(id("ch-next"), next_r, "Next chapter (Ctrl+→)");
 
         let mut left = format!("Chapter {} of {}", self.chapter + 1, n);
         if t.reading_mode == ReadingMode::Paged {
@@ -764,7 +1160,7 @@ impl ReaderScreen {
                     if rr.bottom() < view.y || rr.y > view.bottom() {
                         continue;
                     }
-                    let resp = ui.interact(id2(id("toc-row"), i), rr);
+                    let resp = ui.interact_as(id2(id("toc-row"), i), rr, Role::Choice(i == current), &ch.title);
                     if i == current {
                         ui.g.fill_round(rr, 6.0, c.selected());
                     } else if resp.hovered {
@@ -798,7 +1194,9 @@ impl ReaderScreen {
                         continue;
                     }
                     let del = Rect::new(rr.right() - 38.0, rr.y + 8.0, 32.0, 30.0);
-                    if ui.button_ex(id2(id("bm-del"), &bm.id), del, "", Some(icons::DELETE), ButtonKind::Ghost, true) {
+                    let deleted = ui.button_ex(id2(id("bm-del"), &bm.id), del, "", Some(icons::DELETE), ButtonKind::Ghost, true);
+                    ui.tip(id2(id("bm-del"), &bm.id), del, "Delete bookmark");
+                    if deleted {
                         remove = Some(bm.id.clone());
                     }
                     let resp = ui.interact(id2(id("bm-row"), &bm.id), Rect::new(rr.x, rr.y, rr.w - 44.0, rr.h));
@@ -842,10 +1240,10 @@ impl ReaderScreen {
         let themes = ReaderThemeType::all();
         let sw = (w / themes.len() as f32).min(48.0);
         for (i, th) in themes.iter().enumerate() {
-            let p = th.palette();
+            let p = config.palette_of(*th);
             let cx = x + sw * i as f32 + sw / 2.0;
             let rr = Rect::new(cx - 17.0, y, 34.0, 34.0);
-            let resp = ui.interact(id2(id("ap-theme"), i), rr);
+            let resp = ui.interact_as(id2(id("ap-theme"), i), rr, Role::Choice(config.theme == *th), th.display_name());
             if config.theme == *th {
                 ui.g.fill_circle(cx, y + 17.0, 17.0, c.text);
             } else if resp.hovered {
@@ -999,8 +1397,13 @@ impl ReaderScreen {
         let nav_x = r.right() - 14.0 - 34.0 * 3.0 - 8.0;
         ui.text_in(&count, &TextStyle::ui(13.0), Rect::new(r.x + 170.0, y, nav_x - r.x - 178.0, 34.0), Align::Right, if n == 0 { c.danger } else { c.muted });
         let has = n > 0;
-        let next = resp.submitted || ui.button_ex(id("rd-search-next"), Rect::new(nav_x + 38.0, y, 34.0, 34.0), "", Some("\u{E70D}"), ButtonKind::Ghost, has);
-        let prev = ui.button_ex(id("rd-search-prev"), Rect::new(nav_x, y, 34.0, 34.0), "", Some("\u{E70E}"), ButtonKind::Ghost, has);
+        let next_r = Rect::new(nav_x + 38.0, y, 34.0, 34.0);
+        let prev_r = Rect::new(nav_x, y, 34.0, 34.0);
+        let next_hit = ui.button_ex(id("rd-search-next"), next_r, "", Some("\u{E70D}"), ButtonKind::Ghost, has);
+        ui.tip(id("rd-search-next"), next_r, "Next match (Enter)");
+        let next = resp.submitted || next_hit;
+        let prev = ui.button_ex(id("rd-search-prev"), prev_r, "", Some("\u{E70E}"), ButtonKind::Ghost, has);
+        ui.tip(id("rd-search-prev"), prev_r, "Previous match");
         if has && next {
             let k = self.current_match.map_or(0, |k| (k + 1) % n);
             self.goto_match(k);
@@ -1008,7 +1411,10 @@ impl ReaderScreen {
             let k = self.current_match.map_or(0, |k| (k + n - 1) % n);
             self.goto_match(k);
         }
-        if ui.button_ex(id("rd-search-close"), Rect::new(nav_x + 76.0, y, 34.0, 34.0), "", Some(icons::CLOSE), ButtonKind::Ghost, true) {
+        let close_r = Rect::new(nav_x + 76.0, y, 34.0, 34.0);
+        let close_hit = ui.button_ex(id("rd-search-close"), close_r, "", Some(icons::CLOSE), ButtonKind::Ghost, true);
+        ui.tip(id("rd-search-close"), close_r, "Close search (Esc)");
+        if close_hit {
             self.close_panel();
         }
     }

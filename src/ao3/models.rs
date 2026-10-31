@@ -140,6 +140,14 @@ pub struct WorkMeta {
     pub is_complete: bool,
 }
 
+impl WorkMeta {
+    /// A work from AO3 (its id is AO3's work number), as opposed to a book imported from a file.
+    /// Ratings, kudos and "complete" only mean something for these.
+    pub fn is_ao3(&self) -> bool {
+        !self.id.is_empty() && self.id.chars().all(|c| c.is_ascii_digit())
+    }
+}
+
 impl Default for WorkMeta {
     fn default() -> Self {
         Self {
@@ -203,6 +211,10 @@ pub struct Work {
     pub meta: WorkMeta,
     pub chapters: Vec<Chapter>,
     pub fetched_at: DateTime<Utc>,
+    /// Pictures found while importing, as (file name, bytes). Saved next to the work by the
+    /// library, never inside its JSON.
+    #[serde(skip)]
+    pub resources: Vec<(String, Vec<u8>)>,
 }
 
 impl Work {

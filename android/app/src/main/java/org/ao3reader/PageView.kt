@@ -4,6 +4,8 @@ import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.LinearGradient
 import android.graphics.Paint
@@ -33,10 +35,16 @@ private sealed class El {
     class Text(val layout: StaticLayout, val x: Float, val y: Float, val color: Int) : El()
     class Box(val r: RectF, val radius: Float, val fill: Int, val stroke: Int = 0, val strokeW: Float = 0f) : El()
     class Icon(val d: android.graphics.drawable.Drawable, val r: RectF) : El()
+    /** A picture file drawn into `r`; decoded only when it's on screen. */
+    class Picture(val path: String, val r: RectF) : El()
 }
 
+/** Block kinds that stand for a paragraph of the text (and so carry reading positions). */
+private val BODY = setOf("para", "quote", "divider", "heading", "item", "pre", "center", "image", "row")
+
 /** One measured block of a chapter; `lines` are text line bottoms in block coordinates. */
-private class Block(val kind: String, val para: Int, val els: List<El>, val h: Float, val lines: FloatArray, var y: Float = 0f)
+/** `say` is the text read aloud, from element `sayEl` (whose text starts `shift` characters in). */
+private class Block(val kind: String, val para: Int, val els: List<El>, val h: Float, val lines: FloatArray, var y: Float = 0f, val say: String = "", val sayEl: Int = -1, val shift: Int = 0)
 
 private class Slice(val block: Int, val from: Float, val to: Float)
 private class Page(val slices: List<Slice>, val y: Float)
@@ -67,6 +75,39 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
     private val scroller = OverScroller(context)
     private val headPaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
     private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val wordPath = android.graphics.Path()
+    /** How much wider spaces are drawn ("space between words"); 1 for normal. */
+    private var spaceScale = 1f
+
+    /** Reading ruler: the line it's on (paged mode), and the text lines on screen last drawn. */
+    private var ruler = 0
+    private val rulerLines = mutableListOf<RectF>()
+    private var rulerDrag = false
+    private val picturePaint = Paint(Paint.FILTER_BITMAP_FLAG)
+
+    /** Decoded pictures at the size they're drawn, within a small memory budget. */
+    private val pictures = object : android.util.LruCache<String, Bitmap>(16 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: Bitmap) = value.byteCount
+    }
+
+    /** Pixel size of a picture file, or null if it can't be read. */
+    private fun pictureSize(path: String): Pair<Int, Int>? {
+        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, o)
+        return if (o.outWidth > 0 && o.outHeight > 0) o.outWidth to o.outHeight else null
+    }
+
+    private fun picture(path: String, w: Int, h: Int): Bitmap? {
+        val key = "$path@$w"
+        pictures.get(key)?.let { return it }
+        val size = pictureSize(path) ?: return null
+        // Decode at the nearest power-of-two reduction that still covers the drawn size.
+        var sample = 1
+        while (size.first / (sample * 2) >= w && size.second / (sample * 2) >= h) sample *= 2
+        val bmp = BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample }) ?: return null
+        pictures.put(key, bmp)
+        return bmp
+    }
 
     // Swipe page turns: the page follows the finger, then settles on the next page or back.
     /** Horizontal offset of the current page while it is dragged or settling. */
@@ -121,6 +162,9 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
     private fun typeface(t: JSONObject): Typeface = when (t.opt("font_family")) {
         "Serif" -> Typeface.SERIF
         "Monospace" -> Typeface.MONOSPACE
+        // Bundled easy-to-read fonts.
+        "Atkinson" -> resources.getFont(R.font.atkinson)
+        "OpenDyslexic" -> resources.getFont(R.font.opendyslexic)
         else -> Typeface.SANS_SERIF
     }
 
@@ -153,6 +197,9 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
                 else -> StyleSpan(Typeface.ITALIC)
             }
             s.setSpan(style, a, b, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        if (spaceScale > 1.01f) {
+            for (i in s.indices) if (s[i] == ' ' || s[i] == '\u00A0') s.setSpan(android.text.style.ScaleXSpan(spaceScale), i, i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
         val p = Settings.pal
         for (h in hits) {
@@ -189,7 +236,15 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
         val justify = t.optString("text_alignment") == "Justified"
         val indent = t.optBoolean("indent_paragraphs")
         val tf = typeface(t)
-        val body = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { typeface = tf; textSize = size; color = p.text }
+        val body = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            typeface = tf
+            textSize = size
+            color = p.text
+            // Extra space between letters, in ems.
+            letterSpacing = t.optDouble("letter_spacing", 0.0).toFloat().coerceIn(0f, 0.5f)
+        }
+        // Extra space between words: wider spaces (see `spannable`), which line breaking measures.
+        spaceScale = 1f + t.optDouble("word_spacing", 0.0).toFloat().coerceIn(0f, 2f) * size / body.measureText(" ").coerceAtLeast(1f)
         val small = TextPaint(body).apply { textSize = size * 0.9f }
         val w = colW.toInt()
         val pad = context.dpf(16)
@@ -197,22 +252,112 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
         val out = mutableListOf<Block>()
 
         if (reader.chapter == 0) out += preface(w)
-        if (reader.chapterCount > 1) {
+        if (reader.chapterCount > 1 && !ch.optBoolean("pictures_only")) {
             val title = ch.optString("title").trim()
             if (title.isNotEmpty()) {
                 val tp = TextPaint(body).apply { textSize = size * 1.45f; typeface = Typeface.create(tf, Typeface.BOLD) }
                 val l = staticLayout(title, tp, w, 1.25f, Layout.Alignment.ALIGN_CENTER, false)
-                out += Block("title", 0, listOf(El.Text(l, 0f, context.dpf(6), p.text)), l.height + context.dpf(30), bottoms(l, context.dpf(6)))
+                out += Block("title", 0, listOf(El.Text(l, 0f, context.dpf(6), p.text)), l.height + context.dpf(30), bottoms(l, context.dpf(6)), say = title, sayEl = 0)
             }
         }
 
         val blocksJson = ch.getJSONArray("blocks")
+        val density = resources.displayMetrics.density
+        // Pictures are never taller than a page (or, when scrolling, a tall screenful).
+        val maxPictureH = if (paged) pageH - context.dpf(8) else colW * 1.4f
+        var tableCols = 1
         for (i in 0 until blocksJson.length()) {
             val b = blocksJson.getJSONObject(i)
             val kind = b.getString("kind")
             val para = b.getInt("para")
             val text = b.getString("text")
+            val nextKind = blocksJson.optJSONObject(i + 1)?.optString("kind")
             when (kind) {
+                "heading" -> {
+                    val level = b.optInt("level", 2).coerceIn(1, 6)
+                    val scale = floatArrayOf(1.4f, 1.22f, 1.08f)[min(level - 1, 2)]
+                    val hp = TextPaint(body).apply { textSize = size * scale; typeface = Typeface.create(tf, Typeface.BOLD) }
+                    val first = out.lastOrNull()?.kind !in BODY
+                    val top = if (first) 0f else gap * 0.6f + size * 0.6f
+                    val tl = staticLayout(spannable(text, b.getJSONArray("spans"), 0, hits, para), hp, w, 1.3f, Layout.Alignment.ALIGN_NORMAL, false)
+                    out += Block(kind, para, listOf(El.Text(tl, 0f, top, p.text)), top + tl.height + gap * 0.7f, bottoms(tl, top), say = text, sayEl = 0)
+                }
+                "item" -> {
+                    val depth = b.optInt("depth", 1).coerceIn(1, 8)
+                    val left = context.dpf(24) * depth
+                    val tl = staticLayout(spannable(text, b.getJSONArray("spans"), 0, hits, para), body, (w - left).toInt(), mult, Layout.Alignment.ALIGN_NORMAL, false)
+                    val mp = TextPaint(body).apply { color = p.muted }
+                    val marker = staticLayout(b.optString("marker", "•"), mp, left.toInt(), mult, Layout.Alignment.ALIGN_OPPOSITE, false)
+                    val more = nextKind == "item"
+                    out += Block(kind, para, listOf(
+                        El.Text(marker, -context.dpf(8), 0f, p.muted),
+                        El.Text(tl, left, 0f, p.text),
+                    ), tl.height + if (more) gap * 0.35f else gap, bottoms(tl, 0f), say = text, sayEl = 1)
+                }
+                "pre" -> {
+                    // Columns in preformatted text stay lined up: no extra spacing.
+                    val mono = TextPaint(body).apply { typeface = Typeface.MONOSPACE; textSize = size * 0.82f; letterSpacing = 0f }
+                    val inset = context.dpf(14)
+                    val tl = staticLayout(text, mono, (w - 2 * inset).toInt(), 1.4f, Layout.Alignment.ALIGN_NORMAL, false)
+                    val h = tl.height + 2 * context.dpf(10)
+                    out += Block(kind, para, listOf(
+                        El.Box(RectF(0f, 0f, w.toFloat(), h), context.dpf(6), p.quoteBg, p.border, context.dpf(1)),
+                        El.Text(tl, inset, context.dpf(10), p.text),
+                    ), h + gap, bottoms(tl, context.dpf(10)))
+                }
+                "center" -> {
+                    val tl = staticLayout(spannable(text, b.getJSONArray("spans"), 0, hits, para), body, w, mult, Layout.Alignment.ALIGN_CENTER, false)
+                    out += Block(kind, para, listOf(El.Text(tl, 0f, 0f, p.text)), tl.height + gap, bottoms(tl, 0f), say = text, sayEl = 0)
+                }
+                "image" -> {
+                    val path = b.optString("path").takeIf { !b.isNull("path") && it.isNotEmpty() }
+                    val size2 = path?.let { pictureSize(it) }
+                    if (path != null && size2 != null) {
+                        // Small pictures keep their size; large ones shrink to the column and page.
+                        var dw = min(size2.first * density, w.toFloat())
+                        var dh = size2.second * dw / size2.first
+                        if (dh > maxPictureH) {
+                            dw *= maxPictureH / dh
+                            dh = maxPictureH
+                        }
+                        val x0 = (w - dw) / 2
+                        out += Block(kind, para, listOf(El.Picture(path, RectF(x0, 0f, x0 + dw, dh))), dh + gap, FloatArray(0))
+                    } else if (text.isNotEmpty()) {
+                        val mp = TextPaint(body).apply { color = p.muted }
+                        val tl = staticLayout("[Picture: $text]", mp, w, mult, Layout.Alignment.ALIGN_CENTER, false)
+                        out += Block(kind, para, listOf(El.Text(tl, 0f, 0f, p.muted)), tl.height + gap, bottoms(tl, 0f))
+                    }
+                }
+                "row" -> {
+                    // Columns are shared by the whole table: as many as its widest row.
+                    if (out.lastOrNull()?.kind != "row") {
+                        tableCols = 1
+                        var j = i
+                        while (j < blocksJson.length() && blocksJson.getJSONObject(j).getString("kind") == "row") {
+                            tableCols = maxOf(tableCols, blocksJson.getJSONObject(j).getJSONArray("cells").length())
+                            j++
+                        }
+                    }
+                    val header = b.optBoolean("header")
+                    val cells = b.getJSONArray("cells")
+                    val colWidth = w.toFloat() / tableCols
+                    val cp = TextPaint(small).apply { if (header) typeface = Typeface.create(tf, Typeface.BOLD) }
+                    val padX = context.dpf(8)
+                    val padY = context.dpf(7)
+                    val layouts = (0 until cells.length()).map { ci ->
+                        val c = cells.getJSONObject(ci)
+                        staticLayout(spannable(c.getString("text"), c.getJSONArray("spans"), 0, emptyList(), para), cp, (colWidth - 2 * padX).toInt(), 1.3f, Layout.Alignment.ALIGN_NORMAL, false)
+                    }
+                    val rowH = (layouts.maxOfOrNull { it.height } ?: 0) + 2 * padY
+                    val line = context.dpf(1)
+                    val els = mutableListOf<El>()
+                    if (header) els += El.Box(RectF(0f, 0f, w.toFloat(), rowH), 0f, alpha(p.text, 0.07f))
+                    if (out.lastOrNull()?.kind != "row") els += El.Box(RectF(0f, 0f, w.toFloat(), line), 0f, p.border)
+                    els += El.Box(RectF(0f, rowH - line, w.toFloat(), rowH), 0f, p.border)
+                    for (ci in 0..tableCols) els += El.Box(RectF(min(ci * colWidth, w - line), 0f, min(ci * colWidth, w - line) + line, rowH), 0f, p.border)
+                    layouts.forEachIndexed { ci, l -> els += El.Text(l, ci * colWidth + padX, padY, p.text) }
+                    out += Block(kind, para, els, rowH + if (nextKind != "row") gap else 0f, FloatArray(0))
+                }
                 "summary", "notes", "endnotes" -> {
                     if (kind == "summary" && !t.optBoolean("show_chapter_summary", true)) continue
                     if (kind == "notes" && !t.optBoolean("show_chapter_pre_notes", true)) continue
@@ -228,7 +373,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
                         El.Box(RectF(0f, top, w.toFloat(), h), context.dpf(10), p.notesBg, p.border, context.dpf(1)),
                         El.Text(label, pad, top + pad, p.accentText),
                         El.Text(tl, pad, textY, alpha(p.text, 0.9f)),
-                    ), h + context.dpf(18), bottoms(tl, textY))
+                    ), h + context.dpf(18), bottoms(tl, textY), say = text, sayEl = 2)
                 }
                 "divider" -> {
                     val dp = TextPaint(body).apply { color = p.muted }
@@ -243,12 +388,12 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
                         El.Box(RectF(0f, 0f, w.toFloat(), h), context.dpf(6), p.quoteBg),
                         El.Box(RectF(0f, 0f, context.dpf(3), h), context.dpf(1.5f), alpha(p.text, 0.22f)),
                         El.Text(tl, inset, context.dpf(10), p.text),
-                    ), h + gap, bottoms(tl, context.dpf(10)))
+                    ), h + gap, bottoms(tl, context.dpf(10)), say = text, sayEl = 2)
                 }
                 else -> {
                     val prefix = if (indent) "  " else ""
                     val tl = staticLayout(spannable(prefix + text, b.getJSONArray("spans"), prefix.length, hits, para), body, w, mult, Layout.Alignment.ALIGN_NORMAL, justify)
-                    out += Block("para", para, listOf(El.Text(tl, 0f, 0f, p.text)), tl.height + gap, bottoms(tl, 0f))
+                    out += Block("para", para, listOf(El.Text(tl, 0f, 0f, p.text)), tl.height + gap, bottoms(tl, 0f), say = text, sayEl = 0, shift = prefix.length)
                 }
             }
         }
@@ -321,7 +466,9 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
         y += context.dpf(4)
         text("by " + m.getJSONArray("authors").strings().joinToString(", "), 14f, p.muted)
         y += context.dpf(12)
-        val badges = mutableListOf<Pair<String, Int?>>(m.getString("rating") to Pal.opaque(m.getInt("rating_color")))
+        val badges = mutableListOf<Pair<String, Int?>>()
+        // Books from files have no AO3 rating.
+        if (m.optBoolean("ao3", true)) badges += m.getString("rating") to Pal.opaque(m.getInt("rating_color"))
         m.getJSONArray("categories").objects().forEach { badges += it.getString("name") to Pal.opaque(it.getInt("color")) }
         m.getJSONArray("warnings").strings().forEach { badges += it to if ("No Archive Warnings" in it) p.success else WARNING_RED }
         pills(badges)
@@ -423,7 +570,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
     private fun anchorAt(y: Float): Float {
         val b = blocks.lastOrNull { it.y <= y + 0.5f } ?: return 0f
         return when (b.kind) {
-            "para", "quote", "divider" -> b.para + ((y - b.y) / max(b.h, 1f)).coerceIn(0f, 0.999f)
+            in BODY -> b.para + ((y - b.y) / max(b.h, 1f)).coerceIn(0f, 0.999f)
             "endnotes", "end" -> paraCount.toFloat()
             else -> 0f
         }
@@ -433,7 +580,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
         if (anchor <= 0f) return 0f
         val idx = anchor.toInt()
         if (idx >= paraCount) return blocks.firstOrNull { it.kind == "endnotes" || it.kind == "end" }?.y ?: totalH
-        val b = blocks.firstOrNull { it.para == idx && it.kind in setOf("para", "quote", "divider") } ?: return 0f
+        val b = blocks.firstOrNull { it.para == idx && it.kind in BODY } ?: return 0f
         return b.y + b.h * (anchor - idx)
     }
 
@@ -467,15 +614,17 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
 
     // ---- navigation ---------------------------------------------------------------------
 
-    fun turn(forward: Boolean) {
+    fun turn(forward: Boolean, byUser: Boolean = true) {
         val step = if (dual) 2 else 1
+        ruler = 0
         if (forward) {
-            if (page + step < pages.size) page += step else { reader.nextChapter(); return }
+            if (page + step < pages.size) page += step else { reader.nextChapter(); if (byUser) reader.userMoved(); return }
         } else {
-            if (page > 0) page = max(0, page - step) else { reader.prevChapter(toEnd = true); return }
+            if (page > 0) page = max(0, page - step) else { reader.prevChapter(toEnd = true); if (byUser) reader.userMoved(); return }
         }
         invalidate()
         reader.positionChanged()
+        if (byUser) reader.userMoved()
     }
 
     private fun scrollBy(dy: Float) {
@@ -483,6 +632,56 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
         scrollPos = (scrollPos + dy).coerceIn(0f, maxScroll)
         invalidate()
         reader.positionChanged()
+        reader.userMoved()
+    }
+
+    // ---- read aloud and screen readers --------------------------------------------------
+
+    /** Blocks on screen now, in order. */
+    private fun visibleBlocks(): List<Int> =
+        if (paged) (page until min(page + step, pages.size)).flatMap { pages[it].slices.map { s -> s.block } }.distinct()
+        else blocks.indices.filter { val top = headH - scrollPos + blocks[it].y; top + blocks[it].h > 0 && top < height }
+
+    fun firstSpeakable(): Int? = visibleBlocks().firstOrNull { blocks[it].say.isNotEmpty() }
+    fun nextSpeakable(after: Int): Int? = (after + 1 until blocks.size).firstOrNull { blocks[it].say.isNotEmpty() }
+    fun speakText(i: Int): String? = blocks.getOrNull(i)?.say?.takeIf { it.isNotEmpty() }
+    fun showing(i: Int): Boolean = i in visibleBlocks()
+
+    /** The text on screen, for TalkBack. */
+    fun visibleText(): String = visibleBlocks().mapNotNull { blocks[it].say.takeIf(String::isNotEmpty) }.joinToString("\n")
+
+    /** Keeps the word being read aloud on screen: turns the page, or scrolls. */
+    fun followAloud() {
+        val b = blocks.getOrNull(reader.aloudBlock) ?: return
+        val el = b.els.getOrNull(b.sayEl) as? El.Text ?: return
+        val w = reader.aloudWord
+        val line = if (w != null) el.layout.getLineForOffset((w.first + b.shift).coerceIn(0, el.layout.text.length)) else 0
+        val y = b.y + el.y + el.layout.getLineBottom(line)
+        if (paged) {
+            val last = min(page + step - 1, pages.size - 1)
+            if (last + 1 < pages.size && y > pages[last + 1].y + 1f) turn(true, byUser = false)
+        } else {
+            val onScreen = headH - scrollPos + y
+            if (onScreen > height * 0.8f || onScreen < headH) {
+                scrollPos = (y - height * 0.35f).coerceIn(0f, max(0f, totalH + headH - height))
+                invalidate()
+                reader.positionChanged()
+            }
+        }
+    }
+
+    override fun onInitializeAccessibilityNodeInfo(info: android.view.accessibility.AccessibilityNodeInfo) {
+        super.onInitializeAccessibilityNodeInfo(info)
+        // TalkBack's scroll gestures turn pages.
+        info.isScrollable = true
+        info.addAction(android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD)
+        info.addAction(android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD)
+    }
+
+    override fun performAccessibilityAction(action: Int, args: android.os.Bundle?): Boolean = when (action) {
+        android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_FORWARD -> { if (paged) turn(true) else scrollBy(height * 0.8f); true }
+        android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD -> { if (paged) turn(false) else scrollBy(-height * 0.8f); true }
+        else -> super.performAccessibilityAction(action, args)
     }
 
     private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
@@ -494,6 +693,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
         }
 
         override fun onSingleTapUp(e: MotionEvent): Boolean {
+            if (rulerDrag) return true
             val x = e.x / width
             if (!paged) {
                 val endBlock = blocks.lastOrNull()
@@ -539,6 +739,12 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
         when (event.actionMasked) {
             MotionEvent.ACTION_MOVE -> {
                 val dx = event.x - downX
+                // With the reading ruler on, dragging up or down moves it.
+                if (Settings.typo.optBoolean("reading_ruler") && !dragging && (rulerDrag || (abs(event.y - downY) > slop && abs(event.y - downY) > abs(dx)))) {
+                    rulerDrag = true
+                    rulerLines.indexOfFirst { event.y < it.bottom + context.dpf(4) }.takeIf { it >= 0 }?.let { ruler = it; invalidate() }
+                    return true
+                }
                 if (!dragging && abs(dx) > slop && abs(dx) > abs(event.y - downY)) {
                     dragging = true
                     parent?.requestDisallowInterceptTouchEvent(true)
@@ -552,7 +758,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> if (dragging) {
                 dragging = false
                 release(event.x - downX, event.actionMasked == MotionEvent.ACTION_UP)
-            }
+            } else rulerDrag = false
         }
         return true
     }
@@ -640,9 +846,27 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
                 el.d.setBounds(el.r.left.toInt(), el.r.top.toInt(), el.r.right.toInt(), el.r.bottom.toInt())
                 el.d.draw(c)
             }
+            is El.Picture -> {
+                val bmp = picture(el.path, el.r.width().toInt(), el.r.height().toInt())
+                if (bmp != null) c.drawBitmap(bmp, null, el.r, picturePaint)
+                else {
+                    boxPaint.style = Paint.Style.STROKE
+                    boxPaint.strokeWidth = context.dpf(1)
+                    boxPaint.color = Settings.pal.border
+                    c.drawRoundRect(el.r, context.dpf(6), context.dpf(6), boxPaint)
+                }
+            }
             is El.Text -> {
                 c.save()
                 c.translate(el.x, el.y)
+                val w = reader.aloudWord
+                if (w != null && b === blocks.getOrNull(reader.aloudBlock) && el === b.els.getOrNull(b.sayEl)) {
+                    val n = el.layout.text.length
+                    el.layout.getSelectionPath((w.first + b.shift).coerceIn(0, n), (w.last + 1 + b.shift).coerceIn(0, n), wordPath)
+                    boxPaint.style = Paint.Style.FILL
+                    boxPaint.color = alpha(Settings.pal.accentMark, 0.3f)
+                    c.drawPath(wordPath, boxPaint)
+                }
                 el.layout.paint.color = el.color
                 el.layout.draw(c)
                 c.restore()
@@ -691,12 +915,46 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
         } else {
             val x = (width - colW) / 2
             val top = headH - scrollPos
+            rulerLines.clear()
             for (b in blocks) {
                 if (top + b.y + b.h < 0 || top + b.y > height) continue
                 drawBlock(c, b, x, top + b.y)
+                lineRects(b, x, top + b.y, 0f, height.toFloat())
             }
         }
         headPaint.textAlign = Paint.Align.LEFT
+        val t = Settings.typo
+        // A soft colour over the page, then the reading ruler.
+        if (t.has("tint") && !t.isNull("tint")) c.drawColor(alpha(Pal.opaque(t.optInt("tint")), t.optDouble("tint_strength", 0.18).toFloat().coerceIn(0f, 0.5f)))
+        if (t.optBoolean("reading_ruler") && dragX == 0f) drawRuler(c)
+    }
+
+    /** Screen rectangles of block `b`'s text lines (drawn at `x`, `y`) within `top`..`bottom`. */
+    private fun lineRects(b: Block, x: Float, y: Float, top: Float, bottom: Float) {
+        var prev = -1f
+        for ((i, bot) in b.lines.withIndex()) {
+            val lineTop = if (i > 0) prev else bot - (if (b.lines.size > 1) b.lines[1] - b.lines[0] else bot)
+            prev = bot
+            if (y + bot > top + 1 && y + lineTop < bottom - 1) rulerLines += RectF(x - context.dpf(6), y + lineTop, x + colW + context.dpf(6), y + bot)
+        }
+    }
+
+    /** Highlights one line and dims the rest. Scrolling keeps the band still and moves the text. */
+    private fun drawRuler(c: Canvas) {
+        if (rulerLines.isEmpty()) return
+        val idx = if (paged) ruler.coerceIn(0, rulerLines.size - 1)
+        else rulerLines.indices.minByOrNull { abs(rulerLines[it].centerY() - height * 0.38f) } ?: 0
+        ruler = idx
+        val l = rulerLines[idx]
+        val band = RectF(l.left, l.top - context.dpf(3), l.right, l.bottom + context.dpf(3))
+        boxPaint.style = Paint.Style.FILL
+        boxPaint.color = alpha(Settings.pal.bg, 0.62f)
+        c.drawRect(0f, 0f, width.toFloat(), band.top, boxPaint)
+        c.drawRect(0f, band.bottom, width.toFloat(), height.toFloat(), boxPaint)
+        c.drawRect(0f, band.top, band.left, band.bottom, boxPaint)
+        c.drawRect(band.right, band.top, width.toFloat(), band.bottom, boxPaint)
+        boxPaint.color = Settings.pal.accentMark
+        c.drawRoundRect(RectF(band.left - context.dpf(2), band.top + context.dpf(2), band.left + context.dpf(1), band.bottom - context.dpf(2)), context.dpf(1.5f), context.dpf(1.5f), boxPaint)
     }
 
     /** One page (or two-page spread) starting at `first`, shifted right by `dx`. */
@@ -710,12 +968,15 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
             boxPaint.color = p.bg
             c.drawRect(dx, 0f, dx + width, height.toFloat(), boxPaint)
         }
+        // Focus mode: no running heads or page numbers, just the text.
+        val focus = Settings.typo.optBoolean("focus_mode")
+        if (first == page) rulerLines.clear()
         for (k in 0 until if (dual) 2 else 1) {
             val pi = first + k
             if (pi >= pages.size) break
             val px = x0 + k * (colW + gutter)
             val head = if (dual && k == 0) reader.meta.getString("title") else reader.chapterJson?.optString("title") ?: ""
-            c.drawText(android.text.TextUtils.ellipsize(head, headPaint, colW, android.text.TextUtils.TruncateAt.END).toString(), px + colW / 2, safeTop + context.dpf(22), headPaint)
+            if (!focus) c.drawText(android.text.TextUtils.ellipsize(head, headPaint, colW, android.text.TextUtils.TruncateAt.END).toString(), px + colW / 2, safeTop + context.dpf(22), headPaint)
             var y = headH
             for (s in pages[pi].slices) {
                 val h = s.to - s.from
@@ -723,9 +984,10 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
                 c.clipRect(px - context.dpf(8), y, px + colW + context.dpf(8), y + h)
                 drawBlock(c, blocks[s.block], px, y - s.from)
                 c.restore()
+                if (first == page) lineRects(blocks[s.block], px, y - s.from, y, y + h)
                 y += h
             }
-            c.drawText("${pi + 1}", px + colW / 2, height - context.dpf(10), headPaint)
+            if (!focus) c.drawText("${pi + 1}", px + colW / 2, height - context.dpf(10), headPaint)
         }
         if (dual) {
             boxPaint.style = Paint.Style.FILL

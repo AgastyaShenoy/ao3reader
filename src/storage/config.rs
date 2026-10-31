@@ -1,6 +1,6 @@
 use crate::ao3::models::UserSession;
 use crate::reader::pace::ReadingSpeed;
-use crate::reader::theme::ReaderThemeType;
+use crate::reader::theme::{ReaderThemeType, Rgb, ThemePalette};
 use crate::reader::typography::TypographySettings;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,30 @@ use std::path::PathBuf;
 
 fn default_true() -> bool {
     true
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+fn default_light() -> ReaderThemeType {
+    ReaderThemeType::PaperLight
+}
+
+fn default_dark() -> ReaderThemeType {
+    ReaderThemeType::Dark
+}
+
+fn default_custom_bg() -> u32 {
+    0xFAF4E6
+}
+
+fn default_custom_text() -> u32 {
+    0x282420
+}
+
+fn rgb(c: u32) -> Rgb {
+    Rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +57,28 @@ pub struct AppConfig {
     /// Page-turn and interface animations.
     #[serde(default = "default_true")]
     pub animations: bool,
+    /// Interface size: 1.0 is the system's own size. Only ever changed by the user.
+    #[serde(default = "one")]
+    pub ui_scale: f32,
+    /// Follow the system's light or dark mode (and its high-contrast setting).
+    #[serde(default)]
+    pub follow_system: bool,
+    /// Themes used for the system's light and dark modes when following it.
+    #[serde(default = "default_light")]
+    pub light_theme: ReaderThemeType,
+    #[serde(default = "default_dark")]
+    pub dark_theme: ReaderThemeType,
+    /// Page and text colours of the "Your colours" theme (0xRRGGBB).
+    #[serde(default = "default_custom_bg")]
+    pub custom_bg: u32,
+    #[serde(default = "default_custom_text")]
+    pub custom_text: u32,
+    /// Android: bigger buttons with more room between them (48 dp touch targets).
+    #[serde(default)]
+    pub larger_targets: bool,
+    /// Read-aloud speed: 1.0 is the voice's normal pace.
+    #[serde(default = "one")]
+    pub speech_rate: f32,
 }
 
 impl Default for AppConfig {
@@ -50,11 +96,49 @@ impl Default for AppConfig {
             custom_download_dir: None,
             check_updates_on_startup: true,
             animations: true,
+            ui_scale: 1.0,
+            follow_system: false,
+            light_theme: default_light(),
+            dark_theme: default_dark(),
+            custom_bg: default_custom_bg(),
+            custom_text: default_custom_text(),
+            larger_targets: false,
+            speech_rate: 1.0,
         }
     }
 }
 
 impl AppConfig {
+    /// Colours of the current theme ("Your colours" comes from `custom_bg` and `custom_text`).
+    pub fn palette(&self) -> ThemePalette {
+        match self.theme {
+            ReaderThemeType::Custom => ThemePalette::custom(rgb(self.custom_bg), rgb(self.custom_text)),
+            t => t.palette(),
+        }
+    }
+
+    /// Palette of any theme, with "Your colours" taken from these settings.
+    pub fn palette_of(&self, t: ReaderThemeType) -> ThemePalette {
+        match t {
+            ReaderThemeType::Custom => ThemePalette::custom(rgb(self.custom_bg), rgb(self.custom_text)),
+            t => t.palette(),
+        }
+    }
+
+    /// The theme to use given the system's dark mode and high-contrast setting, when following
+    /// the system; otherwise the chosen theme.
+    pub fn system_theme(&self, dark: bool, high_contrast: bool) -> ReaderThemeType {
+        if !self.follow_system {
+            self.theme
+        } else if high_contrast {
+            ReaderThemeType::HighContrast
+        } else if dark {
+            self.dark_theme
+        } else {
+            self.light_theme
+        }
+    }
+
     /// The reading speed used for "time left": measured when allowed and known, else the
     /// one set by hand.
     pub fn wpm(&self) -> u32 {

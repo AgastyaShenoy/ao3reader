@@ -23,3 +23,4 @@ pub const DELETE: &str = "\u{E74D}";
 pub const UNDO: &str = "\u{E7A7}";
 pub const UPDATE: &str = "\u{E777}";
 pub const BELL: &str = "\u{EA8F}";
+pub const ACCESSIBILITY: &str = "\u{E776}";

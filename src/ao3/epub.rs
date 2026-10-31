@@ -2,11 +2,14 @@
 //!
 //! Reads any EPUB 2/3 book: chapters follow the book's own table of contents (so a file holding
 //! several chapters is split at their anchors), with text extracted the same way as AO3 pages.
+//! Headings, lists, tables, preformatted and centred text become tagged paragraphs (see
+//! `rich_text::tagged`), and pictures are kept as files next to the saved book.
 //! EPUBs downloaded from AO3 additionally give the work id, rating, warnings, fandoms,
 //! relationships, characters, tags, stats, summary and per-chapter notes from their preface.
 
 use crate::ao3::models::*;
 use crate::ao3::parser::Ao3Parser;
+use crate::reader::rich_text::{paragraph_words, tagged, FIELD};
 use regex::Regex;
 use scraper::{ElementRef, Html, Selector};
 use std::collections::HashMap;
@@ -14,6 +17,8 @@ use std::io::Read;
 
 /// Refuse to inflate any single file beyond this (protects against zip bombs).
 const MAX_ENTRY: usize = 64 * 1024 * 1024;
+/// Pictures kept from one book, in total; later ones show their description instead.
+const MAX_IMAGES: usize = 48 * 1024 * 1024;
 
 struct Entry {
     offset: usize,
@@ -142,13 +147,54 @@ fn norm(s: &str) -> String {
     s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
-struct Builder {
+struct Builder<'z> {
     chapters: Vec<Chapter>,
     /// A chapter was started by the table of contents (rather than by default).
     titled: bool,
+    zip: &'z Zip<'z>,
+    /// The document being read; pictures are found relative to it.
+    file: String,
+    /// Pictures already kept: archive path → file name.
+    images: HashMap<String, String>,
+    resources: Vec<(String, Vec<u8>)>,
+    resource_bytes: usize,
 }
 
-impl Builder {
+/// File extension for picture data the reader can show, recognised by its first bytes.
+fn image_ext(b: &[u8]) -> Option<&'static str> {
+    match b {
+        [0x89, b'P', b'N', b'G', ..] => Some("png"),
+        [0xFF, 0xD8, 0xFF, ..] => Some("jpg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("gif"),
+        [b'B', b'M', ..] => Some("bmp"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("webp"),
+        _ => None,
+    }
+}
+
+impl Builder<'_> {
+    /// Keeps a picture from the book (once, however often it appears) and adds it where it is.
+    fn image(&mut self, src: &str, alt: &str) {
+        let (path, _) = resolve(&self.file, src);
+        let name = match self.images.get(&path) {
+            Some(n) => n.clone(),
+            None => {
+                let Some(bytes) = self.zip.read(&path) else { return };
+                let Some(ext) = image_ext(&bytes) else { return };
+                if self.resource_bytes + bytes.len() > MAX_IMAGES {
+                    return;
+                }
+                let name = format!("{}.{ext}", self.resources.len() + 1);
+                self.resource_bytes += bytes.len();
+                self.resources.push((name.clone(), bytes));
+                self.images.insert(path, name.clone());
+                name
+            }
+        };
+        let alt = Ao3Parser::collapse_whitespace(&alt.replace(['\n', FIELD], " "));
+        self.push(tagged("img", &format!("{name}{FIELD}{}", alt.trim())));
+    }
+
     fn start(&mut self, title: String) {
         if let Some(c) = self.chapters.last_mut() {
             if c.paragraphs.is_empty() {
@@ -172,7 +218,7 @@ impl Builder {
     }
 }
 
-const BLOCKS: [&str; 13] = ["p", "blockquote", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "pre", "table"];
+const BLOCKS: [&str; 14] = ["p", "blockquote", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "pre", "table", "center"];
 const INLINE: [&str; 20] = [
     "a", "span", "em", "i", "b", "strong", "s", "strike", "del", "u", "small", "sup", "sub", "br", "abbr", "cite", "q", "code", "font", "mark",
 ];
@@ -194,8 +240,27 @@ fn walk(e: ElementRef, anchors: &HashMap<String, String>, b: &mut Builder) {
     for child in e.children() {
         if let Some(el) = ElementRef::wrap(child) {
             let name = el.value().name();
-            if matches!(name, "script" | "style" | "head" | "title" | "svg" | "img") {
-                continue;
+            match name {
+                "script" | "style" | "head" | "title" => continue,
+                "img" => {
+                    flush(&mut run, b);
+                    if let Some(src) = el.value().attr("src") {
+                        b.image(src, el.value().attr("alt").unwrap_or(""));
+                    }
+                    continue;
+                }
+                "svg" => {
+                    // Cover pages often wrap their picture in an SVG <image>.
+                    flush(&mut run, b);
+                    for img in el.descendants().filter_map(ElementRef::wrap).filter(|d| d.value().name() == "image") {
+                        // `xlink:href` is namespaced, so `attr("href")` doesn't see it.
+                        if let Some((_, src)) = img.value().attrs().find(|(k, _)| *k == "href") {
+                            b.image(src, "");
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
             }
             if let Some(label) = anchor(el) {
                 flush(&mut run, b);
@@ -229,11 +294,85 @@ fn walk(e: ElementRef, anchors: &HashMap<String, String>, b: &mut Builder) {
     flush(&mut run, b);
 }
 
+/// Centred by its `align` attribute, inline style or a class name such as "center".
+fn centered(el: ElementRef) -> bool {
+    let v = el.value();
+    v.attr("align").is_some_and(|a| a.eq_ignore_ascii_case("center"))
+        || v.attr("style").is_some_and(|s| s.to_ascii_lowercase().replace(' ', "").contains("text-align:center"))
+        || v.classes().any(|c| {
+            let c = c.to_ascii_lowercase();
+            c.contains("center") || c.contains("centre")
+        })
+}
+
+/// One tagged paragraph per list item; nested lists go one level deeper.
+fn list(el: ElementRef, depth: u8, b: &mut Builder) {
+    let ordered = el.value().name() == "ol";
+    let mut n: u32 = el.value().attr("start").and_then(|s| s.trim().parse().ok()).unwrap_or(1);
+    for li in el.children().filter_map(ElementRef::wrap).filter(|c| c.value().name() == "li") {
+        let text = Ao3Parser::collapse_whitespace(&Ao3Parser::clean_element_text_skipping(li, &["ul", "ol"]));
+        let text = text.trim();
+        if !text.is_empty() {
+            let tag = if ordered { format!("ol{depth}.{n}") } else { format!("ul{depth}") };
+            b.push(tagged(&tag, text));
+        }
+        n += 1;
+        for sub in li.descendants().filter_map(ElementRef::wrap).filter(|d| matches!(d.value().name(), "ul" | "ol")) {
+            // Only lists directly inside this item; deeper ones are handled by their own parent.
+            let parent_li = sub.ancestors().filter_map(ElementRef::wrap).find(|a| a.value().name() == "li").map(|a| a.id());
+            if parent_li == Some(li.id()) {
+                list(sub, (depth + 1).min(8), b);
+            }
+        }
+    }
+}
+
+/// One tagged paragraph per table row, cells separated by `FIELD`.
+fn table(el: ElementRef, b: &mut Builder) {
+    for tr in el.descendants().filter_map(ElementRef::wrap).filter(|d| d.value().name() == "tr") {
+        // Rows of a table nested inside a cell are part of that cell's text.
+        let owner = tr.ancestors().filter_map(ElementRef::wrap).find(|a| a.value().name() == "table").map(|t| t.id());
+        if owner != Some(el.id()) {
+            continue;
+        }
+        let cells: Vec<ElementRef> = tr.children().filter_map(ElementRef::wrap).filter(|c| matches!(c.value().name(), "td" | "th")).collect();
+        let texts: Vec<String> = cells
+            .iter()
+            .map(|c| Ao3Parser::collapse_whitespace(&Ao3Parser::clean_element_text(*c)).replace(['\n', FIELD], " ").trim().to_string())
+            .collect();
+        if texts.iter().all(|t| t.is_empty()) {
+            continue;
+        }
+        let header = cells.iter().all(|c| c.value().name() == "th");
+        b.push(tagged(if header { "th" } else { "tr" }, &texts.join(&FIELD.to_string())));
+    }
+}
+
 fn block(el: ElementRef, b: &mut Builder) {
     let name = el.value().name();
-    if name == "hr" {
-        b.push("---".into());
-        return;
+    match name {
+        "hr" => {
+            b.push("---".into());
+            return;
+        }
+        "ul" | "ol" => return list(el, 1, b),
+        "table" => return table(el, b),
+        "pre" => {
+            let raw: String = el.text().collect();
+            let raw = raw.replace("\r\n", "\n");
+            let raw = raw.trim_matches('\n').trim_end();
+            if !raw.trim().is_empty() {
+                b.push(tagged("pre", raw));
+            }
+            return;
+        }
+        _ => {}
+    }
+    // Pictures inside a paragraph or heading come before its text.
+    for img in el.descendants().filter_map(ElementRef::wrap).filter(|d| d.value().name() == "img") {
+        if let Some(src) = img.value().attr("src") {
+            b.image(src, img.value().attr("alt").unwrap_or(""));
+        }
     }
     let text = Ao3Parser::collapse_whitespace(&Ao3Parser::clean_element_text(el));
     let text = text.trim();
@@ -260,7 +399,11 @@ fn block(el: ElementRef, b: &mut Builder) {
             b.titled = true;
             return;
         }
-        b.push(format!("**{}**", text.trim_matches('*')));
+        b.push(tagged(name, text.trim_matches('*').trim()));
+        return;
+    }
+    if name == "center" || centered(el) {
+        b.push(tagged("c", text));
         return;
     }
     b.push(text.to_string());
@@ -437,10 +580,11 @@ pub fn parse_epub(bytes: &[u8]) -> Result<Work, String> {
     let ao3_url = Regex::new(r"archiveofourown\.org/works/(\d+)").unwrap();
     let mut work_id = ao3_url.captures(&opf_text).map(|c| c[1].to_string());
     let mut is_ao3 = false;
-    let mut b = Builder { chapters: Vec::new(), titled: false };
+    let mut b = Builder { chapters: Vec::new(), titled: false, zip: &zip, file: String::new(), images: HashMap::new(), resources: Vec::new(), resource_bytes: 0 };
 
     for path in &spine {
         let Some(html) = zip.text(path) else { continue };
+        b.file = path.clone();
         if work_id.is_none() {
             work_id = ao3_url.captures(&html).map(|c| c[1].to_string());
         }
@@ -466,6 +610,7 @@ pub fn parse_epub(bytes: &[u8]) -> Result<Work, String> {
         walk(root, &anchors, &mut b);
     }
 
+    let resources = std::mem::take(&mut b.resources);
     let mut chapters: Vec<Chapter> = b.chapters.into_iter().filter(|c| !c.paragraphs.is_empty()).collect();
     if chapters.is_empty() {
         return Err("No readable text was found in this EPUB.".into());
@@ -481,7 +626,7 @@ pub fn parse_epub(bytes: &[u8]) -> Result<Work, String> {
         if c.title.trim().is_empty() {
             c.title = format!("Chapter {}", i + 1);
         }
-        c.word_count = c.paragraphs.iter().map(|p| p.split_whitespace().count()).sum();
+        c.word_count = c.paragraphs.iter().map(|p| paragraph_words(p)).sum();
     }
     if meta.stats.words == 0 {
         meta.stats.words = chapters.iter().map(|c| c.word_count).sum();
@@ -497,7 +642,7 @@ pub fn parse_epub(bytes: &[u8]) -> Result<Work, String> {
         bytes.hash(&mut h);
         format!("epub-{:x}", h.finish())
     });
-    Ok(Work { meta, chapters, fetched_at: chrono::Utc::now() })
+    Ok(Work { meta, chapters, fetched_at: chrono::Utc::now(), resources })
 }
 
 /// Imports a saved work from file contents, recognised by what's inside: an EPUB (ZIP),
@@ -526,6 +671,11 @@ mod tests {
 
     /// Builds an uncompressed ZIP in memory (test fixture only).
     fn stored_zip(files: &[(&str, &str)]) -> Vec<u8> {
+        let files: Vec<(&str, &[u8])> = files.iter().map(|(n, b)| (*n, b.as_bytes())).collect();
+        stored_zip_bytes(&files)
+    }
+
+    fn stored_zip_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut out = Vec::new();
         let mut central = Vec::new();
         for (name, body) in files {
@@ -542,7 +692,7 @@ mod tests {
             local.extend_from_slice(&0u16.to_le_bytes());
             out.extend_from_slice(&local);
             out.extend_from_slice(name.as_bytes());
-            out.extend_from_slice(body.as_bytes());
+            out.extend_from_slice(body);
             let mut c = header(0x0201_4b50, &[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
             c.extend_from_slice(&(body.len() as u32).to_le_bytes());
             c.extend_from_slice(&(body.len() as u32).to_le_bytes());
@@ -636,9 +786,82 @@ mod tests {
     }
 
     #[test]
+    fn structure_and_pictures() {
+        use crate::reader::rich_text::{image_source, paragraph_display, table_cells, ParagraphKind};
+        let opf = r#"<package><metadata><dc:title>Shapes</dc:title></metadata>
+            <manifest><item id="c" href="text/c.xhtml" media-type="application/xhtml+xml"/><item id="i" href="img/map.png" media-type="image/png"/></manifest>
+            <spine><itemref idref="c"/></spine></package>"#;
+        let body = r#"<html><body><h1>Shapes</h1><p>Intro with <em>style</em>.</p>
+            <h2>Lists</h2><ul><li>One<ul><li>One-a</li></ul></li><li>Two</li></ul><ol start="4"><li>Four</li><li>Five</li></ol>
+            <table><tr><th>Name</th><th>Age</th></tr><tr><td>Ann</td><td><b>30</b></td></tr></table>
+            <pre>  line one
+    line two</pre><p class="center">* * *centred*</p><p><img src="../img/map.png" alt="A map"/></p><img src="../img/map.png"/>
+            <p><img src="../img/missing.png" alt="gone"/>Still here.</p></body></html>"#;
+        let png: &[u8] = b"\x89PNG\r\n\x1a\nfake";
+        let bytes = stored_zip_bytes(&[
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            ("OEBPS/text/c.xhtml", body.as_bytes()),
+            ("OEBPS/img/map.png", png),
+        ]);
+        let w = parse_epub(&bytes).unwrap();
+        let p = &w.chapters[0].paragraphs;
+        let kinds: Vec<ParagraphKind> = p.iter().map(|x| paragraph_display(x).0).collect();
+        assert_eq!(
+            kinds,
+            [
+                ParagraphKind::Text,
+                ParagraphKind::Heading(2),
+                ParagraphKind::Bullet(1),
+                ParagraphKind::Bullet(2),
+                ParagraphKind::Bullet(1),
+                ParagraphKind::Numbered(1, 4),
+                ParagraphKind::Numbered(1, 5),
+                ParagraphKind::TableRow(true),
+                ParagraphKind::TableRow(false),
+                ParagraphKind::Pre,
+                ParagraphKind::Center,
+                ParagraphKind::Image,
+                ParagraphKind::Image,
+                ParagraphKind::Text,
+            ]
+        );
+        assert_eq!(w.chapters[0].title, "Shapes");
+        assert_eq!(paragraph_display(&p[3]).1.text, "One-a");
+        assert_eq!(table_cells(&p[8]).iter().map(|c| c.text.as_str()).collect::<Vec<_>>(), ["Ann", "30"]);
+        assert_eq!(paragraph_display(&p[9]).1.text, "  line one\n    line two");
+        // The same picture is kept once and used twice; a missing one is left out.
+        assert_eq!(image_source(&p[11]), Some(("1.png", "A map")));
+        assert_eq!(image_source(&p[12]), Some(("1.png", "")));
+        assert_eq!(w.resources.len(), 1);
+        assert_eq!(w.resources[0].1, png);
+        assert_eq!(paragraph_display(&p[13]).1.text, "Still here.");
+    }
+
+    #[test]
+    fn svg_cover_picture() {
+        let opf = r#"<package><metadata><dc:title>Covered</dc:title></metadata>
+            <manifest><item id="cv" href="cover.xhtml" media-type="application/xhtml+xml"/><item id="c" href="c.xhtml" media-type="application/xhtml+xml"/></manifest>
+            <spine><itemref idref="cv"/><itemref idref="c"/></spine></package>"#;
+        let cover = r#"<html><body><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><image xlink:href="cover.jpg"/></svg></body></html>"#;
+        let jpg: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3];
+        let bytes = stored_zip_bytes(&[
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            ("OEBPS/cover.xhtml", cover.as_bytes()),
+            ("OEBPS/c.xhtml", b"<html><body><p>Text.</p></body></html>"),
+            ("OEBPS/cover.jpg", jpg),
+        ]);
+        let w = parse_epub(&bytes).unwrap();
+        assert_eq!(w.resources.len(), 1);
+        assert_eq!(w.resources[0].0, "1.jpg");
+        assert!(w.chapters[0].paragraphs[0].contains("1.jpg"));
+    }
+
+    #[test]
     fn import_recognises_json_and_rejects_garbage_zip() {
         assert!(import_bytes(b"PK\x03\x04not really a zip").is_err());
-        let work = Work { meta: WorkMeta { id: "7".into(), ..Default::default() }, chapters: vec![Chapter::new(1, "One".into())], fetched_at: chrono::Utc::now() };
+        let work = Work { meta: WorkMeta { id: "7".into(), ..Default::default() }, chapters: vec![Chapter::new(1, "One".into())], fetched_at: chrono::Utc::now(), resources: Vec::new() };
         let json = serde_json::to_vec(&work).unwrap();
         assert_eq!(import_bytes(&json).unwrap().meta.id, "7");
     }

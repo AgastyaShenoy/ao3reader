@@ -223,7 +223,7 @@ fun searchScreen(a: MainActivity): View {
             if (a.currentTab == MainActivity.SEARCH) a.rebuild()
         }
     }
-    row.addView(a.iconButton(R.drawable.ic_search, p.text) { run(1) })
+    row.addView(a.iconButton(R.drawable.ic_search, p.text, "Search") { run(1) })
     input.setOnEditorActionListener { _, _, _ -> run(1); true }
 
     // Filters, sort and direction: three equally wide buttons.
@@ -556,7 +556,7 @@ private fun blurbCard(a: MainActivity, w: JSONObject, followed: Map<String, Stri
     top.addView(a.label(title + if (w.optBoolean("restricted")) "  🔒" else "", 17f, p.text, bold = true, lines = 2).apply { setOnClickListener { read() } },
         LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     lateinit var more: View
-    more = a.iconButton(R.drawable.ic_more, p.text) { blurbMenu(a, w, followed, more) }
+    more = a.iconButton(R.drawable.ic_more, p.text, "More: follow, open on AO3") { blurbMenu(a, w, followed, more) }
     top.addView(more)
     card.addView(top)
 
@@ -760,7 +760,7 @@ fun followingScreen(a: MainActivity): View {
         t.addView(a.label(sub.joinToString("  ·  "), 12.5f, p.muted))
         c.addView(t, LinearLayout.LayoutParams(0, -2, 1f))
         lateinit var more: View
-        more = a.iconButton(R.drawable.ic_more, p.text) {
+        more = a.iconButton(R.drawable.ic_more, p.text, "More") {
             val m = PopupMenu(a, more)
             m.menu.add(0, 0, 0, "Open on AO3")
             m.menu.add(0, 1, 1, "Unfollow")

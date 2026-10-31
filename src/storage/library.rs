@@ -37,6 +37,17 @@ impl LibraryManager {
         self.works_dir().join(format!("{work_id}.json"))
     }
 
+    /// Folder holding a work's pictures (EPUB illustrations, covers).
+    fn resource_dir(&self, work_id: &str) -> PathBuf {
+        self.works_dir().join(format!("{work_id}.res"))
+    }
+
+    /// Where a work's picture `name` is kept. `name` comes from `rich_text::image_source`,
+    /// which only lets plain file names through.
+    pub fn resource_path(work_id: &str, name: &str) -> PathBuf {
+        AppConfig::get_app_dir().join("works").join(format!("{work_id}.res")).join(name)
+    }
+
     pub fn save(&self) -> Result<(), String> {
         let path = self.base_dir.join("library.json");
         let json = serde_json::to_string_pretty(&self.data).map_err(|e| e.to_string())?;
@@ -51,6 +62,14 @@ impl LibraryManager {
         // Compact JSON: work files are read by the app only, and can be several MB.
         let json = serde_json::to_string(work).map_err(|e| e.to_string())?;
         write_atomic(&file_path, json.as_bytes()).map_err(|e| e.to_string())?;
+        if !work.resources.is_empty() {
+            let dir = self.resource_dir(&work_id);
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            for (name, bytes) in &work.resources {
+                write_atomic(&dir.join(name), bytes).map_err(|e| e.to_string())?;
+            }
+        }
 
         // Update or insert library entry
         if let Some(entry) = self.data.entries.get_mut(&work_id) {
@@ -152,6 +171,7 @@ impl LibraryManager {
         self.data.recent_history.retain(|id| id != work_id);
         let file_path = self.work_file_path(work_id);
         let _ = fs::remove_file(file_path);
+        let _ = fs::remove_dir_all(self.resource_dir(work_id));
         let _ = self.save();
     }
 

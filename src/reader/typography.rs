@@ -7,6 +7,10 @@ pub enum FontFamilyChoice {
     Serif,
     Monospace,
     Custom(String),
+    /// Atkinson Hyperlegible (Braille Institute), bundled: clear letter shapes for low vision.
+    Atkinson,
+    /// OpenDyslexic, bundled: weighted letter bottoms some dyslexic readers find easier.
+    OpenDyslexic,
 }
 
 impl FontFamilyChoice {
@@ -30,6 +34,8 @@ impl FontFamilyChoice {
             FontFamilyChoice::Serif => "Classic Serif",
             FontFamilyChoice::Monospace => "Code Monospace",
             FontFamilyChoice::Custom(name) => name.as_str(),
+            FontFamilyChoice::Atkinson => "Atkinson Hyperlegible",
+            FontFamilyChoice::OpenDyslexic => "OpenDyslexic",
         }
     }
 
@@ -37,7 +43,7 @@ impl FontFamilyChoice {
     pub fn to_egui_family(&self, ctx: &egui::Context) -> egui::FontFamily {
         match self {
             FontFamilyChoice::Monospace => egui::FontFamily::Monospace,
-            FontFamilyChoice::SansSerif => egui::FontFamily::Proportional,
+            FontFamilyChoice::SansSerif | FontFamilyChoice::Atkinson | FontFamilyChoice::OpenDyslexic => egui::FontFamily::Proportional,
             FontFamilyChoice::Serif | FontFamilyChoice::Custom(_) => {
                 let name = egui::FontFamily::Name(Self::READER_BOOK_FONT.into());
                 let is_bound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -148,6 +154,29 @@ pub struct TypographySettings {
     /// Font for the app's own interface (menus, buttons, labels); None keeps the system face.
     #[serde(default)]
     pub ui_font: Option<String>,
+    /// Extra space between letters, and between words, as a fraction of the text size.
+    #[serde(default)]
+    pub letter_spacing: f32,
+    #[serde(default)]
+    pub word_spacing: f32,
+    /// Bold the first part of every word ("bold word starts").
+    #[serde(default)]
+    pub bold_word_starts: bool,
+    /// Highlight the line being read and dim the rest of the page.
+    #[serde(default)]
+    pub reading_ruler: bool,
+    /// A soft colour laid over the page (0xRRGGBB), and how strong it is (0–0.5).
+    #[serde(default)]
+    pub tint: Option<u32>,
+    #[serde(default = "default_tint_strength")]
+    pub tint_strength: f32,
+    /// Only the text: no toolbar, running heads, page numbers or progress bar.
+    #[serde(default)]
+    pub focus_mode: bool,
+}
+
+fn default_tint_strength() -> f32 {
+    0.18
 }
 
 impl Default for TypographySettings {
@@ -172,6 +201,13 @@ impl Default for TypographySettings {
             custom_font_name: None,
             custom_font_path: None,
             ui_font: None,
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+            bold_word_starts: false,
+            reading_ruler: false,
+            tint: None,
+            tint_strength: default_tint_strength(),
+            focus_mode: false,
         }
     }
 }

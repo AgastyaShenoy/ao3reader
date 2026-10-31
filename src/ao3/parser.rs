@@ -114,6 +114,7 @@ impl Ao3Parser {
             meta,
             chapters,
             fetched_at: Utc::now(),
+            resources: Vec::new(),
         })
     }
 
@@ -469,6 +470,12 @@ impl Ao3Parser {
 
     /// Clean inner text of an element, preserving inline formatting cues if needed
     pub(crate) fn clean_element_text(element: scraper::ElementRef) -> String {
+        Self::clean_element_text_skipping(element, &[])
+    }
+
+    /// Like `clean_element_text`, leaving out child elements named in `skip` (e.g. the nested
+    /// lists inside a list item).
+    pub(crate) fn clean_element_text_skipping(element: scraper::ElementRef, skip: &[&str]) -> String {
         let mut result = String::new();
         for node in element.children() {
             if let Some(text) = node.value().as_text() {
@@ -476,7 +483,10 @@ impl Ao3Parser {
                 result.extend(text.chars().map(|c| if c.is_ascii_whitespace() { ' ' } else { c }));
             } else if let Some(el) = scraper::ElementRef::wrap(node) {
                 let name = el.value().name();
-                let inner = Self::clean_element_text(el);
+                if skip.contains(&name) {
+                    continue;
+                }
+                let inner = Self::clean_element_text_skipping(el, skip);
                 // Markers hug the text; whitespace inside the tag moves outside them.
                 let wrap = |result: &mut String, marker: &str| {
                     let core = inner.trim();
