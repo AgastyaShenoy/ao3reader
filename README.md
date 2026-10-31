@@ -38,7 +38,7 @@ Your EPUBs and PDFs · free classics · AO3 and the story forums · highlights, 
 <td width="33%" valign="top">
 
 ### 📚 Your books
-EPUBs with their pictures, headings and tables, and PDFs page by page. Open them from your file manager and they go straight into the reader.
+EPUBs with their pictures, headings and tables, and PDFs page by page, sorted into shelves and your own collections.
 
 </td>
 <td width="33%" valign="top">
@@ -164,7 +164,7 @@ The same reader, highlights, dictionary, catalogues, Following and themes, built
 - **Your AO3 downloads:** import EPUBs you downloaded from AO3, and their tags, warnings and summaries come with them. *(Works now.)*
 
 ### 🌐 Finding books
-- **Your own files:** open EPUB books, PDFs and AO3 web pages, or open them with Flax Reader from your file manager.
+- **Your own files:** open EPUB books, PDFs and AO3 web pages with **Import your own files** in Browse, or open them with Flax Reader from your file manager.
 - **Project Gutenberg:** browse and search tens of thousands of free books, built in.
 - **Standard Ebooks:** carefully edited public-domain books, built in. Its newest releases are free to everyone; its patrons can add the full catalogue with their sign-in.
 - **SpaceBattles and Sufficient Velocity:** browse the story boards, and save any story's chapters (its "threadmarks") to your library.
@@ -179,6 +179,7 @@ The same reader, highlights, dictionary, catalogues, Following and themes, built
 
 ### 📚 Library
 - **Shelves:** Reading, Completed, For later and Favourites.
+- **Collections:** make your own, like folders of books, and put a book in as many as you like. Pick one to see just its books.
 - **Find and sort:** search your library by title, author or tag, and sort by recently read, title, date added or author.
 - **Export:** save a book as a web page, Markdown or plain text.
 

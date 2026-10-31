@@ -11,6 +11,20 @@ use std::path::PathBuf;
 pub struct LibraryData {
     pub entries: HashMap<String, LibraryEntry>,
     pub recent_history: Vec<String>, // list of work IDs ordered by most recently opened
+    /// The reader's own collections, in the order they were made.
+    #[serde(default)]
+    pub collections: Vec<Collection>,
+}
+
+/// A collection the reader made, like a folder of books. A book can be in several, and
+/// deleting a collection leaves its books in the library.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Collection {
+    pub id: String,
+    pub name: String,
+    /// Work ids, in the order they were added.
+    #[serde(default)]
+    pub works: Vec<String>,
 }
 
 pub struct LibraryManager {
@@ -197,6 +211,9 @@ impl LibraryManager {
     pub fn delete_work(&mut self, work_id: &str) {
         self.data.entries.remove(work_id);
         self.data.recent_history.retain(|id| id != work_id);
+        for c in &mut self.data.collections {
+            c.works.retain(|id| id != work_id);
+        }
         let file_path = self.work_file_path(work_id);
         let _ = fs::remove_file(file_path);
         let _ = fs::remove_dir_all(self.resource_dir(work_id));
@@ -211,6 +228,67 @@ impl LibraryManager {
     /// Get entry for a work
     pub fn get_entry(&self, work_id: &str) -> Option<&LibraryEntry> {
         self.data.entries.get(work_id)
+    }
+
+    pub fn collections(&self) -> &[Collection] {
+        &self.data.collections
+    }
+
+    pub fn collection(&self, id: &str) -> Option<&Collection> {
+        self.data.collections.iter().find(|c| c.id == id)
+    }
+
+    /// Makes a collection and returns its id; a blank name makes none. A name that's already
+    /// taken (in any case) gives that collection instead of a second one.
+    pub fn create_collection(&mut self, name: &str) -> Option<String> {
+        let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+        if name.is_empty() {
+            return None;
+        }
+        if let Some(c) = self.data.collections.iter().find(|c| c.name.to_lowercase() == name.to_lowercase()) {
+            return Some(c.id.clone());
+        }
+        let mut n = Utc::now().timestamp_millis();
+        while self.collection(&format!("c{n}")).is_some() {
+            n += 1;
+        }
+        let id = format!("c{n}");
+        self.data.collections.push(Collection { id: id.clone(), name, works: Vec::new() });
+        let _ = self.save();
+        Some(id)
+    }
+
+    pub fn rename_collection(&mut self, id: &str, name: &str) {
+        let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+        if let Some(c) = self.data.collections.iter_mut().find(|c| c.id == id).filter(|_| !name.is_empty()) {
+            c.name = name;
+            let _ = self.save();
+        }
+    }
+
+    /// Removes the collection only: its books stay in the library.
+    pub fn delete_collection(&mut self, id: &str) {
+        self.data.collections.retain(|c| c.id != id);
+        let _ = self.save();
+    }
+
+    /// Puts a work in a collection, or takes it out.
+    pub fn set_in_collection(&mut self, id: &str, work_id: &str, on: bool) {
+        if let Some(c) = self.data.collections.iter_mut().find(|c| c.id == id) {
+            let has = c.works.iter().any(|w| w == work_id);
+            if on && !has && self.data.entries.contains_key(work_id) {
+                c.works.push(work_id.to_string());
+            } else if !on && has {
+                c.works.retain(|w| w != work_id);
+            } else {
+                return;
+            }
+            let _ = self.save();
+        }
+    }
+
+    pub fn in_collection(&self, id: &str, work_id: &str) -> bool {
+        self.collection(id).is_some_and(|c| c.works.iter().any(|w| w == work_id))
     }
 
     /// Filter and sort entries
@@ -251,5 +329,72 @@ impl LibraryManager {
         // Sort by most recently read
         list.sort_by(|a, b| b.progress.last_read.cmp(&a.progress.last_read));
         list
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ao3::models::WorkMeta;
+
+    fn library(name: &str, works: &[&str]) -> LibraryManager {
+        let dir = std::env::temp_dir().join(format!("ao3-library-{name}-{}", std::process::id()));
+        let _ = fs::create_dir_all(dir.join("works"));
+        let mut lib = LibraryManager { data: LibraryData::default(), base_dir: dir };
+        for id in works {
+            let entry = LibraryEntry {
+                meta: WorkMeta { id: id.to_string(), ..WorkMeta::default() },
+                shelf: ShelfStatus::Reading,
+                is_favorite: false,
+                progress: ReadingProgress::default(),
+                bookmarks: Vec::new(),
+                highlights: Vec::new(),
+                downloaded_at: Utc::now(),
+                local_file_exists: true,
+                personal_notes: String::new(),
+            };
+            lib.data.entries.insert(id.to_string(), entry);
+        }
+        lib
+    }
+
+    #[test]
+    fn collections_hold_books_until_they_go() {
+        let mut lib = library("collections", &["a", "b"]);
+        assert_eq!(lib.create_collection("   "), None);
+        let austen = lib.create_collection("  Austen  novels ").unwrap();
+        assert_eq!(lib.collection(&austen).unwrap().name, "Austen novels");
+        assert_eq!(lib.create_collection("austen NOVELS"), Some(austen.clone()), "same name, same collection");
+        let summer = lib.create_collection("Summer").unwrap();
+        assert_ne!(austen, summer);
+
+        lib.set_in_collection(&austen, "a", true);
+        lib.set_in_collection(&austen, "a", true);
+        lib.set_in_collection(&austen, "b", true);
+        lib.set_in_collection(&austen, "missing", true);
+        lib.set_in_collection(&summer, "a", true);
+        assert_eq!(lib.collection(&austen).unwrap().works, ["a", "b"]);
+        lib.set_in_collection(&austen, "b", false);
+        assert!(!lib.in_collection(&austen, "b"));
+
+        lib.rename_collection(&summer, "");
+        lib.rename_collection(&summer, "Beach reads");
+        assert_eq!(lib.collection(&summer).unwrap().name, "Beach reads");
+
+        // Deleting a book takes it out of every collection; deleting a collection keeps its books.
+        lib.delete_work("a");
+        assert!(lib.collections().iter().all(|c| c.works.is_empty()));
+        lib.set_in_collection(&summer, "b", true);
+        lib.delete_collection(&summer);
+        assert_eq!(lib.collections().len(), 1);
+        assert!(lib.get_entry("b").is_some());
+
+        // Saved and read back, including libraries saved before collections existed.
+        let saved = serde_json::to_string(&lib.data).unwrap();
+        let back: LibraryData = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back.collections, lib.data.collections);
+        let old: LibraryData = serde_json::from_str(r#"{"entries":{},"recent_history":[]}"#).unwrap();
+        assert!(old.collections.is_empty());
+        let _ = fs::remove_dir_all(&lib.base_dir);
     }
 }

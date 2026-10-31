@@ -27,6 +27,8 @@ pub enum CatalogAction {
     FollowShelf { catalog: Catalog, url: String, title: String },
     /// Follow a forum story (it's saved to the library first).
     FollowStory(String),
+    /// Go to Settings' import page, to bring in books the reader has.
+    GoImport,
 }
 
 /// A book being downloaded, or its result.
@@ -139,10 +141,17 @@ impl CatalogScreen {
         let w = (body.w - 48.0).min(MAX_W);
         let x = body.x + (body.w - w) / 2.0;
         let t = ui.text("Browse", &TextStyle::ui(26.0).semibold(), x, body.y + 22.0, c.text);
+        // Books the reader already has come in through Settings' import page.
+        let iw = ui.button_width("Import your own files", Some(icons::OPEN_FILE));
+        let ir = Rect::new(x + w - iw, body.y + 22.0 + (t.h - 34.0) / 2.0, iw, 34.0);
+        if ui.button_ex(id("cat-import"), ir, "Import your own files", Some(icons::OPEN_FILE), ButtonKind::Secondary, true) {
+            out.push(CatalogAction::GoImport);
+        }
+        ui.tip(id("cat-import"), ir, "Open EPUB books, PDFs and AO3 downloads you already have");
         ui.text_opts(
             "Find books and stories, or add your own catalogue: Calibre, Kavita, Komga, any OPDS feed.",
             &TextStyle::ui(SMALL),
-            TextOpts::ellipsize((w - t.w - 20.0).max(60.0)),
+            TextOpts::ellipsize((w - t.w - iw - 36.0).max(60.0)),
             x + t.w + 16.0,
             body.y + 22.0 + t.h - 18.0,
             c.muted,

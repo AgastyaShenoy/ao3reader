@@ -401,6 +401,8 @@ class LibraryState {
     var query = ""
     var filter = 0
     var sort = 0
+    /** The collection shown, if one is picked: the shelves then filter within it. */
+    var collection: String? = null
 }
 
 class ImportState {

@@ -29,3 +29,5 @@ pub const BUG: &str = "\u{EBE8}";
 pub const CODE: &str = "\u{E943}";
 pub const HISTORY: &str = "\u{E81C}";
 pub const SHIELD: &str = "\u{EA18}";
+pub const EDIT: &str = "\u{E70F}";
+pub const ADD: &str = "\u{E710}";

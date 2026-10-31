@@ -761,6 +761,28 @@ impl App {
                     self.tab = Tab::Settings;
                     self.settings.show_import();
                 }
+                LibraryAction::NewCollection { name, with } => {
+                    if let Some(cid) = self.library.create_collection(&name) {
+                        match with {
+                            Some(wid) => {
+                                self.library.set_in_collection(&cid, &wid, true);
+                                self.set_toast(format!("Added to “{name}”"));
+                            }
+                            None => self.library_screen.show_collection(&cid),
+                        }
+                    }
+                }
+                LibraryAction::RenameCollection(cid, name) => self.library.rename_collection(&cid, &name),
+                LibraryAction::DeleteCollection(cid) => {
+                    let name = self.library.collection(&cid).map(|c| c.name.clone()).unwrap_or_default();
+                    self.library.delete_collection(&cid);
+                    self.set_toast(format!("Deleted the collection “{name}”. Its books are still in your library."));
+                }
+                LibraryAction::SetInCollection(cid, wid, on) => {
+                    self.library.set_in_collection(&cid, &wid, on);
+                    let name = self.library.collection(&cid).map(|c| c.name.clone()).unwrap_or_default();
+                    self.set_toast(if on { format!("Added to “{name}”") } else { format!("Removed from “{name}”") });
+                }
                 LibraryAction::Delete(id) => {
                     if self.reader.as_ref().is_some_and(|r| r.work_id() == id) {
                         self.reader = None;
@@ -869,6 +891,10 @@ impl App {
                     self.browse_actions(vec![BrowseAction::FollowStory(url)]);
                 }
                 CatalogAction::Read(id) => self.open_work(&id),
+                CatalogAction::GoImport => {
+                    self.tab = Tab::Settings;
+                    self.settings.show_import();
+                }
                 CatalogAction::Save(list) => {
                     self.config.catalogs = list;
                     self.mark_config_dirty();

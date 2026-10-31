@@ -7,7 +7,7 @@
 use windows::core::{w, HSTRING};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::UI::Controls::EM_SETCUEBANNER;
+use windows::Win32::UI::Controls::{EM_SETCUEBANNER, EM_SETSEL};
 use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_ESCAPE, VK_RETURN, VK_TAB};
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -132,6 +132,13 @@ impl EditBox {
     pub fn focus(&self) {
         unsafe {
             let _ = SetFocus(Some(self.hwnd));
+        }
+    }
+
+    /// Selects all the text, so typing replaces it.
+    pub fn select_all(&self) {
+        unsafe {
+            SendMessageW(self.hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
         }
     }
 

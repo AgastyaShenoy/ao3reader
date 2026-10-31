@@ -742,7 +742,8 @@ impl<'a> Ui<'a> {
             } else {
                 let w = items
                     .iter()
-                    .map(|(l, _)| self.g.layout(l, &TextStyle::ui(13.5), TextOpts::default()).w + 40.0)
+                    // Room for the label plus the row's padding and check mark (see below).
+                    .map(|(l, _)| self.g.layout(l, &TextStyle::ui(13.5), TextOpts::default()).w + 52.0)
                     .fold(r.w.max(180.0), f32::max);
                 let h = items.len() as f32 * 34.0 + 8.0;
                 let x = (r.right() - w).max(4.0).min(self.size.0 - w - 4.0);
@@ -1010,6 +1011,36 @@ impl<'a> Ui<'a> {
         (self.measure(&label, &TextStyle::ui(11.5).semibold(), TextOpts::default()).w + 12.0).max(18.0)
     }
 
+    fn chip_style(selected: bool) -> TextStyle {
+        if selected { TextStyle::ui(13.0).semibold() } else { TextStyle::ui(13.0) }
+    }
+
+    /// Width of a `chip`, for wrapping rows of them.
+    pub fn chip_width(&mut self, label: &str, n: usize, selected: bool) -> f32 {
+        let t = self.measure(label, &Self::chip_style(selected), TextOpts::default());
+        t.w + 26.0 + if n > 0 { self.badge_width(n) + 6.0 } else { 0.0 }
+    }
+
+    /// A rounded, clickable chip 30 high, with a badge for `n` (none for 0). Returns its width
+    /// and whether it was clicked.
+    pub fn chip(&mut self, id: Id, x: f32, y: f32, label: &str, n: usize, kind: Badge, selected: bool) -> (f32, bool) {
+        let c = self.c;
+        let t = self.measure(label, &Self::chip_style(selected), TextOpts::default());
+        let r = Rect::new(x, y, self.chip_width(label, n, selected), 30.0);
+        let resp = self.interact_as(id, r, Role::Choice(selected), label);
+        if selected {
+            self.g.fill_round(r, 15.0, c.selected());
+        } else {
+            self.g.stroke_round(r, 15.0, 1.0, c.border);
+            if resp.hovered {
+                self.g.fill_round(r, 15.0, c.hover());
+            }
+        }
+        self.g.draw_text(t, r.x + 13.0, r.y + (30.0 - t.h) / 2.0, c.text);
+        self.badge(r.x + 19.0 + t.w, r.y + 15.0, n, kind, selected);
+        (r.w, resp.clicked)
+    }
+
     /// Segmented control whose options carry a count badge.
     pub fn segmented_counts(&mut self, id: Id, r: Rect, options: &[(&str, usize)], selected: &mut usize, kind: Badge) -> bool {
         let c = self.c;
@@ -1151,6 +1182,14 @@ impl<'a> Ui<'a> {
     pub fn focus_input(&mut self, id: Id) {
         if let Some(e) = self.mem.edits.get(&id) {
             e.focus();
+        }
+    }
+
+    /// Focuses a text box with all its text selected, so typing replaces it.
+    pub fn focus_input_selected(&mut self, id: Id) {
+        if let Some(e) = self.mem.edits.get(&id) {
+            e.focus();
+            e.select_all();
         }
     }
 

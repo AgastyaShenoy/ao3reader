@@ -37,7 +37,14 @@ private fun matches(e: JSONObject, q: String): Boolean {
 fun libraryScreen(a: MainActivity): View {
     val p = Settings.pal
     val st = a.library
-    val all = Core.arr("library").objects()
+    val whole = Core.arr("library").objects()
+    val collections = Core.arr("collections").objects()
+    // A collection that's gone shows the whole library again.
+    val current = collections.firstOrNull { it.getString("id") == st.collection }
+    if (current == null) st.collection = null
+    val members = current?.getJSONArray("works")?.strings()?.toSet()
+    // The shelves count, and filter, within the collection shown.
+    val all = if (members == null) whole else whole.filter { it.getJSONObject("meta").getString("id") in members }
     val box = a.column()
     box.addView(a.header("Library", logo = true))
 
@@ -47,6 +54,7 @@ fun libraryScreen(a: MainActivity): View {
 
     val chips = a.row().apply { setPadding(a.dp(16), a.dp(10), a.dp(16), a.dp(6)) }
     box.addView(HorizontalScrollView(a).apply { isHorizontalScrollBarEnabled = false; addView(chips) }, lp())
+    if (whole.isNotEmpty()) box.addView(HorizontalScrollView(a).apply { isHorizontalScrollBarEnabled = false; addView(collectionsRow(a, collections, current, whole.size)) }, lp())
 
     val list = ListView(a).apply {
         divider = null
@@ -64,7 +72,7 @@ fun libraryScreen(a: MainActivity): View {
         override fun getCount() = shown.size
         override fun getItem(i: Int) = shown[i]
         override fun getItemId(i: Int) = i.toLong()
-        override fun getView(i: Int, convert: View?, parent: ViewGroup?): View = workCard(a, shown[i])
+        override fun getView(i: Int, convert: View?, parent: ViewGroup?): View = workCard(a, shown[i], collections)
     }
     list.adapter = adapter
 
@@ -80,7 +88,9 @@ fun libraryScreen(a: MainActivity): View {
         adapter.notifyDataSetChanged()
         empty.removeAllViews()
         empty.gone(l.isNotEmpty())
-        if (all.isEmpty()) {
+        if (current != null && all.isEmpty()) {
+            empty.addView(a.label("“${current.getString("name")}” is empty. Use ⋮ on a book to add it here.", 15f, p.muted).apply { gravity = Gravity.CENTER })
+        } else if (whole.isEmpty()) {
             empty.addView(a.label("Your library is empty. Search AO3 or paste a link to a work to start reading.", 15f, p.muted).apply { gravity = Gravity.CENTER })
             val buttons = a.row().apply { gravity = Gravity.CENTER }
             buttons.addView(a.button("Search AO3", Kind.Primary, R.drawable.ic_search) { a.catalogs.switch(0); a.show(MainActivity.SEARCH) })
@@ -121,7 +131,73 @@ fun libraryScreen(a: MainActivity): View {
     return box
 }
 
-private fun workCard(a: MainActivity, e: JSONObject): View {
+/** The collections row: a chip per collection (pick one to see only its books), one to make a new
+ *  one, and ⋮ to rename or delete the one shown. */
+private fun collectionsRow(a: MainActivity, collections: List<JSONObject>, shown: JSONObject?, total: Int): View {
+    val p = Settings.pal
+    val st = a.library
+    val row = a.row().apply { setPadding(a.dp(16), a.dp(2), a.dp(16), a.dp(6)) }
+    val gap = { LinearLayout.LayoutParams(-2, -2).apply { rightMargin = a.dp(8) } }
+    row.addView(a.label("Collections", 13.5f, p.muted, bold = true), LinearLayout.LayoutParams(-2, -2).apply { rightMargin = a.dp(10) })
+    if (collections.isNotEmpty()) row.addView(a.countChip("All books", total, shown == null) { st.collection = null; a.rebuild() }, gap())
+    for (c in collections) {
+        val id = c.getString("id")
+        val on = id == st.collection
+        row.addView(a.countChip(c.getString("name"), c.getJSONArray("works").length(), on) { st.collection = if (on) null else id; a.rebuild() }, gap())
+    }
+    row.addView(a.countChip("+ New collection", 0, false) {
+        nameCollection(a, "New collection", "", "Create") { name ->
+            val id = Core.req("collections.create", json("name" to name)) as? String
+            if (id != null) st.collection = id
+            a.rebuild()
+        }
+    }, gap())
+    if (shown != null) {
+        val name = shown.getString("name")
+        lateinit var more: View
+        more = a.iconButton(R.drawable.ic_more, p.text, "Rename or delete “$name”") {
+            val m = a.popupMenu(more)
+            m.menu.add(0, 0, 0, "Rename")
+            m.menu.add(0, 1, 1, "Delete collection")
+            m.setOnMenuItemClickListener {
+                val id = shown.getString("id")
+                if (it.itemId == 0) {
+                    nameCollection(a, "Rename collection", name, "Rename") { new -> Core.req("collections.rename", json("id" to id, "name" to new)); a.rebuild() }
+                } else {
+                    a.dialog("Delete “$name”?", "The collection goes; its books stay in your library.", ok = "Delete", okKind = Kind.Danger) {
+                        Core.req("collections.delete", json("id" to id))
+                        st.collection = null
+                        a.toast("Deleted the collection “$name”")
+                        a.rebuild()
+                        true
+                    }
+                }
+                true
+            }
+            m.show()
+        }
+        row.addView(more)
+    }
+    return row
+}
+
+/** Asks for a collection's name, starting from `initial`; `done` gets it, trimmed and not blank. */
+private fun nameCollection(a: MainActivity, title: String, initial: String, ok: String, done: (String) -> Unit) {
+    val input = a.input("Name the collection").apply {
+        setText(initial)
+        setSelection(0, initial.length)
+        inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+    }
+    val d = a.dialog(title, body = input, ok = ok) {
+        val name = input.text.toString().trim()
+        if (name.isNotEmpty()) done(name)
+        name.isNotEmpty()
+    }
+    input.requestFocus()
+    d.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE or android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+}
+
+private fun workCard(a: MainActivity, e: JSONObject, collections: List<JSONObject>): View {
     val p = Settings.pal
     val m = e.getJSONObject("meta")
     val id = m.getString("id")
@@ -187,13 +263,34 @@ private fun workCard(a: MainActivity, e: JSONObject): View {
     actions.addView(shelfBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = a.dp(8) })
     actions.addView(View(a), LinearLayout.LayoutParams(0, 1, 1f))
     lateinit var more: View
-    more = a.iconButton(R.drawable.ic_more, p.text, if (pdfPages > 0) "More: delete" else "More: export or delete") {
+    more = a.iconButton(R.drawable.ic_more, p.text, if (pdfPages > 0) "More: collections or delete" else "More: collections, export or delete") {
         val menu = a.popupMenu(more)
-        // A PDF is already its own file: nothing to export.
-        if (pdfPages == 0) EXPORTS.forEachIndexed { i, (_, name, _) -> menu.menu.add(0, i, i, "Export as $name") }
+        // In or out of each collection (ids from 100), a new one, export (a PDF is already its
+        // own file: nothing to export), and delete.
+        collections.forEachIndexed { i, c ->
+            val has = c.getJSONArray("works").strings().contains(id)
+            menu.menu.add(0, 100 + i, i, if (has) "Remove from “${c.getString("name")}”" else "Add to “${c.getString("name")}”")
+        }
+        menu.menu.add(0, 98, 50, "New collection…")
+        if (pdfPages == 0) EXPORTS.forEachIndexed { i, (_, name, _) -> menu.menu.add(0, i, 60 + i, "Export as $name") }
         menu.menu.add(0, 99, 99, "Delete from library")
         menu.setOnMenuItemClickListener {
-            if (it.itemId == 99) confirmDelete(a, id, m.getString("title")) else export(a, id, it.itemId)
+            when {
+                it.itemId >= 100 -> {
+                    val c = collections[it.itemId - 100]
+                    val on = !c.getJSONArray("works").strings().contains(id)
+                    Core.req("collections.set", json("id" to c.getString("id"), "work" to id, "on" to on))
+                    a.toast(if (on) "Added to “${c.getString("name")}”" else "Removed from “${c.getString("name")}”")
+                    a.rebuild()
+                }
+                it.itemId == 98 -> nameCollection(a, "New collection", "", "Create") { name ->
+                    Core.req("collections.create", json("name" to name, "work" to id))
+                    a.toast("Added to “$name”")
+                    a.rebuild()
+                }
+                it.itemId == 99 -> confirmDelete(a, id, m.getString("title"))
+                else -> export(a, id, it.itemId)
+            }
             true
         }
         menu.show()

@@ -126,34 +126,15 @@ pub struct SearchScreen {
     pub error: Option<String>,
 }
 
-fn chip_style(selected: bool) -> TextStyle {
-    if selected { TextStyle::ui(13.0).semibold() } else { TextStyle::ui(13.0) }
-}
-
 /// Width of a `chip`, for wrapping rows of them.
 fn chip_width(ui: &mut Ui, label: &str, new: usize, selected: bool) -> f32 {
-    let t = ui.measure(label, &chip_style(selected), TextOpts::default());
-    t.w + 26.0 + if new > 0 { ui.badge_width(new) + 6.0 } else { 0.0 }
+    ui.chip_width(label, new, selected)
 }
 
 /// A rounded, clickable chip, with a badge for `new` unread works (none for 0). Returns its
 /// width and whether it was clicked.
 fn chip(ui: &mut Ui, key: Id, x: f32, y: f32, label: &str, new: usize, selected: bool) -> (f32, bool) {
-    let c = ui.c;
-    let t = ui.measure(label, &chip_style(selected), TextOpts::default());
-    let r = Rect::new(x, y, chip_width(ui, label, new, selected), 30.0);
-    let resp = ui.interact_as(key, r, Role::Choice(selected), label);
-    if selected {
-        ui.g.fill_round(r, 15.0, c.selected());
-    } else {
-        ui.g.stroke_round(r, 15.0, 1.0, c.border);
-        if resp.hovered {
-            ui.g.fill_round(r, 15.0, c.hover());
-        }
-    }
-    ui.g.draw_text(t, r.x + 13.0, r.y + (30.0 - t.h) / 2.0, c.text);
-    ui.badge(r.x + 19.0 + t.w, r.y + 15.0, new, Badge::New, selected);
-    (r.w, resp.clicked)
+    ui.chip(key, x, y, label, new, Badge::New, selected)
 }
 
 fn error_box(ui: &mut Ui, x: f32, y: f32, w: f32, title: &str, msg: &str) -> f32 {

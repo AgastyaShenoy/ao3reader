@@ -44,7 +44,14 @@ fun browseScreen(a: MainActivity): View {
     val box = a.column()
     val st = a.search
     val count = if (cs.source == 0) st.total?.takeIf { st.link == null }?.let { "${thousands(it)} works" } else null
-    box.addView(a.header("Browse", count))
+    // Books the reader already has come in through Settings' import page.
+    val head = a.header("Browse", count) as LinearLayout
+    head.gravity = android.view.Gravity.CENTER_VERTICAL
+    head.addView(View(a), LinearLayout.LayoutParams(0, 1, 1f))
+    head.addView(a.button("Import files", Kind.Secondary, R.drawable.ic_import) { a.show(MainActivity.IMPORT) }.apply {
+        contentDescription = "Import your own files: EPUB books, PDFs and AO3 downloads"
+    })
+    box.addView(head)
 
     // The sources, and adding a catalog.
     val chips = a.row().apply { setPadding(a.dp(16), 0, a.dp(16), a.dp(8)) }

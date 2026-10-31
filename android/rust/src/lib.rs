@@ -473,6 +473,30 @@ fn dispatch(method: &str, a: &Value) -> R {
             s.library.delete_work(id);
             Ok(Value::Null)
         }),
+        // The reader's own collections: {id, name, works}, in the order they were made.
+        "collections" => with_state(|s| Ok(serde_json::to_value(s.library.collections()).unwrap_or(Value::Null))),
+        // Makes a collection (with a book in it, if `work` is given) and returns its id, or null
+        // for a blank name.
+        "collections.create" => with_state(|s| {
+            let id = s.library.create_collection(arg_str(a, "name")?);
+            if let (Some(id), Some(work)) = (&id, a.get("work").and_then(Value::as_str)) {
+                s.library.set_in_collection(id, work, true);
+            }
+            Ok(json!(id))
+        }),
+        "collections.rename" => with_state(|s| {
+            s.library.rename_collection(arg_str(a, "id")?, arg_str(a, "name")?);
+            Ok(Value::Null)
+        }),
+        "collections.delete" => with_state(|s| {
+            s.library.delete_collection(arg_str(a, "id")?);
+            Ok(Value::Null)
+        }),
+        "collections.set" => with_state(|s| {
+            let on = a.get("on").and_then(Value::as_bool).unwrap_or(true);
+            s.library.set_in_collection(arg_str(a, "id")?, arg_str(a, "work")?, on);
+            Ok(Value::Null)
+        }),
         "work.open" => with_state(|s| {
             let id = arg_str(a, "id")?;
             let mut work = s.library.load_work(id).ok_or("missing")?;
