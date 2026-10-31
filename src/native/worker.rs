@@ -17,7 +17,9 @@ pub struct Worker<E: Send + 'static> {
 }
 
 impl<E: Send + 'static> Worker<E> {
-    pub fn new(hwnd: HWND) -> Self {
+    /// `failed` turns a job that panicked into a result to report, so the thread (and every job
+    /// after it) carries on.
+    pub fn new(hwnd: HWND, failed: fn(String) -> E) -> Self {
         let (jobs, job_rx) = channel::<Job<E>>();
         let (res_tx, results) = channel::<E>();
         // HWND is a raw pointer and not Send; the handle value itself is safe to pass around.
@@ -26,7 +28,11 @@ impl<E: Send + 'static> Worker<E> {
             .name("ao3-worker".into())
             .spawn(move || {
                 for job in job_rx {
-                    if res_tx.send(job()).is_err() {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).unwrap_or_else(|p| {
+                        let why = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_default();
+                        failed(why)
+                    });
+                    if res_tx.send(result).is_err() {
                         break;
                     }
                     unsafe {

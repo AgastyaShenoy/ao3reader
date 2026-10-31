@@ -26,7 +26,8 @@ object Core {
     @JvmStatic
     external fun renderPdf(page: Int, scale: Float, x: Int, y: Int, w: Int, h: Int, look: Int): IntArray?
 
-    private val worker = Executors.newSingleThreadExecutor()
+    // A few at once, so a word lookup or a sign-in doesn't wait behind a long download.
+    private val worker = Executors.newFixedThreadPool(3)
     /** Long batches (checking followed feeds) run here so they don't hold up downloads. */
     private val slowWorker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())

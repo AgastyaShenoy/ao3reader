@@ -112,6 +112,9 @@ impl SearchScreen {
 #[derive(Default)]
 pub struct SearchScreen {
     pub query: SearchQuery,
+    /// The search the results on screen are for: "Load more" continues it, whatever has been
+    /// typed since.
+    searched: Option<SearchQuery>,
     pub link: Option<WorkLink>,
     /// When the search box last changed.
     typed: Option<Instant>,
@@ -252,6 +255,7 @@ impl SearchScreen {
                 self.error = None;
                 self.filters_open = false;
                 ui.scroll_to_top(id("search-list"));
+                self.searched = Some(self.query.clone());
                 out.push(BrowseAction::Search(self.query.clone(), 1));
             }
         }
@@ -281,7 +285,7 @@ impl SearchScreen {
         let busy = self.busy;
         let (error, total, has_next, page) = (self.error.clone(), self.total, self.has_next, self.page);
         let results = &self.results;
-        let query = &self.query;
+        let query = self.searched.as_ref().unwrap_or(&self.query);
         ui.scroll_area(id("search-list"), area, |ui, view, y0| {
             let mut yy = y0 + 2.0;
             if let Some(e) = &error {

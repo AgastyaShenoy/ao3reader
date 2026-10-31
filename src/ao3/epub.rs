@@ -94,7 +94,8 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+            // Bytes, not a str slice: what follows a stray % may be a multi-byte character.
+            if let Some(v) = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()) {
                 out.push(v);
                 i += 3;
                 continue;
@@ -687,7 +688,14 @@ pub fn import_named(bytes: &[u8], name: Option<&str>) -> Result<Work, String> {
     let text = String::from_utf8_lossy(bytes);
     let t = text.trim_start_matches('\u{feff}').trim_start();
     if t.starts_with('{') {
-        return serde_json::from_str::<Work>(t).map_err(|e| format!("Not a saved Flax Reader work: {e}"));
+        let mut work = serde_json::from_str::<Work>(t).map_err(|e| format!("Not a saved Flax Reader work: {e}"))?;
+        if work.chapters.is_empty() {
+            return Err("This saved work has no chapters to read.".into());
+        }
+        // The id names files on disk: keep it to letters, digits, - and _.
+        let safe: String = work.meta.id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+        work.meta.id = if safe.trim_matches('_').is_empty() { "imported".into() } else { safe };
+        return Ok(work);
     }
     let id = Ao3Parser::extract_work_id(t).unwrap_or_else(|| {
         use std::hash::{Hash, Hasher};

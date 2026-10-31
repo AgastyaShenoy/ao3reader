@@ -411,9 +411,12 @@ fun downloadEpub(a: MainActivity, id: String, title: String, done: (String?) -> 
         r.onFailure { done(it.message ?: "Couldn't download the EPUB") }.onSuccess {
             done(null)
             a.onDocument = { _, data ->
-                data?.data?.let { uri -> a.contentResolver.openOutputStream(uri)?.use { out -> tmp.inputStream().use { it.copyTo(out) } } }
+                val uri = data?.data
+                if (uri != null) {
+                    runCatching { a.contentResolver.openOutputStream(uri)?.use { out -> tmp.inputStream().use { it.copyTo(out) } } }
+                        .onSuccess { a.toast("EPUB saved") }.onFailure { a.toast("Couldn't save the EPUB: ${it.message}") }
+                }
                 tmp.delete()
-                a.toast("EPUB saved")
             }
             @Suppress("DEPRECATION")
             a.startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {

@@ -1,3 +1,4 @@
+use crate::ao3::comments::{comment_form, parse_comments, CommentPage};
 use crate::ao3::models::{UserSession, Work, WorkMeta};
 use crate::ao3::parser::Ao3Parser;
 use crate::ao3::search::{listing_problem, parse_listing, Feed, Listing, SearchQuery};
@@ -6,7 +7,6 @@ use ureq::http::Uri;
 use ureq::{Agent, Cookie, ResponseExt};
 
 const AO3_BASE_URL: &str = "https://archiveofourown.org";
-const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 (AO3DesktopReader/1.0)";
 
 /// Full-work pages of very long works run to several MB of HTML; ureq's default cap is 10 MB.
 const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
@@ -34,7 +34,8 @@ pub struct Ao3Client {
 impl Ao3Client {
     pub fn new(session: Option<&UserSession>) -> Self {
         let agent: Agent = Agent::config_builder()
-            .user_agent(DEFAULT_USER_AGENT)
+            // The app names itself, as it does to every site (never a browser's name).
+            .user_agent(crate::sources::user_agent())
             .max_redirects(10)
             .http_status_as_error(false)
             .timeout_connect(Some(Duration::from_secs(20)))
@@ -276,6 +277,93 @@ impl Ao3Client {
         }
     }
 
+    /// One page of the signed-in reader's own list: their bookmarks or Marked for Later.
+    pub fn user_list(&self, username: &str, list: UserList, page: u32) -> Result<Listing, String> {
+        let user = crate::ao3::search::encode(username);
+        let url = match list {
+            UserList::Bookmarks => format!("{AO3_BASE_URL}/users/{user}/bookmarks?page={page}"),
+            UserList::MarkedForLater => format!("{AO3_BASE_URL}/users/{user}/readings?show=to-read&page={page}"),
+        };
+        let (status, final_url, body) = self.get_page(&url).map_err(|e| format!("Couldn't reach AO3: {e}"))?;
+        if final_url.contains("/users/login") {
+            return Err("AO3 signed you out. Sign in again under Accounts.".to_string());
+        }
+        match status {
+            200..=299 => Ok(parse_listing(&body, page)),
+            404 => Err("AO3 couldn't find that user's page (404).".to_string()),
+            429 => Err("AO3 rate limit reached (HTTP 429). Please wait a few moments before trying again.".to_string()),
+            _ => Err(unavailable_message(status)),
+        }
+    }
+
+    /// Every work on one of the reader's lists, a page at a time with a pause between pages
+    /// (at most `max_pages`). Bookmarks of series or of works elsewhere are skipped.
+    pub fn whole_user_list(&self, username: &str, list: UserList, max_pages: u32) -> Result<Vec<WorkMeta>, String> {
+        let mut out: Vec<WorkMeta> = Vec::new();
+        for page in 1..=max_pages.max(1) {
+            if page > 1 {
+                std::thread::sleep(Duration::from_millis(1000));
+            }
+            let l = self.user_list(username, list, page)?;
+            for b in l.works {
+                if !out.iter().any(|m| m.id == b.meta.id) {
+                    out.push(b.meta);
+                }
+            }
+            if !l.has_next {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// The comments on a chapter (by AO3's chapter id), or on a whole work when there's no
+    /// chapter id (a one-shot, or a work imported from a file); `page` is 1-based.
+    pub fn comments(&self, work_id: &str, chapter_id: Option<&str>, page: u32) -> Result<CommentPage, String> {
+        let url = match chapter_id {
+            Some(c) => format!("{AO3_BASE_URL}/chapters/{c}?show_comments=true&view_adult=true&page={page}"),
+            None => format!("{AO3_BASE_URL}/works/{work_id}?show_comments=true&view_adult=true&page={page}"),
+        };
+        let (status, _, body) = self.get_page(&url).map_err(|e| format!("Couldn't reach AO3: {e}"))?;
+        match status {
+            200..=299 => Ok(parse_comments(&body, page)),
+            404 => Err("AO3 couldn't find this work's comments (404). It may have been deleted.".to_string()),
+            429 => Err("AO3 rate limit reached (HTTP 429). Please wait a few moments before trying again.".to_string()),
+            _ => Err(unavailable_message(status)),
+        }
+    }
+
+    /// Posts a comment on a chapter (or a whole work) as the signed-in reader.
+    pub fn post_comment(&self, work_id: &str, chapter_id: Option<&str>, text: &str) -> Result<(), String> {
+        let page_url = match chapter_id {
+            Some(c) => format!("{AO3_BASE_URL}/chapters/{c}?show_comments=true&view_adult=true"),
+            None => format!("{AO3_BASE_URL}/works/{work_id}?show_comments=true&view_adult=true"),
+        };
+        let (status, _, body) = self.get_page(&page_url).map_err(|e| format!("Couldn't reach AO3: {e}"))?;
+        if !(200..300).contains(&status) {
+            return Err(unavailable_message(status));
+        }
+        let (action, fields) = comment_form(&body, text).ok_or("This work doesn't take comments here (the author may have turned them off, or only allow them from signed-in users).")?;
+        let url = if action.starts_with('/') { format!("{AO3_BASE_URL}{action}") } else { action };
+        let mut resp = self
+            .agent
+            .post(&url)
+            .send_form(fields.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .map_err(|e| format!("Couldn't post the comment: {e}"))?;
+        let status = resp.status().as_u16();
+        let body = resp.body_mut().with_config().limit(MAX_BODY_BYTES).read_to_string().unwrap_or_default();
+        let doc = scraper::Html::parse_document(&body);
+        let problem = doc
+            .select(&scraper::Selector::parse("div#error, div.error, #errorExplanation").unwrap())
+            .map(|e| e.text().collect::<String>().split_whitespace().collect::<Vec<_>>().join(" "))
+            .find(|t| !t.is_empty());
+        match (status, problem) {
+            (_, Some(p)) => Err(format!("AO3 didn't post the comment: {p}")),
+            (200..=399, None) => Ok(()),
+            (s, None) => Err(unavailable_message(s)),
+        }
+    }
+
     /// Download EPUB from AO3 directly if available
     pub fn download_epub(&self, work_id: &str) -> Result<Vec<u8>, String> {
         let work_url = format!("{AO3_BASE_URL}/works/{work_id}");
@@ -317,4 +405,11 @@ impl Ao3Client {
             .read_to_vec()
             .map_err(|e| format!("Failed to read EPUB bytes: {e}"))
     }
+}
+
+/// The reader's own lists on AO3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserList {
+    Bookmarks,
+    MarkedForLater,
 }

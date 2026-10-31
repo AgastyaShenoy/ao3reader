@@ -136,7 +136,9 @@ class PdfPages(context: Context, private val screen: PdfScreen) : View(context) 
     private var laidFor = -1
 
     private val main = Handler(Looper.getMainLooper())
-    private val bitmaps = object : android.util.LruCache<Int, Bitmap>(24 * 1024 * 1024) {
+    // Room for four pages at the most a page is rendered at (MAX_PAGE_BYTES), so the pages on
+    // screen and the next one never push each other out.
+    private val bitmaps = object : android.util.LruCache<Int, Bitmap>(4 * MAX_PAGE_BYTES) {
         override fun sizeOf(key: Int, value: Bitmap) = value.byteCount
     }
     /** Pages waiting to be rendered (most wanted first) and those being rendered. */
@@ -248,9 +250,12 @@ class PdfPages(context: Context, private val screen: PdfScreen) : View(context) 
         while (running) {
             val page = try { queue.takeFirst() } catch (e: InterruptedException) { return }
             val gen = generation
-            val s = scale
-            val w = (sizes.getOrNull(page)?.first?.times(s))?.toInt() ?: continue
-            val h = (sizes[page].second * s).toInt()
+            val (pw, ph) = sizes.getOrNull(page) ?: continue
+            // A big screen in landscape would want a page bitmap of 30 MB or more: render at most
+            // MAX_PAGE_BYTES and let drawing scale it up.
+            val s = minOf(scale, kotlin.math.sqrt(MAX_PAGE_BYTES / (4f * pw * ph).coerceAtLeast(1f)))
+            val w = (pw * s).toInt()
+            val h = (ph * s).toInt()
             if (w <= 0 || h <= 0) continue
             busy.add(page)
             val px = Core.renderPdf(page, s, 0, 0, w, h, look)
@@ -348,3 +353,6 @@ class PdfPages(context: Context, private val screen: PdfScreen) : View(context) 
         else -> super.performAccessibilityAction(action, args)
     }
 }
+
+/** The most one rendered PDF page takes (ARGB, 4 bytes a pixel). */
+private const val MAX_PAGE_BYTES = 12 * 1024 * 1024

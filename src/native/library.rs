@@ -25,6 +25,8 @@ pub enum LibraryAction {
     ToggleFavorite(String),
     SetShelf(String, ShelfStatus),
     Export(String, ExportFormat),
+    /// Save AO3's own EPUB of a work.
+    SaveAo3Epub(String),
     Delete(String),
     GoSearch,
     GoImport,
@@ -412,6 +414,11 @@ fn card(ui: &mut Ui, r: Rect, e: &LibraryEntry, confirming: bool, collections: &
         &[("Export as HTML", ExportFormat::Html), ("Export as Markdown", ExportFormat::Markdown), ("Export as text", ExportFormat::Text)]
     };
     labels.extend(exports.iter().map(|(l, _)| l.to_string()));
+    // AO3 makes its own EPUB of each work (with its tags and notes), to keep or read elsewhere.
+    let ao3_epub = m.is_ao3();
+    if ao3_epub {
+        labels.push("Save AO3's EPUB…".into());
+    }
     labels.push("Delete from library".into());
     let items: Vec<(&str, bool)> = labels.iter().enumerate().map(|(i, l)| (l.as_str(), i + 1 == labels.len())).collect();
     let n = collections.len();
@@ -419,6 +426,7 @@ fn card(ui: &mut Ui, r: Rect, e: &LibraryEntry, confirming: bool, collections: &
         Some(i) if i < n => out.push(LibraryAction::SetInCollection(collections[i].id.clone(), wid.clone(), !collections[i].works.contains(wid))),
         Some(i) if i == n => result = Some(CardChange::NewCollection(wid.clone())),
         Some(i) if i <= n + exports.len() => out.push(LibraryAction::Export(wid.clone(), exports[i - n - 1].1)),
+        Some(i) if ao3_epub && i == n + exports.len() + 1 => out.push(LibraryAction::SaveAo3Epub(wid.clone())),
         Some(_) => result = Some(CardChange::Confirm(Some(wid.clone()))),
         None => {}
     }
@@ -436,6 +444,8 @@ fn card(ui: &mut Ui, r: Rect, e: &LibraryEntry, confirming: bool, collections: &
     let st = ui.text_opts(&status, &TextStyle::ui(12.5), TextOpts::ellipsize(left_w), r.x + 16.0, by + 2.0, c.text.alpha(0.85));
     let mut stats = match m.pdf_pages {
         Some(_) => "PDF".to_string(),
+        // Brought in from a list on a site (AO3 bookmarks, watched threads): opening downloads it.
+        None if !e.local_file_exists => "Not downloaded yet: opening it downloads it".to_string(),
         None => format!("{} words", thousands(m.stats.words as u64)),
     };
     if m.stats.kudos > 0 {

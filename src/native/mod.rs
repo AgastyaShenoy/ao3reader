@@ -30,7 +30,8 @@ use edit::{create_edit_font, WM_APP_EDIT_KEY};
 use gfx::Gfx;
 use std::cell::RefCell;
 use ui::{Colors, FrameOut, Input, Key, Memory, Ui};
-use windows::core::{w, Result, HSTRING};
+use windows::core::{w, Result, HSTRING, PCWSTR};
+use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -413,6 +414,16 @@ impl Host {
                     Some(LRESULT(0))
                 }
                 WM_CLOSE => {
+                    // Where the window was, to open there next time.
+                    let mut wp = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+                    if GetWindowPlacement(self.hwnd, &mut wp).is_ok() {
+                        let r = wp.rcNormalPosition;
+                        let place = Some(([r.left, r.top, r.right, r.bottom], wp.showCmd == SW_SHOWMAXIMIZED.0 as u32));
+                        if self.app.config.window != place {
+                            self.app.config.window = place;
+                            self.app.mark_config_dirty();
+                        }
+                    }
                     self.app.on_close();
                     let _ = DestroyWindow(self.hwnd);
                     Some(LRESULT(0))
@@ -450,6 +461,23 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 if let Some(root) = A11Y.with(|a| a.borrow().as_ref().map(|s| s.root())) {
                     return windows::Win32::UI::Accessibility::UiaReturnRawElementProvider(hwnd, wp, lp, &root);
                 }
+            }
+            // Another start of the app ("Open with" while it's running) handing over a book.
+            WM_COPYDATA => {
+                let cds = &*(lp.0 as *const COPYDATASTRUCT);
+                if cds.dwData == OPEN_FILE_DATA && !cds.lpData.is_null() {
+                    let units = std::slice::from_raw_parts(cds.lpData as *const u16, cds.cbData as usize / 2);
+                    let path = std::path::PathBuf::from(String::from_utf16_lossy(units));
+                    HOST.with(|h| {
+                        if let Ok(mut h) = h.try_borrow_mut() {
+                            if let Some(host) = h.as_mut() {
+                                host.app.open_file(path);
+                                host.invalidate();
+                            }
+                        }
+                    });
+                }
+                return LRESULT(1);
             }
             WM_DESTROY => {
                 PostQuitMessage(0);
@@ -603,9 +631,62 @@ unsafe fn set_window_icons(hwnd: HWND, gfx: &mut Gfx, dpi: u32) {
     }
 }
 
+/// Marks a WM_COPYDATA that carries a book's path to open.
+const OPEN_FILE_DATA: usize = 0x464C_4158; // "FLAX"
+
+/// One copy of the app per library: a second start (opening a book with the app while it runs)
+/// hands the book to the first and leaves, so two copies never save over each other's changes.
+/// Returns true when another copy took over.
+unsafe fn hand_to_running_copy(class: PCWSTR) -> bool {
+    let key = library_key();
+    let name = HSTRING::from(format!("Local\\FlaxReader.{key:08x}"));
+    // Kept for the life of the process: the name is taken while it runs.
+    let mutex = windows::Win32::System::Threading::CreateMutexW(None, false, &name);
+    let taken = windows::Win32::Foundation::GetLastError() == windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
+    std::mem::forget(mutex);
+    if !taken {
+        return false;
+    }
+    // The running copy's window: the one marked with this library's key.
+    let mut found = HWND::default();
+    let mut w = FindWindowExW(None, None, class, PCWSTR::null()).unwrap_or_default();
+    while !w.is_invalid() {
+        if GetPropW(w, w!("FlaxReaderLibrary")).0 as usize as u32 == key {
+            found = w;
+            break;
+        }
+        w = FindWindowExW(None, Some(w), class, PCWSTR::null()).unwrap_or_default();
+    }
+    if found.is_invalid() {
+        // Starting up or closing: carry on as a copy of its own.
+        return false;
+    }
+    if let Some(path) = std::env::args_os().nth(1).filter(|p| std::path::Path::new(p).is_file()) {
+        let units: Vec<u16> = path.to_string_lossy().encode_utf16().collect();
+        let cds = COPYDATASTRUCT { dwData: OPEN_FILE_DATA, cbData: (units.len() * 2) as u32, lpData: units.as_ptr() as *mut _ };
+        SendMessageW(found, WM_COPYDATA, None, Some(LPARAM(&cds as *const _ as isize)));
+    }
+    if IsIconic(found).as_bool() {
+        let _ = ShowWindow(found, SW_RESTORE);
+    }
+    let _ = SetForegroundWindow(found);
+    true
+}
+
+/// The library's key, put on the window so a second start can find this copy.
+fn library_key() -> u32 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    AppConfig::get_app_dir().to_string_lossy().to_lowercase().hash(&mut h);
+    h.finish() as u32
+}
+
 pub fn run() -> Result<()> {
     let config = AppConfig::load();
     unsafe {
+        if hand_to_running_copy(w!("AO3ReaderNative")) {
+            return Ok(());
+        }
         // COM, for pictures (WIC), the reading voice and screen readers' names for text fields.
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         let hinst = GetModuleHandleW(None)?;
@@ -637,11 +718,21 @@ pub fn run() -> Result<()> {
             None,
         )?;
 
+        let _ = SetPropW(hwnd, w!("FlaxReaderLibrary"), Some(windows::Win32::Foundation::HANDLE(library_key() as usize as *mut _)));
         // The window may have opened on a monitor whose DPI differs from the system DPI.
         let dpi = GetDpiForWindow(hwnd).max(96);
         if dpi != GetDpiForSystem() {
             let (w, h) = outer_size(DEFAULT_SIZE, dpi, STYLE);
             let _ = SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        // Back where it was last time (Windows keeps it on a screen that's still there).
+        let mut maximized = false;
+        if let Some(([l, t, r, b], max)) = config.window {
+            if r - l >= 200 && b - t >= 150 {
+                let wp = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, showCmd: SW_HIDE.0 as u32, rcNormalPosition: RECT { left: l, top: t, right: r, bottom: b }, ..Default::default() };
+                let _ = SetWindowPlacement(hwnd, &wp);
+                maximized = max;
+            }
         }
 
         let mut app = App::new(config);
@@ -676,7 +767,7 @@ pub fn run() -> Result<()> {
             }
         });
 
-        let _ = ShowWindow(hwnd, SW_SHOWDEFAULT);
+        let _ = ShowWindow(hwnd, if maximized { SW_SHOWMAXIMIZED } else { SW_SHOWDEFAULT });
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {

@@ -50,7 +50,7 @@ Project Gutenberg and Standard Ebooks built in, SpaceBattles and Sufficient Velo
 <td width="33%" valign="top">
 
 ### 🎀 Archive of Our Own
-Search with AO3's own filters, follow authors, tags and collections, save works to read offline and leave kudos.
+Search with AO3's own filters, follow authors and tags, save works to read offline, read and post comments, and bring in your bookmarks.
 
 </td>
 </tr>
@@ -161,7 +161,16 @@ The same reader, highlights, dictionary, catalogues, Following and themes, built
 - **Paste a link** to any work to save it to your library, or open an AO3 page you saved.
 - **The work's details** come first, as on the Archive: rating, warnings, category, fandoms, relationships, characters, tags, summary and the author's notes.
 - **Follow** authors, tags and collections, and **leave kudos** from the reader. Sign in to read works that are only for logged-in users.
+- **Comments:** read a chapter's comments in Contents › Comments, and post your own when you're signed in.
+- **Your AO3 lists:** bring in your bookmarks (as favourites, in a collection of their own) and Marked for Later (on your For later shelf). They download when you open them.
+- **AO3's own EPUB:** save the EPUB AO3 makes of any work, from its ⋯ menu.
 - **Your AO3 downloads:** import EPUBs you downloaded from AO3, and their tags, warnings and summaries come with them. *(Works now.)*
+
+### 👤 Accounts
+- **One place to sign in:** Archive of Our Own, SpaceBattles and Sufficient Velocity, each with its own card under Accounts (Settings › Sources on Android).
+- **Bring in what you keep there:** AO3 bookmarks and Marked for Later, and the threads you watch on the forums, each as a collection in your library.
+- **Your passwords go only to that site** and are never saved: Flax Reader keeps the site's own sign-in cookie, which signing out removes. On Android it's left out of cloud backups.
+- **Not here:** Royal Road asks for a browser check, which Flax Reader doesn't do. Catalogues with a sign-in (Standard Ebooks for patrons, Calibre, Kavita, Komga) keep it with the catalogue.
 
 ### 🌐 Finding books
 - **Your own files:** open EPUB books, PDFs and AO3 web pages with **Import your own files** in Browse, or open them with Flax Reader from your file manager.

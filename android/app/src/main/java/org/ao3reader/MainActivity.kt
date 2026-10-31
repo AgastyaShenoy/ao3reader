@@ -28,6 +28,10 @@ class MainActivity : Activity() {
     private var tab = LIBRARY
     /** The Settings category open, or -1 for the list of them. */
     var settingsPage = -1
+    /** The id of the book open in the reader. */
+    private var openId: String? = null
+    /** The look the open book was last drawn in (see `rebuild`). */
+    private var readerLook = ""
     private var animateTab = false
     private var reader: BookView? = null
 
@@ -71,6 +75,17 @@ class MainActivity : Activity() {
         super.onSaveInstanceState(out)
         out.putInt("tab", if (tab == ACCOUNT || tab == IMPORT) SETTINGS else tab)
         out.putInt("settings_page", settingsPage)
+        // The book being read, to reopen when Android recreates the screen (a change of font
+        // size or display size, say).
+        reader?.saveProgress()
+        openId?.let { out.putString("open", it) }
+    }
+
+    override fun onDestroy() {
+        // Stop reading aloud and drawing PDF pages: nothing will show them any more.
+        reader?.saveProgress()
+        reader?.close()
+        super.onDestroy()
     }
 
     private fun isNight(c: Configuration) = (c.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
@@ -113,7 +128,10 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 33) {
             onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) { handleBack() }
         }
-        openIntent(intent)
+        val reopen = savedInstanceState?.getString("open")
+        if (reopen != null) openWork(reopen)
+        // "Open with" is handled once, not again when the screen is recreated.
+        else if (savedInstanceState == null) openIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -126,13 +144,19 @@ class MainActivity : Activity() {
         val uri = i?.takeIf { it.action == Intent.ACTION_VIEW }?.data ?: return
         i.data = null // handled once, even if the activity is shown again
         val tmp = java.io.File(cacheDir, "open.bin")
-        val copied = runCatching { contentResolver.openInputStream(uri)?.use { input -> tmp.outputStream().use { input.copyTo(it) } } != null }.getOrDefault(false)
-        if (!copied) return toast("Couldn't open that file")
+        val name = displayName(uri)
         toast("Opening the book…")
-        Core.background("import", json("path" to tmp.absolutePath, "name" to displayName(uri))) { r ->
-            tmp.delete()
-            r.onSuccess { openWork((it as org.json.JSONObject).getString("id")) }.onFailure { toast(it.message ?: "Couldn't open that book") }
-        }
+        // Copied off the main thread: a file from a cloud drive can be slow.
+        Thread {
+            val copied = runCatching { contentResolver.openInputStream(uri)?.use { input -> tmp.outputStream().use { input.copyTo(it) } } != null }.getOrDefault(false)
+            runOnUiThread {
+                if (!copied) return@runOnUiThread toast("Couldn't open that file")
+                Core.background("import", json("path" to tmp.absolutePath, "name" to name)) { r ->
+                    tmp.delete()
+                    r.onSuccess { openWork((it as org.json.JSONObject).getString("id")) }.onFailure { toast(it.message ?: "Couldn't open that book") }
+                }
+            }
+        }.start()
     }
 
     /** A document's name without its extension, if the app that shared it tells. */
@@ -220,7 +244,13 @@ class MainActivity : Activity() {
         animateTab = false
 
         reader?.let { r ->
-            r.rebuild()
+            // Only a change of look (theme, text settings) redraws the book: a background job
+            // finishing must not close its open panel or drop the selection.
+            val look = "${p.bg}|${Settings.config}|${Settings.typo}"
+            if (look != readerLook) {
+                readerLook = look
+                r.rebuild()
+            }
             root.addView(r.view, frame())
         }
         root.requestApplyInsets()
@@ -321,16 +351,28 @@ class MainActivity : Activity() {
     }
 
     fun openWork(id: String) {
+        // The open book's place is saved first: opening another replaces it in the core.
+        reader?.saveProgress()
         val opened = try {
             Core.obj("work.open", json("id" to id))
         } catch (e: CoreError) {
-            if (e.message == "missing" && id.all { it.isDigit() }) {
-                toast("Downloading this work again…")
-                startFetch(id, open = true)
-            } else toast(e.message ?: "Couldn't open the work")
+            val story = if (e.message == "missing") Core.req("story.url", json("id" to id)) as? String else null
+            when {
+                e.message == "missing" && id.all { it.isDigit() } -> {
+                    toast("Downloading this work again…")
+                    startFetch(id, open = true)
+                }
+                story != null -> {
+                    // A watched thread brought in from a forum: download it now.
+                    toast("Downloading this story…")
+                    Core.background("story.get", json("id" to id), slow = true) { r ->
+                        r.onSuccess { openWork(id) }.onFailure { toast(it.message ?: "Couldn't download the story") }
+                    }
+                }
+                else -> toast(e.message ?: "Couldn't open the work")
+            }
             return
         }
-        reader?.saveProgress()
         currentFocus?.let { v ->
             v.clearFocus()
             getSystemService(android.view.inputmethod.InputMethodManager::class.java)?.hideSoftInputFromWindow(v.windowToken, 0)
@@ -338,9 +380,17 @@ class MainActivity : Activity() {
         runCatching { Core.req("follows.read", json("work" to id)) }
         // PDFs show their pages as they are; everything else is laid out as text.
         val isPdf = opened.getJSONObject("meta").optInt("pdf_pages", 0) > 0
-        val r: BookView = if (isPdf) PdfScreen(this, id, opened) else ReaderScreen(this, id, opened)
+        val r: BookView = try {
+            if (isPdf) PdfScreen(this, id, opened) else ReaderScreen(this, id, opened)
+        } catch (e: Exception) {
+            // A damaged book (a PDF the engine can't read, a work with no chapters) stays shut.
+            toast("Couldn't open this book: ${e.message ?: "it may be damaged"}")
+            return
+        }
+        readerLook = "${Settings.pal.bg}|${Settings.config}|${Settings.typo}"
         reader?.let { it.close(); root.removeView(it.view) }
         reader = r
+        openId = id
         root.addView(r.view, frame())
         r.setInsets(insetTop, insetBottom, cutoutTop)
         Anim.enter(r.view, dy = dpf(28), ms = 220)
@@ -355,6 +405,7 @@ class MainActivity : Activity() {
         r.saveProgress()
         r.close()
         reader = null
+        openId = null
         immersive(false)
         // Rebuild the screens underneath, then let the reader fade away on top of them.
         rebuild()
@@ -403,6 +454,9 @@ class LibraryState {
     var sort = 0
     /** The collection shown, if one is picked: the shelves then filter within it. */
     var collection: String? = null
+    /** Where the list was scrolled to (first row and its offset), kept across rebuilds. */
+    var listPos = 0
+    var listTop = 0
 }
 
 class ImportState {

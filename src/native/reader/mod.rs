@@ -5,6 +5,7 @@
 mod layout;
 pub mod preface;
 
+use crate::ao3::comments::{Comment, CommentPage};
 use crate::ao3::models::{Bookmark, Highlight, ReadingProgress, Work};
 use crate::sources::dictionary::Meaning;
 use std::cell::RefCell;
@@ -72,6 +73,23 @@ pub enum ReaderAction {
     Copy(String),
     /// Look a word up.
     Define(String),
+    /// A page of AO3 comments on a chapter (by AO3's chapter id), or on the whole work.
+    LoadComments { chapter_id: Option<String>, page: u32 },
+    PostComment { chapter_id: Option<String>, text: String },
+}
+
+/// AO3 comments on the chapter being read, for Contents › Comments.
+#[derive(Default)]
+struct Comments {
+    /// Whose comments these are: the chapter's AO3 id ("" for the whole work); None before any.
+    key: Option<String>,
+    list: Vec<Comment>,
+    page: u32,
+    has_next: bool,
+    loading: bool,
+    error: Option<String>,
+    draft: String,
+    posting: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +211,9 @@ pub struct ReaderScreen {
     note: String,
     /// The word being looked up, and its meanings once they arrive.
     define: Option<(String, Option<Result<Vec<Meaning>, String>>)>,
+    comments: Comments,
+    /// Signed in to AO3, so comments can be posted.
+    pub can_comment: bool,
 }
 
 fn hash_of<T: Hash>(v: &T) -> u64 {
@@ -230,7 +251,7 @@ impl ReaderScreen {
         }
         let chapter_words: Vec<usize> = (0..work.chapters.len()).map(|i| layout::paragraph_words(&work, i).iter().sum()).collect();
         let n = work.chapters.len().max(1);
-        let chapter = progress.map_or(0, |p| p.current_chapter.saturating_sub(1)).min(n - 1);
+        let chapter = progress.map_or(0, |p| p.current_chapter.saturating_sub(1)).min(n.saturating_sub(1));
         let anchor = progress.map_or(0.0, |p| p.position);
         let para_words = layout::paragraph_words(&work, chapter);
         Self {
@@ -273,6 +294,8 @@ impl ReaderScreen {
             note_for: None,
             note: String::new(),
             define: None,
+            comments: Comments::default(),
+            can_comment: false,
         }
     }
 
@@ -1251,17 +1274,20 @@ impl ReaderScreen {
     fn contents_panel(&mut self, ui: &mut Ui, r: Rect, bookmarks: &[Bookmark], highlights: &[Highlight], out: &mut Vec<ReaderAction>) {
         let c = ui.c;
         Self::panel_frame(ui, r);
-        ui.segmented_counts(
-            id("contents-tab"),
-            Rect::new(r.x + 14.0, r.y + 14.0, r.w - 28.0, 34.0),
-            &[("Chapters", 0), ("Bookmarks", bookmarks.len()), ("Highlights", highlights.len())],
-            &mut self.contents_tab,
-            Badge::Count,
-        );
+        // AO3 works have their comments too.
+        let mut tabs = vec![("Chapters", 0), ("Bookmarks", bookmarks.len()), ("Highlights", highlights.len())];
+        if self.work.meta.is_ao3() {
+            tabs.push(("Comments", 0));
+        } else if self.contents_tab == 3 {
+            self.contents_tab = 0;
+        }
+        ui.segmented_counts(id("contents-tab"), Rect::new(r.x + 14.0, r.y + 14.0, r.w - 28.0, 34.0), &tabs, &mut self.contents_tab, Badge::Count);
         let list = Rect::new(r.x + 4.0, r.y + 60.0, r.w - 8.0, r.h - 64.0);
         let mut jump: Option<(usize, f32)> = None;
 
-        if self.contents_tab == 2 {
+        if self.contents_tab == 3 {
+            self.comments_list(ui, list, out);
+        } else if self.contents_tab == 2 {
             if let Some(j) = self.highlights_list(ui, list, highlights, out) {
                 jump = Some(j);
             }
@@ -1340,6 +1366,133 @@ impl ReaderScreen {
         }
     }
 
+    /// The chapter's AO3 comments, a page at a time, and a box to write one.
+    fn comments_list(&mut self, ui: &mut Ui, list: Rect, out: &mut Vec<ReaderAction>) {
+        let c = ui.c;
+        let key = self.work.chapters.get(self.chapter).and_then(|ch| ch.id.clone()).unwrap_or_default();
+        let chapter_id = (!key.is_empty()).then(|| key.clone());
+        if self.comments.key.as_deref() != Some(key.as_str()) {
+            let draft = std::mem::take(&mut self.comments.draft);
+            self.comments = Comments { key: Some(key.clone()), loading: true, draft, ..Default::default() };
+            out.push(ReaderAction::LoadComments { chapter_id: chapter_id.clone(), page: 1 });
+        }
+        let foot_h = 64.0;
+        let area = Rect::new(list.x, list.y, list.w, (list.h - foot_h).max(0.0));
+        let whose = if self.work.chapters.len() > 1 { format!("Comments on chapter {}", self.chapter + 1) } else { "Comments on this work".to_string() };
+        ui.text(&whose, &TextStyle::ui(12.5).semibold(), area.x + 14.0, area.y + 2.0, c.muted);
+        let body = Rect::new(area.x, area.y + 24.0, area.w, (area.h - 24.0).max(0.0));
+        let cm = &self.comments;
+        let mut more = false;
+        if cm.list.is_empty() {
+            let msg = if cm.loading {
+                "Loading comments from AO3…".to_string()
+            } else if let Some(e) = &cm.error {
+                e.clone()
+            } else {
+                "No comments yet.".to_string()
+            };
+            let t = ui.measure(&msg, &TextStyle::ui(13.0), TextOpts::wrap(body.w - 48.0).align(Align::Center));
+            let th = t.h;
+            ui.g.draw_text(t, body.x + 24.0, body.y + 24.0, c.muted);
+            if cm.loading {
+                ui.spinner(body.x + body.w / 2.0, body.y + 24.0 + th + 20.0, 7.0);
+            }
+        } else {
+            let (has_next, loading) = (cm.has_next, cm.loading);
+            ui.scroll_area(id2(id("comments-list"), &key), body, |ui, view, y0| {
+                let mut y = y0 + 4.0;
+                for (i, m) in cm.list.iter().enumerate() {
+                    let indent = m.depth.min(4) as f32 * 18.0;
+                    let x = view.x + 14.0 + indent;
+                    let w = (view.w - 36.0 - indent).max(80.0);
+                    let name = if m.author.is_empty() { "Someone" } else { m.author.as_str() };
+                    let head = ui.text(name, &TextStyle::ui(13.0).semibold(), x, y, c.text);
+                    let when = [m.chapter.as_str(), m.date.as_str()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("  ·  ");
+                    ui.text_opts(&when, &TextStyle::ui(11.5), TextOpts::ellipsize((w - head.w - 12.0).max(0.0)), x + head.w + 10.0, y + 1.5, c.muted);
+                    let top = y;
+                    y += head.h + 6.0;
+                    for para in &m.paragraphs {
+                        let t = ui.measure(para, &TextStyle::ui(13.0), TextOpts::wrap(w).line_height(1.4));
+                        let th = t.h;
+                        if y + th > view.y && y < view.bottom() {
+                            ui.g.draw_text(t, x, y, c.text);
+                        }
+                        y += th + 6.0;
+                    }
+                    // Replies hang off a line under what they answer.
+                    if indent > 0.0 {
+                        ui.g.fill_rect(Rect::new(x - 10.0, top, 2.0, (y - top - 6.0).max(0.0)), c.border);
+                    }
+                    y += 10.0;
+                    if i + 1 < cm.list.len() {
+                        ui.separator(view.x + 14.0, y - 6.0, view.w - 36.0);
+                        y += 6.0;
+                    }
+                }
+                if has_next {
+                    let bw = ui.button_width("Load more", None);
+                    if ui.button_ex(id("comments-more"), Rect::new(view.x + (view.w - bw) / 2.0, y + 4.0, bw, 32.0), "Load more", None, ButtonKind::Secondary, !loading) {
+                        more = true;
+                    }
+                    y += 44.0;
+                }
+                y - y0 + 8.0
+            });
+        }
+        if more {
+            self.comments.loading = true;
+            out.push(ReaderAction::LoadComments { chapter_id: chapter_id.clone(), page: self.comments.page + 1 });
+        }
+
+        // Writing one: AO3 only takes comments here from signed-in readers.
+        let fy = list.bottom() - foot_h + 14.0;
+        ui.separator(list.x + 10.0, fy - 8.0, list.w - 20.0);
+        if !self.can_comment {
+            let t = ui.measure("Sign in to AO3 under Accounts to leave a comment.", &TextStyle::ui(12.5), TextOpts::wrap(list.w - 28.0));
+            ui.g.draw_text(t, list.x + 14.0, fy + 8.0, c.muted);
+            return;
+        }
+        let pw = 80.0;
+        let input = Rect::new(list.x + 10.0, fy, list.w - 28.0 - pw, 34.0);
+        let resp = ui.text_input(id("comment-draft"), input, &mut self.comments.draft, "Write a comment…", false);
+        let can = !self.comments.posting && !self.comments.draft.trim().is_empty();
+        let label = if self.comments.posting { "Posting…" } else { "Post" };
+        if ui.button_ex(id("comment-post"), Rect::new(input.right() + 8.0, fy, pw, 34.0), label, None, ButtonKind::Primary, can) || (can && resp.submitted) {
+            self.comments.posting = true;
+            out.push(ReaderAction::PostComment { chapter_id, text: self.comments.draft.trim().to_string() });
+        }
+    }
+
+    /// A page of comments arrived for `key` (a chapter's AO3 id, or "" for the whole work).
+    pub fn comments_loaded(&mut self, key: &str, result: Result<CommentPage, String>) {
+        if self.comments.key.as_deref() != Some(key) {
+            return;
+        }
+        self.comments.loading = false;
+        match result {
+            Ok(p) => {
+                if p.page <= 1 {
+                    self.comments.list = p.comments;
+                } else {
+                    self.comments.list.extend(p.comments);
+                }
+                self.comments.page = p.page;
+                self.comments.has_next = p.has_next;
+                self.comments.error = None;
+            }
+            Err(e) => self.comments.error = Some(e),
+        }
+    }
+
+    /// A comment was posted (or wasn't): on success, the list loads again with it.
+    pub fn comment_posted(&mut self, result: &Result<(), String>) {
+        self.comments.posting = false;
+        if result.is_ok() {
+            self.comments.draft.clear();
+            self.comments.key = None;
+        }
+    }
+
     fn appearance_panel(&mut self, ui: &mut Ui, r: Rect, config: &mut AppConfig, out: &mut Vec<ReaderAction>) {
         let c = ui.c;
         Self::panel_frame(ui, r);
@@ -1368,6 +1521,15 @@ impl ReaderScreen {
             ui.g.fill_circle(cx, y + 17.0, 14.0, Color::rgb(p.bg));
             ui.g.fill_circle(cx + 5.0, y + 22.0, 4.0, Color::rgb(p.accent));
             if resp.clicked {
+                // While following Windows' light or dark mode, the pick is for the mode in use;
+                // otherwise the next change of mode would undo it.
+                if config.follow_system {
+                    if config.palette_of(config.theme).is_dark {
+                        config.dark_theme = *th;
+                    } else {
+                        config.light_theme = *th;
+                    }
+                }
                 config.theme = *th;
                 changed = true;
             }
@@ -1714,12 +1876,21 @@ impl ReaderScreen {
     fn place(&self, ui: &Ui, a: Mark, b: Mark) -> Option<Rect> {
         let spots = self.spots.borrow();
         let layout = self.layout.as_ref()?;
+        // A paragraph running from one page (or column) onto the next is drawn in two places:
+        // the line wanted is in the one that shows it.
         let line = |m: Mark, from: usize, to: usize, last: bool| -> Option<Rect> {
-            let spot = spots.iter().find(|s| s.block == m.block)?;
             let text = &layout.blocks[m.block].rich.text;
-            let rects = ui.g.range_rects(spot.text, text, from.min(text.len()), to.min(text.len()));
-            let r = if last { rects.last() } else { rects.first() }?;
-            Some(Rect::new(spot.x + r.x, spot.y + r.y, r.w.max(8.0), r.h))
+            let mut found = None;
+            for spot in spots.iter().filter(|s| s.block == m.block) {
+                let rects = ui.g.range_rects(spot.text, text, from.min(text.len()), to.min(text.len()));
+                let Some(r) = (if last { rects.last() } else { rects.first() }) else { continue };
+                let rr = Rect::new(spot.x + r.x, spot.y + r.y, r.w.max(8.0), r.h);
+                if spot.shown.contains((rr.x + 1.0, rr.y + rr.h / 2.0)) {
+                    return Some(rr);
+                }
+                found.get_or_insert(rr);
+            }
+            found
         };
         let a_len = layout.blocks[a.block].rich.text.len();
         let first = line(a, a.at, if b.block == a.block { b.at.max(a.at + 1) } else { a_len }, false)?;

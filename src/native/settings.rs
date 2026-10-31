@@ -78,6 +78,7 @@ const TABS: [(&str, &str, &str); 9] = [
 const TAB_THEMES: usize = 0;
 const TAB_TYPOGRAPHY: usize = 1;
 const TAB_IMPORT: usize = 4;
+const TAB_SOURCES: usize = 5;
 const TAB_UPDATES: usize = 6;
 const TAB_ABOUT: usize = 8;
 /// Wide enough for the categories down the side.
@@ -151,6 +152,10 @@ impl SettingsScreen {
 
     pub fn show_import(&mut self) {
         self.tab = TAB_IMPORT;
+    }
+
+    pub fn show_sources(&mut self) {
+        self.tab = TAB_SOURCES;
     }
 
     pub fn frame(&mut self, ui: &mut Ui, body: Rect, ctx: &mut SettingsCtx) -> Vec<SettingsAction> {
@@ -913,9 +918,9 @@ impl SettingsScreen {
             out.push(SettingsAction::Open(ctx.storage_dir.clone()));
         }
         let (title, sub) = if self.confirm_clear {
-            ("Remove all downloaded works?", "Saved chapter text is deleted. Library entries and reading progress stay.")
+            ("Clear downloaded works?", "AO3 works and forum stories download again when you open them. Your progress, highlights and notes stay.")
         } else {
-            ("Clear downloaded works", "Frees disk space. Library entries and reading progress are kept.")
+            ("Clear downloaded works", "Frees space taken by AO3 works and forum stories. Books from files and catalogues are kept.")
         };
         let r = Self::row(ui, col, title, sub, if self.confirm_clear { 196.0 } else { 110.0 }, 32.0);
         if self.confirm_clear {

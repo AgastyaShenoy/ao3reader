@@ -1,7 +1,7 @@
 //! Application state and the window shell (header, navigation, toasts).
 
 use super::gfx::*;
-use super::account::{AccountAction, AccountScreen};
+use super::account::{AccountAction, AccountScreen, AO3};
 use super::browse::{BrowseAction, FollowingScreen, SearchScreen, Target};
 use super::icons;
 use super::mark;
@@ -14,7 +14,7 @@ use super::settings::{SettingsAction, SettingsCtx, SettingsScreen};
 use super::ui::*;
 use super::worker::Worker;
 use crate::ao3::client::Ao3Client;
-use crate::ao3::models::{UserSession, Work, WorkMeta};
+use crate::ao3::models::{ShelfStatus, UserSession, Work, WorkMeta};
 use crate::ao3::search::{Feed, FeedKind, Listing};
 use crate::storage::follows::{FollowStore, Scope, STALE_MINUTES};
 use crate::storage::export::WorkExporter;
@@ -55,6 +55,18 @@ pub enum AppEvent {
     CatalogBook { key: String, result: Result<Work, String> },
     /// A word's meanings, for the reader.
     Defined { word: String, result: Result<Vec<crate::sources::dictionary::Meaning>, String> },
+    /// One of the reader's AO3 lists, to bring into the library.
+    Ao3List { list: crate::ao3::client::UserList, result: Result<Vec<WorkMeta>, String> },
+    ForumLogin { host: String, result: Result<crate::sources::accounts::ForumAccount, String> },
+    /// The threads the reader watches on a forum, and the account with its cookies as last set.
+    Watched { host: String, result: Result<(Vec<crate::sources::accounts::Thread>, crate::sources::accounts::ForumAccount), String> },
+    /// A page of AO3 comments for the reader (`key` is the chapter's AO3 id, or "").
+    Comments { key: String, result: Result<crate::ao3::comments::CommentPage, String> },
+    CommentPosted(Result<(), String>),
+    /// A job with nothing to report.
+    Done,
+    /// A job that went wrong unexpectedly (a panic), with what it said.
+    Failed(String),
 }
 
 /// Work the window host runs after the frame, outside any borrow of the app
@@ -194,8 +206,8 @@ impl App {
     /// Called once the window exists, so the worker can wake it.
     pub fn attach(&mut self, hwnd: HWND) {
         self.hwnd = hwnd.0 as usize;
-        self.worker = Some(Worker::new(hwnd));
-        self.slow_worker = Some(Worker::new(hwnd));
+        self.worker = Some(Worker::new(hwnd, AppEvent::Failed));
+        self.slow_worker = Some(Worker::new(hwnd, AppEvent::Failed));
         if self.config.check_updates_on_startup {
             self.check_updates();
         }
@@ -367,26 +379,80 @@ impl App {
                 let name = session.username.clone().unwrap_or_default();
                 self.config.session = session;
                 let _ = self.config.save();
-                self.account.set_message(format!("Signed in as {name}."), false);
+                self.account.set_message(AO3, format!("Signed in as {name}."), false);
                 self.set_toast("Signed in to AO3");
             }
-            AppEvent::Login(Err(e)) => self.account.set_message(e, true),
+            AppEvent::Login(Err(e)) => self.account.set_message(AO3, e, true),
+            AppEvent::Ao3List { list, result: Ok(metas) } => {
+                use crate::ao3::client::UserList;
+                let (what, collection, favorite) = match list {
+                    UserList::Bookmarks => ("bookmarks", "AO3 bookmarks", true),
+                    UserList::MarkedForLater => ("works Marked for Later", "AO3 Marked for Later", false),
+                };
+                let (added, total) = self.library.import_known(&metas, collection, ShelfStatus::MarkedForLater, favorite);
+                let msg = if total == 0 { format!("You have no {what} on AO3 yet.") } else { format!("Brought in {total} {what} ({added} new to your library), in the collection “{collection}”.") };
+                self.account.set_message(AO3, msg.clone(), false);
+                self.set_toast(msg);
+            }
+            AppEvent::Ao3List { result: Err(e), .. } => self.account.set_message(AO3, e, true),
+            AppEvent::ForumLogin { host, result: Ok(account) } => {
+                let name = account.username.clone();
+                self.config.forum_accounts.retain(|a| a.host != host);
+                self.config.forum_accounts.push(account);
+                let _ = self.config.save();
+                self.account.set_message(&host, format!("Signed in as {name}."), false);
+            }
+            AppEvent::ForumLogin { host, result: Err(e) } => self.account.set_message(&host, e, true),
+            AppEvent::Watched { host, result: Ok((threads, account)) } => {
+                if let Some(a) = self.config.forum_accounts.iter_mut().find(|a| a.host == host) {
+                    *a = account;
+                    let _ = self.config.save();
+                }
+                let site = crate::sources::forum::SITES.iter().find(|s| s.host == host).map_or("the forum", |s| s.name);
+                let collection = format!("Watched on {site}");
+                let metas: Vec<WorkMeta> = threads.into_iter().map(|t| t.meta).collect();
+                let (added, total) = self.library.import_known(&metas, &collection, ShelfStatus::MarkedForLater, false);
+                let msg = if total == 0 { format!("You don't watch any threads on {site} yet.") } else { format!("Brought in {total} watched threads ({added} new to your library), in the collection “{collection}”.") };
+                self.account.set_message(&host, msg.clone(), false);
+                self.set_toast(msg);
+            }
+            AppEvent::Watched { host, result: Err(e) } => self.account.set_message(&host, e, true),
+            AppEvent::Done => {}
+            AppEvent::Failed(why) => {
+                // Whatever was waiting on it would spin forever: stop the spinners.
+                self.account = AccountScreen::default();
+                self.set_toast(if why.is_empty() { "Something went wrong. Please try again.".to_string() } else { format!("Something went wrong: {why}") });
+            }
+            AppEvent::Comments { key, result } => {
+                if let Some(r) = &mut self.reader {
+                    r.comments_loaded(&key, result);
+                }
+            }
+            AppEvent::CommentPosted(result) => {
+                if let Some(r) = &mut self.reader {
+                    r.comment_posted(&result);
+                }
+                match result {
+                    Ok(()) => self.set_toast("Comment posted"),
+                    Err(e) => self.set_toast(e),
+                }
+            }
             AppEvent::SessionUser(result) => {
                 let cookie = self.pending_cookie.take();
                 match (result, cookie) {
                     (Ok(Some(name)), Some(cookie)) => {
                         self.config.session = UserSession { username: Some(name.clone()), session_cookie: None, remember_token: Some(cookie), is_logged_in: true };
                         let _ = self.config.save();
-                        self.account.set_message(format!("Signed in as {name}."), false);
+                        self.account.set_message(AO3, format!("Signed in as {name}."), false);
                         self.set_toast("Signed in to AO3");
                     }
                     (Ok(_), _) => {
                         self.client = Ao3Client::new(Some(&self.config.session));
-                        self.account.set_message("AO3 didn't recognise that cookie as signed in. Copy it again from a browser where you're signed in.", true);
+                        self.account.set_message(AO3, "AO3 didn't recognise that cookie as signed in. Copy it again from a browser where you're signed in.", true);
                     }
                     (Err(e), _) => {
                         self.client = Ao3Client::new(Some(&self.config.session));
-                        self.account.set_message(e, true);
+                        self.account.set_message(AO3, e, true);
                     }
                 }
             }
@@ -445,7 +511,8 @@ impl App {
     fn open_loaded(&mut self, work: Work) {
         self.close_reader();
         let id = work.meta.id.clone();
-        let progress = self.library.get_entry(&id).map(|e| e.progress.clone());
+        // A finished book opens at its start again ("Read again"), not on its last page.
+        let progress = self.library.get_entry(&id).map(|e| e.progress.clone()).filter(|p| !p.completed);
         let title = work.meta.title.clone();
         if work.meta.is_pdf() {
             match crate::pdf::open(&id) {
@@ -480,7 +547,17 @@ impl App {
                 self.set_toast("Downloading this work again…");
                 self.start_fetch(work_id.to_string(), true);
             }
-            None => self.set_toast("This work's text isn't on disk any more."),
+            None => match crate::sources::forum::url_of_id(work_id) {
+                Some(url) => {
+                    // A watched thread brought in from a forum: download it now.
+                    self.set_toast("Downloading this story…");
+                    let client = self.catalog_client.clone();
+                    let id = work_id.to_string();
+                    let site = crate::sources::Catalog { name: "the forum".into(), url: url.clone(), ..Default::default() };
+                    self.run_slow(move || AppEvent::Fetched { result: client.get_work(&url, crate::sources::opds::STORY_MIME, &site, None), id, open: true });
+                }
+                None => self.set_toast("This work's text isn't on disk any more."),
+            },
         }
     }
 
@@ -516,6 +593,7 @@ impl App {
         let entry = self.library.get_entry(reader.work_id());
         let bookmarks = entry.map(|e| e.bookmarks.clone()).unwrap_or_default();
         let highlights = entry.map(|e| e.highlights.clone()).unwrap_or_default();
+        reader.set_can_comment(signed_in(&self.config.session));
         let actions = reader.frame(ui, r, &mut self.config, &bookmarks, &highlights);
         let work_id = reader.work_id().to_string();
         for a in actions {
@@ -560,6 +638,16 @@ impl App {
                         let result = crate::sources::dictionary::define(&word);
                         AppEvent::Defined { word, result }
                     });
+                }
+                ReaderAction::LoadComments { chapter_id, page } => {
+                    let client = self.client.clone();
+                    let wid = work_id.clone();
+                    self.run_job(move || AppEvent::Comments { result: client.comments(&wid, chapter_id.as_deref(), page), key: chapter_id.unwrap_or_default() });
+                }
+                ReaderAction::PostComment { chapter_id, text } => {
+                    let client = self.client.clone();
+                    let wid = work_id.clone();
+                    self.run_job(move || AppEvent::CommentPosted(client.post_comment(&wid, chapter_id.as_deref(), &text)));
                 }
             }
         }
@@ -700,7 +788,11 @@ impl App {
         ui.g.draw_text(name, 60.0, r.y + (r.h - name.h) / 2.0, c.text);
         let nav_x = (60.0 + name.w + 24.0).round();
 
-        let account_label = if signed_in(&self.config.session) { self.config.session.username.clone().unwrap_or_else(|| "Account".into()) } else { "Guest".into() };
+        let account_label = if signed_in(&self.config.session) {
+            self.config.session.username.clone().unwrap_or_else(|| "Accounts".into())
+        } else {
+            self.config.forum_accounts.first().map_or_else(|| "Accounts".into(), |a| a.username.clone())
+        };
         let mut items = vec![
             (icons::LIBRARY, "Library"),
             (icons::SEARCH, "Browse"),
@@ -791,6 +883,13 @@ impl App {
                     let title = self.library.get_entry(&id).map(|e| e.meta.title.clone()).unwrap_or_default();
                     self.library.delete_work(&id);
                     self.set_toast(format!("Removed “{title}”"));
+                }
+                LibraryAction::SaveAo3Epub(id) => {
+                    let client = self.client.clone();
+                    let title = self.library.get_entry(&id).map(|e| e.meta.title.clone()).unwrap_or_else(|| format!("ao3_{id}"));
+                    let name = file_name(&title, "epub");
+                    self.set_toast("Getting AO3's EPUB…");
+                    self.run_job(move || AppEvent::Epub { name, result: client.download_epub(&id) });
                 }
                 LibraryAction::Export(id, format) => match self.library.load_work(&id) {
                     Some(work) => {
@@ -912,11 +1011,14 @@ impl App {
                     self.run_job(move || AppEvent::Searched { page, result: client.search(&q, page) });
                 }
                 BrowseAction::Read(id) => {
-                    if self.library.get_entry(&id).is_some() && self.library.load_work(&id).is_some() {
+                    if self.library.get_entry(&id).is_some() {
+                        // In the library (downloaded or not): opening fetches what's missing.
                         self.open_work(&id);
-                    } else {
+                    } else if id.chars().all(|c| c.is_ascii_digit()) {
                         self.set_toast("Downloading the work…");
                         self.start_fetch(id, true);
+                    } else {
+                        self.set_toast("That book isn't in your library any more. Get it again from its catalogue.");
                     }
                 }
                 BrowseAction::Save(id) => {
@@ -993,7 +1095,8 @@ impl App {
 
     fn account_frame(&mut self, ui: &mut Ui, body: Rect) {
         let session = self.config.session.clone();
-        for a in self.account.frame(ui, body, &session) {
+        let forums = self.config.forum_accounts.clone();
+        for a in self.account.frame(ui, body, &session, &forums) {
             match a {
                 AccountAction::Login { username, password } => {
                     let client = self.client.clone();
@@ -1009,8 +1112,40 @@ impl App {
                     self.config.session = UserSession::default();
                     let _ = self.config.save();
                     self.client = Ao3Client::new(None);
-                    self.account.set_message("Signed out. You're reading as a guest.", false);
-                    self.set_toast("Signed out");
+                    self.account.set_message(AO3, "Signed out of AO3.", false);
+                    self.set_toast("Signed out of AO3");
+                }
+                AccountAction::ImportAo3(list) => match session.username.clone() {
+                    Some(user) => {
+                        let client = self.client.clone();
+                        self.run_slow(move || AppEvent::Ao3List { list, result: client.whole_user_list(&user, list, 50) });
+                    }
+                    None => self.account.set_message(AO3, "Sign in again to bring in your lists: AO3 didn't say which account this is.", true),
+                },
+                AccountAction::ForumLogin { host, username, password } => match crate::sources::forum::SITES.iter().find(|s| s.host == host) {
+                    Some(site) => self.run_job(move || AppEvent::ForumLogin { result: crate::sources::accounts::login(site, &username, &password), host }),
+                    None => self.account.set_message(&host, "Not a forum Flax Reader knows.", true),
+                },
+                AccountAction::ForumLogout(host) => {
+                    if let Some(account) = self.config.forum_accounts.iter().find(|a| a.host == host).cloned() {
+                        // Sign out on the forum too, so the saved cookie stops working; nothing to wait for.
+                        self.run_slow(move || {
+                            crate::sources::accounts::logout(&account);
+                            AppEvent::Done
+                        });
+                    }
+                    self.config.forum_accounts.retain(|a| a.host != host);
+                    let _ = self.config.save();
+                    self.account.set_message(&host, "Signed out.", false);
+                }
+                AccountAction::ImportWatched(host) => {
+                    if let Some(account) = self.config.forum_accounts.iter().find(|a| a.host == host).cloned() {
+                        self.run_slow(move || AppEvent::Watched { result: crate::sources::accounts::watched_threads(&account), host });
+                    }
+                }
+                AccountAction::GoSources => {
+                    self.tab = Tab::Settings;
+                    self.settings.show_sources();
                 }
             }
         }
@@ -1051,10 +1186,8 @@ impl App {
                 SettingsAction::CatalogsChanged => self.catalogs.reset(),
                 SettingsAction::Account => self.tab = Tab::Account,
                 SettingsAction::ClearCache => {
-                    let works = storage_dir.join("works");
-                    let _ = std::fs::remove_dir_all(&works);
-                    let _ = std::fs::create_dir_all(&works);
-                    self.set_toast("Downloaded works removed");
+                    let n = self.library.clear_downloads();
+                    self.set_toast(format!("Cleared {n} downloaded works. They download again when you open them."));
                 }
             }
         }

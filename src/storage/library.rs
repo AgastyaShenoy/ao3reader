@@ -1,4 +1,4 @@
-use crate::ao3::models::{Highlight, Bookmark, LibraryEntry, ReadingProgress, ShelfStatus, Work};
+use crate::ao3::models::{Bookmark, Highlight, LibraryEntry, ReadingProgress, ShelfStatus, Work, WorkMeta};
 use crate::storage::config::AppConfig;
 use crate::storage::safe::{load_json, write_atomic};
 use chrono::Utc;
@@ -87,6 +87,14 @@ impl LibraryManager {
 
         // Update or insert library entry
         if let Some(entry) = self.data.entries.get_mut(&work_id) {
+            // A finished story with new chapters isn't finished any more.
+            let (was, now) = (entry.meta.stats.chapters_published, work.meta.stats.chapters_published);
+            if was > 0 && now > was && entry.progress.completed {
+                entry.progress.completed = false;
+                if entry.shelf == ShelfStatus::Completed {
+                    entry.shelf = ShelfStatus::Reading;
+                }
+            }
             entry.meta = work.meta.clone();
             entry.local_file_exists = true;
         } else {
@@ -130,7 +138,9 @@ impl LibraryManager {
                 return;
             }
             entry.progress = progress;
-            if entry.progress.percentage >= 99.0 || entry.progress.completed {
+            // Finishing moves a book off Reading; a shelf the reader chose (For later,
+            // Favourites) stays.
+            if (entry.progress.percentage >= 99.0 || entry.progress.completed) && entry.shelf == ShelfStatus::Reading {
                 entry.shelf = ShelfStatus::Completed;
             }
         }
@@ -220,6 +230,29 @@ impl LibraryManager {
         let _ = self.save();
     }
 
+    /// Frees disk space by deleting the text of works that can be downloaded again when opened
+    /// (AO3 works and forum stories). Books from files and catalogues are kept: there's nowhere
+    /// to get them back from. Their entries, progress, highlights and notes all stay. Returns how
+    /// many were cleared.
+    pub fn clear_downloads(&mut self) -> usize {
+        let ids: Vec<String> = self
+            .data
+            .entries
+            .iter()
+            .filter(|(id, e)| e.local_file_exists && (e.meta.is_ao3() || crate::sources::forum::url_of_id(id).is_some()))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ids {
+            let _ = fs::remove_file(self.work_file_path(id));
+            let _ = fs::remove_dir_all(self.resource_dir(id));
+            if let Some(e) = self.data.entries.get_mut(id) {
+                e.local_file_exists = false;
+            }
+        }
+        let _ = self.save();
+        ids.len()
+    }
+
     /// Get all library entries
     pub fn entries(&self) -> &HashMap<String, LibraryEntry> {
         &self.data.entries
@@ -228,6 +261,42 @@ impl LibraryManager {
     /// Get entry for a work
     pub fn get_entry(&self, work_id: &str) -> Option<&LibraryEntry> {
         self.data.entries.get(work_id)
+    }
+
+    /// Brings in works the reader keeps on a site (AO3 bookmarks, watched forum threads) without
+    /// downloading them: opening one downloads it. New ones go on `shelf`; all are marked as
+    /// favourites if `favorite`, and put in the collection named `collection` (made if need be).
+    /// Returns (new to the library, all on the list).
+    pub fn import_known(&mut self, metas: &[WorkMeta], collection: &str, shelf: ShelfStatus, favorite: bool) -> (usize, usize) {
+        let mut added = 0;
+        for m in metas.iter().filter(|m| !m.id.is_empty()) {
+            let entry = self.data.entries.entry(m.id.clone()).or_insert_with(|| {
+                added += 1;
+                LibraryEntry {
+                    meta: m.clone(),
+                    shelf,
+                    is_favorite: false,
+                    progress: ReadingProgress::default(),
+                    bookmarks: Vec::new(),
+                    highlights: Vec::new(),
+                    downloaded_at: Utc::now(),
+                    local_file_exists: false,
+                    personal_notes: String::new(),
+                }
+            });
+            entry.is_favorite |= favorite;
+        }
+        if let Some(cid) = self.create_collection(collection) {
+            if let Some(c) = self.data.collections.iter_mut().find(|c| c.id == cid) {
+                for m in metas.iter().filter(|m| !m.id.is_empty()) {
+                    if !c.works.contains(&m.id) {
+                        c.works.push(m.id.clone());
+                    }
+                }
+            }
+        }
+        let _ = self.save();
+        (added, metas.len())
     }
 
     pub fn collections(&self) -> &[Collection] {
@@ -335,7 +404,6 @@ impl LibraryManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ao3::models::WorkMeta;
 
     fn library(name: &str, works: &[&str]) -> LibraryManager {
         let dir = std::env::temp_dir().join(format!("ao3-library-{name}-{}", std::process::id()));
@@ -397,4 +465,23 @@ mod tests {
         assert!(old.collections.is_empty());
         let _ = fs::remove_dir_all(&lib.base_dir);
     }
+
+    #[test]
+    fn imported_lists_join_without_downloading() {
+        let mut lib = library("import", &["a"]);
+        let meta = |id: &str| WorkMeta { id: id.into(), title: format!("Work {id}"), ..WorkMeta::default() };
+        let (added, total) = lib.import_known(&[meta("a"), meta("b"), meta("")], "AO3 bookmarks", ShelfStatus::MarkedForLater, true);
+        assert_eq!((added, total), (1, 3));
+        let b = lib.get_entry("b").unwrap();
+        assert!(!b.local_file_exists && b.is_favorite && b.shelf == ShelfStatus::MarkedForLater);
+        assert_eq!(lib.get_entry("a").unwrap().shelf, ShelfStatus::Reading, "a book already there keeps its shelf");
+        assert!(lib.get_entry("a").unwrap().is_favorite);
+        let c = lib.collections().iter().find(|c| c.name == "AO3 bookmarks").unwrap();
+        assert_eq!(c.works, ["a", "b"]);
+        // Importing again adds nothing new.
+        assert_eq!(lib.import_known(&[meta("b")], "AO3 bookmarks", ShelfStatus::MarkedForLater, true), (0, 1));
+        assert_eq!(lib.collections().len(), 1);
+        let _ = fs::remove_dir_all(&lib.base_dir);
+    }
 }
+

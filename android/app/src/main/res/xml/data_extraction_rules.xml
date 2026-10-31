@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12 and newer: the library is backed up and moved to new phones, but not the settings
+     file, which holds sign-in cookies and catalogue passwords. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="config.json" />
+        <exclude domain="file" path="config.json.bak" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="config.json" />
+        <exclude domain="file" path="config.json.bak" />
+    </device-transfer>
+</data-extraction-rules>

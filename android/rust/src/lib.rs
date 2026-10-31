@@ -7,7 +7,7 @@
 //! they do not hold the state lock while waiting on AO3.
 
 use ao3reader::ao3::client::Ao3Client;
-use ao3reader::ao3::models::{Bookmark, Category, Highlight, LibraryEntry, ReadingProgress, ShelfStatus, UserSession, Work};
+use ao3reader::ao3::models::{Bookmark, Category, Highlight, LibraryEntry, ReadingProgress, ShelfStatus, UserSession, Work, WorkMeta};
 use ao3reader::reader::pace::PaceTracker;
 use ao3reader::reader::rich_text::{image_source, is_landmark, paragraph_display, parse_inline, table_cells, with_word_starts, word_count, ParagraphKind, RichText};
 use ao3reader::reader::theme::{ReaderThemeType, Rgb};
@@ -116,6 +116,16 @@ pub fn render_pdf(page: usize, scale: f32, area: (u32, u32, u32, u32), look: u8)
 
 type R = Result<Value, String>;
 
+/// The AO3 client, the open work's id, and the AO3 id of its chapter `chapter` (0-based; none for
+/// a one-shot or a work from a file), for its comments.
+fn open_chapter(a: &Value) -> Result<(Ao3Client, String, Option<String>), String> {
+    let i = arg_u64(a, "chapter")? as usize;
+    with_state(|s| {
+        let work = s.work.as_ref().ok_or("No work is open.")?;
+        Ok((s.client.clone(), work.meta.id.clone(), work.chapters.get(i).and_then(|c| c.id.clone())))
+    })
+}
+
 fn with_state<T>(f: impl FnOnce(&mut State) -> Result<T, String>) -> Result<T, String> {
     let mut guard = STATE.lock().map_err(|_| "state poisoned".to_string())?;
     let st = guard.as_mut().ok_or("not initialised")?;
@@ -217,6 +227,8 @@ fn entry_json(e: &LibraryEntry) -> Value {
         "completed": e.progress.completed,
         "last_read": e.progress.last_read.timestamp(),
         "added": e.downloaded_at.timestamp(),
+        // False for works brought in from a list on a site: opening one downloads it.
+        "downloaded": e.local_file_exists,
     })
 }
 
@@ -432,6 +444,10 @@ fn dispatch(method: &str, a: &Value) -> R {
             // only by reading (or `speed.reset`).
             cfg.session = s.config.session.clone();
             cfg.reading_speed = s.config.reading_speed;
+            // Catalogues and forum sign-ins change through their own calls; the screen's copy of
+            // the settings may be older than them.
+            cfg.catalogs = s.config.catalogs.clone();
+            cfg.forum_accounts = s.config.forum_accounts.clone();
             s.config = cfg;
             s.config.save()?;
             Ok(Value::Null)
@@ -511,8 +527,9 @@ fn dispatch(method: &str, a: &Value) -> R {
             let out = json!({
                 "meta": meta_json(&work.meta),
                 "chapters": chapters,
-                "chapter": entry.map_or(1, |e| e.progress.current_chapter),
-                "position": entry.map_or(0.0, |e| e.progress.position),
+                // A finished book opens at its start again ("Read again"), not on its last page.
+                "chapter": entry.filter(|e| !e.progress.completed).map_or(1, |e| e.progress.current_chapter),
+                "position": entry.filter(|e| !e.progress.completed).map_or(0.0, |e| e.progress.position),
                 "bookmarks": bookmarks_json(entry),
                 "highlights": highlights_json(entry),
             });
@@ -886,12 +903,36 @@ fn dispatch(method: &str, a: &Value) -> R {
         "storage" => Ok(json!({ "dir": AppConfig::get_app_dir().to_string_lossy() })),
         "memory" => Ok(json!({ "live": RUST_LIVE.load(Relaxed), "peak": RUST_PEAK.load(Relaxed) })),
         "clear_cache" => with_state(|s| {
-            let works = AppConfig::get_app_dir().join("works");
-            let _ = std::fs::remove_dir_all(&works);
-            let _ = std::fs::create_dir_all(&works);
+            // Only what can be downloaded again: books from files and catalogues stay.
+            let n = s.library.clear_downloads();
             s.work = None;
-            Ok(Value::Null)
+            Ok(json!(n))
         }),
+        // The story forums one can sign in to: {host, name, username (null when signed out)}.
+        "forums" => with_state(|s| {
+            Ok(Value::Array(
+                ao3reader::sources::forum::SITES
+                    .iter()
+                    .map(|site| json!({ "host": site.host, "name": site.name, "username": s.config.forum_accounts.iter().find(|a| a.host == site.host).map(|a| a.username.clone()) }))
+                    .collect(),
+            ))
+        }),
+        "forum.logout" => {
+            let host = arg_str(a, "host")?.to_string();
+            let account = with_state(|s| {
+                let account = s.config.forum_accounts.iter().find(|x| x.host == host).cloned();
+                s.config.forum_accounts.retain(|x| x.host != host);
+                s.config.save()?;
+                Ok(account)
+            })?;
+            // Signs out on the forum too, so the saved cookie stops working.
+            if let Some(account) = account {
+                ao3reader::sources::accounts::logout(&account);
+            }
+            Ok(Value::Null)
+        }
+        // A forum story's thread from its library id ("sb-1340351"), or null.
+        "story.url" => Ok(json!(ao3reader::sources::forum::url_of_id(arg_str(a, "id")?))),
         "logout" => with_state(|s| {
             s.config.session = UserSession::default();
             s.config.save()?;
@@ -991,6 +1032,73 @@ fn dispatch(method: &str, a: &Value) -> R {
             let client = with_state(|s| Ok(s.client.clone()))?;
             let bytes = client.download_epub(&id)?;
             std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        // Downloads a forum story brought in by id ("sb-1340351") and saves it to the library.
+        "story.get" => {
+            let id = arg_str(a, "id")?.to_string();
+            let url = ao3reader::sources::forum::url_of_id(&id).ok_or("That isn't a forum story.")?;
+            let client = with_state(|s| Ok(s.catalogs.clone()))?;
+            let site = Catalog { name: "the forum".into(), url: url.clone(), ..Default::default() };
+            let work = client.get_work(&url, ao3reader::sources::opds::STORY_MIME, &site, None)?;
+            with_state(|s| {
+                s.library.save_work(&work)?;
+                Ok(json!(work.meta.id))
+            })
+        }
+        "forum.login" => {
+            let host = arg_str(a, "host")?.to_string();
+            let site = ao3reader::sources::forum::SITES.iter().find(|x| x.host == host).ok_or("Not a forum Flax Reader knows.")?;
+            let account = ao3reader::sources::accounts::login(site, arg_str(a, "user")?, arg_str(a, "pass")?)?;
+            with_state(|s| {
+                let name = account.username.clone();
+                s.config.forum_accounts.retain(|x| x.host != host);
+                s.config.forum_accounts.push(account);
+                s.config.save()?;
+                Ok(json!(name))
+            })
+        }
+        // Brings in the threads the reader watches on a forum: {added, total, collection}.
+        "forum.watched" => {
+            let host = arg_str(a, "host")?.to_string();
+            let account = with_state(|s| s.config.forum_accounts.iter().find(|x| x.host == host).cloned().ok_or_else(|| "Sign in to the forum first.".to_string()))?;
+            let (threads, account) = ao3reader::sources::accounts::watched_threads(&account)?;
+            let site = ao3reader::sources::forum::SITES.iter().find(|x| x.host == host).map_or("the forum", |x| x.name);
+            let collection = format!("Watched on {site}");
+            with_state(|s| {
+                if let Some(x) = s.config.forum_accounts.iter_mut().find(|x| x.host == host) {
+                    *x = account;
+                    s.config.save()?;
+                }
+                let metas: Vec<WorkMeta> = threads.into_iter().map(|t| t.meta).collect();
+                let (added, total) = s.library.import_known(&metas, &collection, ShelfStatus::MarkedForLater, false);
+                Ok(json!({ "added": added, "total": total, "collection": collection }))
+            })
+        }
+        // Brings in one of the reader's AO3 lists ("bookmarks" or "later"): {added, total, collection}.
+        "ao3.list" => {
+            use ao3reader::ao3::client::UserList;
+            let (list, collection, favorite) = match arg_str(a, "list")? {
+                "later" => (UserList::MarkedForLater, "AO3 Marked for Later", false),
+                _ => (UserList::Bookmarks, "AO3 bookmarks", true),
+            };
+            let (client, user) = with_state(|s| Ok((s.client.clone(), s.config.session.username.clone())))?;
+            let user = user.ok_or("Sign in to AO3 again: it didn't say which account this is.")?;
+            let metas = client.whole_user_list(&user, list, 50)?;
+            with_state(|s| {
+                let (added, total) = s.library.import_known(&metas, collection, ShelfStatus::MarkedForLater, favorite);
+                Ok(json!({ "added": added, "total": total, "collection": collection }))
+            })
+        }
+        // A page of AO3 comments on a chapter of the open work: {comments, page, has_next}.
+        "ao3.comments" => {
+            let (client, work_id, chapter_id) = open_chapter(a)?;
+            let page = a.get("page").and_then(Value::as_u64).unwrap_or(1).max(1) as u32;
+            Ok(serde_json::to_value(client.comments(&work_id, chapter_id.as_deref(), page)?).unwrap_or(Value::Null))
+        }
+        "ao3.comment" => {
+            let (client, work_id, chapter_id) = open_chapter(a)?;
+            client.post_comment(&work_id, chapter_id.as_deref(), arg_str(a, "text")?)?;
             Ok(Value::Null)
         }
         "kudos" => {

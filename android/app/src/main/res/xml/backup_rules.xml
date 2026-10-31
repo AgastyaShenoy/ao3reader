@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and older: the library is backed up, but not the settings file, which holds
+     sign-in cookies and catalogue passwords. -->
+<full-backup-content>
+    <exclude domain="file" path="config.json" />
+    <exclude domain="file" path="config.json.bak" />
+</full-backup-content>

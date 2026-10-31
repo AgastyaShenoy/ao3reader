@@ -90,19 +90,31 @@ private fun import(a: MainActivity) {
         val uri = data?.data
         if (uri != null) {
             val tmp = File(a.cacheDir, "import.bin")
-            a.contentResolver.openInputStream(uri)?.use { input -> tmp.outputStream().use { input.copyTo(it) } }
+            val name = a.displayName(uri)
             st.busy = true
             st.error = null
             a.rebuild()
-            Core.background("import", json("path" to tmp.absolutePath, "name" to a.displayName(uri))) { r ->
-                st.busy = false
-                tmp.delete()
-                r.onSuccess {
-                    st.done = (it as org.json.JSONObject).getJSONObject("meta")
-                    a.toast("Imported “${st.done?.optString("title")}”")
-                }.onFailure { st.error = it.message }
-                if (a.currentTab == MainActivity.IMPORT) a.rebuild()
-            }
+            // Copied off the main thread: a file from a cloud drive can be slow, or not there.
+            Thread {
+                val copied = runCatching { a.contentResolver.openInputStream(uri)?.use { input -> tmp.outputStream().use { input.copyTo(it) } } != null }
+                a.runOnUiThread {
+                    if (copied.getOrDefault(false) != true) {
+                        st.busy = false
+                        st.error = "Couldn't read that file" + (copied.exceptionOrNull()?.message?.let { ": $it" } ?: ".")
+                        if (a.currentTab == MainActivity.IMPORT) a.rebuild()
+                        return@runOnUiThread
+                    }
+                    Core.background("import", json("path" to tmp.absolutePath, "name" to name)) { r ->
+                        st.busy = false
+                        tmp.delete()
+                        r.onSuccess {
+                            st.done = (it as org.json.JSONObject).getJSONObject("meta")
+                            a.toast("Imported “${st.done?.optString("title")}”")
+                        }.onFailure { st.error = it.message }
+                        if (a.currentTab == MainActivity.IMPORT) a.rebuild()
+                    }
+                }
+            }.start()
         }
     }
     @Suppress("DEPRECATION")
@@ -113,68 +125,138 @@ private fun import(a: MainActivity) {
     }, 3)
 }
 
-// ---- Account ---------------------------------------------------------------------------
+// ---- Accounts --------------------------------------------------------------------------
 
-fun accountScreen(a: MainActivity): View = scroll(a, "Account") { col ->
+/** A card's title and status, with Sign out when signed in. */
+private fun accountHead(a: MainActivity, card: LinearLayout, name: String, status: String, onSignOut: (() -> Unit)?) {
     val p = Settings.pal
+    val head = a.row()
+    val text = a.column()
+    text.addView(a.label(name, 16f, p.text, bold = true))
+    text.addView(a.label(status, 13f, p.muted), lp(top = a.dp(2)))
+    head.addView(text, LinearLayout.LayoutParams(0, -2, 1f))
+    if (onSignOut != null) head.addView(a.button("Sign out") { onSignOut() })
+    card.addView(head)
+}
+
+/** User name and password boxes and Sign in; `go` gets them, and a label to report on. */
+private fun signInForm(a: MainActivity, card: LinearLayout, who: String, go: (String, String, android.widget.TextView) -> Unit) {
+    val p = Settings.pal
+    val user = a.input(who)
+    val pass = a.input("Password", password = true)
+    card.addView(user, lp(top = a.dp(12)))
+    card.addView(pass, lp(top = a.dp(8)))
+    val msg = a.label("", 13f, p.dangerText)
+    fun submit() {
+        if (user.text.isBlank() || pass.text.isEmpty()) return
+        msg.setTextColor(p.muted)
+        msg.text = "Signing in…"
+        go(user.text.toString().trim(), pass.text.toString(), msg)
+    }
+    pass.imeOptions = EditorInfo.IME_ACTION_DONE
+    pass.setOnEditorActionListener { _, _, _ -> submit(); true }
+    card.addView(a.button("Sign in", Kind.Primary) { submit() }, lp(-2, top = a.dp(12)))
+    card.addView(msg, lp(top = a.dp(8)))
+}
+
+/** A button that brings in one of the reader's lists (a long job), reporting under it. */
+private fun importButton(a: MainActivity, card: LinearLayout, label: String, method: String, arg: org.json.JSONObject) {
+    val p = Settings.pal
+    val msg = a.label("", 13f, p.muted)
+    card.addView(a.button(label, Kind.Tonal, R.drawable.ic_import) {
+        msg.setTextColor(p.muted)
+        msg.text = "Bringing them in…"
+        Core.background(method, arg, slow = true) { r ->
+            r.onSuccess {
+                val o = it as org.json.JSONObject
+                val total = o.getInt("total")
+                msg.setTextColor(p.text)
+                msg.text = if (total == 0) "There's nothing on that list yet." else "Brought in $total (${o.getInt("added")} new to your library), in the collection “${o.getString("collection")}”."
+            }.onFailure { msg.setTextColor(p.dangerText); msg.text = it.message }
+        }
+    }, lp(-2, top = a.dp(12)))
+    card.addView(msg, lp(top = a.dp(6)))
+}
+
+fun accountScreen(a: MainActivity): View = scroll(a, "Accounts", "Sign in to the sites you read on, and bring in what you keep there.") { col ->
+    val p = Settings.pal
+
+    // Archive of Our Own.
     val s = Core.obj("session")
     val signedIn = s.getBoolean("signed_in")
-    val status = a.card()
-    status.addView(a.label(when {
-        signedIn -> "Signed in as ${s.optString("username").ifEmpty { "an AO3 user" }}"
-        s.getBoolean("stale") -> "Sign-in expired"
-        else -> "Reading as a guest"
-    }, 16f, p.text, bold = true))
-    status.addView(a.label(when {
-        signedIn -> "Works restricted to registered users will download."
-        s.getBoolean("stale") -> "This sign-in came from an older version that didn't keep the session. Please sign in again."
-        else -> "Public works download without an account."
-    }, 13f, p.muted), lp(top = a.dp(4)))
-    if (signedIn || s.getBoolean("stale")) status.addView(a.button("Sign out") {
-        Core.req("logout")
-        a.toast("Signed out")
-        a.rebuild()
-    }, lp(-2, top = a.dp(10)))
-    col.addView(status, lp(top = a.dp(4)))
-
-    if (!signedIn) {
-        val form = a.card()
-        form.addView(a.label("Sign in to AO3", 15f, p.text, bold = true))
-        val user = a.input("Username or email")
-        val pass = a.input("Password", password = true)
-        form.addView(user, lp(top = a.dp(12)))
-        form.addView(pass, lp(top = a.dp(8)))
-        val msg = a.label("", 13f, p.dangerText)
-        fun login() {
-            if (user.text.isBlank() || pass.text.isEmpty()) return
-            msg.setTextColor(p.muted)
-            msg.text = "Signing in…"
-            Core.background("login", json("user" to user.text.toString().trim(), "pass" to pass.text.toString())) { r ->
+    val ao3 = a.card()
+    val status = when {
+        signedIn -> "Signed in as ${s.optString("username").ifEmpty { "an AO3 user" }}. Restricted works download, and you can comment."
+        s.getBoolean("stale") -> "Your sign-in expired. Please sign in again."
+        else -> "Not signed in. Public works download without an account."
+    }
+    accountHead(a, ao3, "Archive of Our Own", status, if (signedIn || s.getBoolean("stale")) ({ Core.req("logout"); a.toast("Signed out of AO3"); a.rebuild() }) else null)
+    if (signedIn) {
+        importButton(a, ao3, "Import bookmarks", "ao3.list", json("list" to "bookmarks"))
+        importButton(a, ao3, "Import Marked for Later", "ao3.list", json("list" to "later"))
+        ao3.addView(a.label("Bookmarks become favourites, in the collection “AO3 bookmarks”. Marked for Later goes on your For later shelf. Works download when you open them.", 12.5f, p.muted), lp(top = a.dp(8)))
+    } else {
+        signInForm(a, ao3, "Username or email") { user, pass, msg ->
+            Core.background("login", json("user" to user, "pass" to pass)) { r ->
                 r.onSuccess { a.toast("Signed in to AO3"); a.rebuild() }.onFailure { msg.setTextColor(p.dangerText); msg.text = it.message }
             }
         }
-        pass.imeOptions = EditorInfo.IME_ACTION_DONE
-        pass.setOnEditorActionListener { _, _, _ -> login(); true }
-        form.addView(a.button("Sign in", Kind.Primary) { login() }, lp(-2, top = a.dp(12)))
-        form.addView(msg, lp(top = a.dp(8)))
-
-        form.addView(a.label("Or use a session cookie", 13.5f, p.text, bold = true), lp(top = a.dp(16)))
+        ao3.addView(a.label("Or use a session cookie", 13.5f, p.text, bold = true), lp(top = a.dp(12)))
         val cookie = a.input("Value of the _otw_remember_me cookie", password = true)
-        form.addView(cookie, lp(top = a.dp(8)))
-        form.addView(a.button("Apply cookie") {
+        val cmsg = a.label("", 13f, p.dangerText)
+        ao3.addView(cookie, lp(top = a.dp(8)))
+        ao3.addView(a.button("Apply cookie") {
             if (cookie.text.isBlank()) return@button
-            msg.setTextColor(p.muted)
-            msg.text = "Checking the cookie with AO3…"
+            cmsg.setTextColor(p.muted)
+            cmsg.text = "Checking the cookie with AO3…"
             Core.background("cookie", json("value" to cookie.text.toString())) { r ->
-                r.onSuccess { a.toast("Signed in to AO3"); a.rebuild() }.onFailure { msg.setTextColor(p.dangerText); msg.text = it.message }
+                r.onSuccess { a.toast("Signed in to AO3"); a.rebuild() }.onFailure { cmsg.setTextColor(p.dangerText); cmsg.text = it.message }
             }
         }, lp(-2, top = a.dp(8)))
-        col.addView(form, lp(top = a.dp(12)))
+        ao3.addView(cmsg, lp(top = a.dp(6)))
     }
+    col.addView(ao3, lp(top = a.dp(4)))
+
+    // The story forums.
+    for (f in Core.arr("forums").objects()) {
+        val host = f.getString("host")
+        val name = f.getString("name")
+        val who = if (f.isNull("username")) null else f.getString("username")
+        val card = a.card()
+        accountHead(a, card, name, if (who != null) "Signed in as $who." else "Not signed in. Stories read and download without an account.",
+            if (who != null) ({
+                Core.background("forum.logout", json("host" to host)) { a.rebuild() }
+                a.toast("Signed out of $name")
+            }) else null)
+        if (who != null) {
+            importButton(a, card, "Import watched threads", "forum.watched", json("host" to host))
+            card.addView(a.label("The threads you watch become stories in a collection named after the forum. Each downloads when you open it.", 12.5f, p.muted), lp(top = a.dp(8)))
+        } else {
+            signInForm(a, card, "User name or email") { user, pass, msg ->
+                Core.background("forum.login", json("host" to host, "user" to user, "pass" to pass)) { r ->
+                    r.onSuccess { a.toast("Signed in to $name"); a.rebuild() }.onFailure { msg.setTextColor(p.dangerText); msg.text = it.message }
+                }
+            }
+        }
+        col.addView(card, lp(top = a.dp(12)))
+    }
+
+    // Sites with no sign-in here, and why.
+    val others = a.card()
+    for ((name, why) in listOf(
+        "Royal Road" to "Can't sign in here: its pages ask for a browser check, which Flax Reader doesn't do. Follow its stories by link under Following.",
+        "Standard Ebooks and your catalogues" to "Patrons and catalogues with a sign-in (Calibre, Kavita, Komga) keep it with the catalogue, under Settings › Sources.",
+        "Project Gutenberg" to "No account needed.",
+    )) {
+        others.addView(a.label(name, 14.5f, p.text, bold = true), lp(top = a.dp(if (name == "Royal Road") 0 else 12)))
+        others.addView(a.label(why, 13f, p.muted), lp(top = a.dp(2)))
+    }
+    others.addView(a.button("Open Sources", Kind.Secondary, R.drawable.ic_globe) { a.settingsPage = 5; a.show(MainActivity.SETTINGS) }, lp(-2, top = a.dp(12)))
+    col.addView(others, lp(top = a.dp(12)))
 
     val privacy = a.card()
     privacy.addView(a.label("Privacy", 12.5f, p.muted, bold = true))
-    privacy.addView(a.label("Your password is sent only to archiveofourown.org and is never saved. After signing in, AO3's session cookie is kept in this app's private storage so you stay signed in; signing out removes it.", 13f, p.muted), lp(top = a.dp(4)))
+    privacy.addView(a.label("Passwords go only to the site you sign in to, and are never saved. What's kept is each site's own sign-in cookie, in this app's private storage; signing out removes it.", 13f, p.muted), lp(top = a.dp(4)))
     col.addView(privacy, lp(top = a.dp(12)))
 }
 
@@ -559,22 +641,23 @@ private fun libraryPage(a: MainActivity, col: LinearLayout) {
     section(a, col, "Storage")
     val dir = Core.obj("storage").getString("dir")
     col.addView(settingRow(a, "Library folder", dir, null), lp(bottom = a.dp(6)))
-    col.addView(settingRow(a, "Clear downloaded works", "Frees space. Library entries and reading progress are kept.", a.button("Clear…") {
-        a.dialog("Remove all downloaded works?", "Saved chapter text is deleted. Library entries and reading progress stay.", ok = "Remove", okKind = Kind.Danger) {
-            Core.req("clear_cache")
-            a.toast("Downloaded works removed")
+    col.addView(settingRow(a, "Clear downloaded works", "Frees space taken by AO3 works and forum stories. Books from files and catalogues are kept.", a.button("Clear…") {
+        a.dialog("Clear downloaded works?", "AO3 works and forum stories download again when you open them. Your progress, highlights and notes stay.", ok = "Clear", okKind = Kind.Danger) {
+            val n = (Core.req("clear_cache") as? Int) ?: 0
+            a.toast("Cleared $n downloaded works")
             true
         }
     }), lp(bottom = a.dp(6)))
 }
 
 private fun sourcesPage(a: MainActivity, col: LinearLayout) {
-    section(a, col, "Archive of Our Own")
+    section(a, col, "Accounts")
     val session = Core.obj("session")
-    val signedIn = session.getBoolean("signed_in")
-    val who = if (signedIn) "Signed in as ${session.optString("username").ifEmpty { "an AO3 user" }}. Works only members can see, and kudos, use your account."
-    else "Not signed in. Sign in to read works only members can see, and to leave kudos."
-    col.addView(settingRow(a, "AO3 account", who, a.button(if (signedIn) "Manage" else "Sign in") { a.show(MainActivity.ACCOUNT) }), lp(bottom = a.dp(6)))
+    val forums = Core.arr("forums").objects().filter { !it.isNull("username") }.map { it.getString("name") }
+    val signedInTo = listOfNotNull("AO3".takeIf { session.getBoolean("signed_in") }) + forums
+    val who = if (signedInTo.isEmpty()) "Sign in to AO3, SpaceBattles or Sufficient Velocity, and bring in your bookmarks and watched threads."
+    else "Signed in to ${signedInTo.joinToString(", ")}. Bring in your bookmarks and watched threads there."
+    col.addView(settingRow(a, "AO3 and forum accounts", who, a.button(if (signedInTo.isEmpty()) "Sign in" else "Manage") { a.show(MainActivity.ACCOUNT) }), lp(bottom = a.dp(6)))
 
     section(a, col, "Catalogues")
     val list = runCatching { Core.arr("catalogs").objects() }.getOrDefault(emptyList())

@@ -198,6 +198,8 @@ fun Context.countChip(text: String, n: Int, selected: Boolean, new: Boolean = fa
         setPadding(dp(14), padY, dp(if (n > 0) 10 else 14), padY)
         addView(label(text, 13.5f, p.text, bold = selected, lines = 1))
         if (n > 0) addView(countBadge(n, new, strong = selected), lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(6) })
+        isSelected = selected
+        contentDescription = if (n > 0) "$text, $n" else text
         setOnClickListener { onClick() }
     }
 }
@@ -263,11 +265,16 @@ fun Context.segmented(options: List<String>, selected: Int, counts: List<Int> = 
     // Every segment is as wide as the widest label in bold, so equal shares never squeeze the
     // selected (bold) one onto two lines.
     val bold = Paint().apply { textSize = android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, 13.5f, resources.displayMetrics); typeface = Settings.face(true) }
-    val minW = (options.maxOf { bold.measureText(it) } + dp(18) + if (counts.any { it > 0 }) dp(26) else 0).toInt()
+    // Four or more share a phone's width: smaller text and padding keep the labels whole.
+    val many = options.size >= 4
+    val size = if (many) 12.5f else 13.5f
+    if (many) bold.textSize = android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, size, resources.displayMetrics)
+    val minW = (options.maxOf { bold.measureText(it) } + dp(if (many) 8 else 18) + if (!many && counts.any { it > 0 }) dp(26) else 0).toInt()
     options.forEachIndexed { i, o ->
         val sel = i == selected
-        val n = counts.getOrElse(i) { 0 }
-        val text = label(o, 13.5f, if (sel) p.text else p.muted, bold = sel, lines = 1).apply { gravity = Gravity.CENTER }
+        // Four tabs leave no room for count badges on a phone.
+        val n = if (many) 0 else counts.getOrElse(i) { 0 }
+        val text = label(o, size, if (sel) p.text else p.muted, bold = sel, lines = 1).apply { gravity = Gravity.CENTER }
         val seg: View = if (n == 0) text else row().apply {
             gravity = Gravity.CENTER
             addView(text)
@@ -275,8 +282,11 @@ fun Context.segmented(options: List<String>, selected: Int, counts: List<Int> = 
         }
         seg.minimumWidth = minW
         val padY = dp(if (Settings.big) 12 else 7)
-        seg.setPadding(dp(8), padY, dp(8), padY)
+        seg.setPadding(dp(if (many) 3 else 8), padY, dp(if (many) 3 else 8), padY)
         if (sel) seg.background = rounded(p.selected, dpf(6))
+        // TalkBack says which one is chosen.
+        seg.isSelected = sel
+        seg.contentDescription = if (n > 0) "$o, $n" else o
         seg.setOnClickListener { if (!sel) onPick(i) }
         box.addView(seg, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     }

@@ -82,6 +82,14 @@ pub struct AppConfig {
     /// Catalogs the reader added (Project Gutenberg is always there).
     #[serde(default)]
     pub catalogs: Vec<crate::sources::Catalog>,
+    /// Sign-ins to the story forums (SpaceBattles, Sufficient Velocity): the forum's own
+    /// "remember me" cookies, never a password.
+    #[serde(default)]
+    pub forum_accounts: Vec<crate::sources::accounts::ForumAccount>,
+    /// Windows: where the window was last (left, top, right, bottom in screen pixels) and whether
+    /// it was maximised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<([i32; 4], bool)>,
 }
 
 impl Default for AppConfig {
@@ -109,6 +117,8 @@ impl Default for AppConfig {
             larger_targets: false,
             speech_rate: 1.0,
             catalogs: Vec::new(),
+            forum_accounts: Vec::new(),
+            window: None,
         }
     }
 }

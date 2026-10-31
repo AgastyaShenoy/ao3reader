@@ -103,7 +103,7 @@ fun libraryScreen(a: MainActivity): View {
         chips.removeAllViews()
         val names = listOf("All", "Reading", "Completed", "For later", "Favorites")
         names.forEachIndexed { f, n ->
-            val chip = a.countChip(n, all.count { inFilter(it, f) }, f == st.filter) { st.filter = f; refresh() }
+            val chip = a.countChip(n, all.count { inFilter(it, f) }, f == st.filter) { st.filter = f; st.listPos = 0; st.listTop = 0; refresh(); list.setSelection(0) }
             chips.addView(chip, lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = a.dp(8) })
         }
         val sort = a.label("⇅ ${SORTS[st.sort]}", 13.5f, p.text).apply {
@@ -119,6 +119,16 @@ fun libraryScreen(a: MainActivity): View {
         chips.addView(sort)
     }
 
+    // Stay where the list was: tapping a heart or a shelf on the 30th book rebuilds the screen.
+    list.setOnScrollListener(object : android.widget.AbsListView.OnScrollListener {
+        override fun onScrollStateChanged(v: android.widget.AbsListView?, state: Int) {}
+        override fun onScroll(v: android.widget.AbsListView?, first: Int, visible: Int, total: Int) {
+            if (total == 0) return
+            st.listPos = first
+            st.listTop = v?.getChildAt(0)?.top ?: 0
+        }
+    })
+
     search.addTextChangedListener(object : TextWatcher {
         override fun beforeTextChanged(s: CharSequence?, a1: Int, b: Int, c: Int) {}
         override fun onTextChanged(s: CharSequence?, a1: Int, b: Int, c: Int) {}
@@ -128,6 +138,7 @@ fun libraryScreen(a: MainActivity): View {
         }
     })
     refresh()
+    list.setSelectionFromTop(st.listPos, st.listTop)
     return box
 }
 
@@ -139,11 +150,11 @@ private fun collectionsRow(a: MainActivity, collections: List<JSONObject>, shown
     val row = a.row().apply { setPadding(a.dp(16), a.dp(2), a.dp(16), a.dp(6)) }
     val gap = { LinearLayout.LayoutParams(-2, -2).apply { rightMargin = a.dp(8) } }
     row.addView(a.label("Collections", 13.5f, p.muted, bold = true), LinearLayout.LayoutParams(-2, -2).apply { rightMargin = a.dp(10) })
-    if (collections.isNotEmpty()) row.addView(a.countChip("All books", total, shown == null) { st.collection = null; a.rebuild() }, gap())
+    if (collections.isNotEmpty()) row.addView(a.countChip("All books", total, shown == null) { st.collection = null; st.listPos = 0; st.listTop = 0; a.rebuild() }, gap())
     for (c in collections) {
         val id = c.getString("id")
         val on = id == st.collection
-        row.addView(a.countChip(c.getString("name"), c.getJSONArray("works").length(), on) { st.collection = if (on) null else id; a.rebuild() }, gap())
+        row.addView(a.countChip(c.getString("name"), c.getJSONArray("works").length(), on) { st.collection = if (on) null else id; st.listPos = 0; st.listTop = 0; a.rebuild() }, gap())
     }
     row.addView(a.countChip("+ New collection", 0, false) {
         nameCollection(a, "New collection", "", "Create") { name ->
@@ -243,7 +254,12 @@ private fun workCard(a: MainActivity, e: JSONObject, collections: List<JSONObjec
         progressBackgroundTintList = android.content.res.ColorStateList.valueOf(p.border)
     }, LinearLayout.LayoutParams(0, a.dp(4), 1f).apply { leftMargin = a.dp(12) })
     card.addView(prog, lp(top = a.dp(12)))
-    val stats = if (pdfPages > 0) "PDF" else "${thousands(m.getLong("words"))} words" + if (m.getLong("kudos") > 0) "  ·  ${thousands(m.getLong("kudos"))} kudos" else ""
+    val stats = when {
+        pdfPages > 0 -> "PDF"
+        // Brought in from a list on a site (AO3 bookmarks, watched threads): opening downloads it.
+        !e.optBoolean("downloaded", true) -> "Not downloaded yet: opening it downloads it"
+        else -> "${thousands(m.getLong("words"))} words" + if (m.getLong("kudos") > 0) "  ·  ${thousands(m.getLong("kudos"))} kudos" else ""
+    }
     card.addView(a.label(stats, 12f, p.muted), lp(top = a.dp(4)))
 
     val actions = a.row()
@@ -273,6 +289,8 @@ private fun workCard(a: MainActivity, e: JSONObject, collections: List<JSONObjec
         }
         menu.menu.add(0, 98, 50, "New collection…")
         if (pdfPages == 0) EXPORTS.forEachIndexed { i, (_, name, _) -> menu.menu.add(0, i, 60 + i, "Export as $name") }
+        // AO3 makes its own EPUB of each work (with its tags and notes), to keep or read elsewhere.
+        if (m.optBoolean("ao3", false)) menu.menu.add(0, 97, 70, "Save AO3's EPUB…")
         menu.menu.add(0, 99, 99, "Delete from library")
         menu.setOnMenuItemClickListener {
             when {
@@ -289,6 +307,10 @@ private fun workCard(a: MainActivity, e: JSONObject, collections: List<JSONObjec
                     a.rebuild()
                 }
                 it.itemId == 99 -> confirmDelete(a, id, m.getString("title"))
+                it.itemId == 97 -> {
+                    a.toast("Getting AO3's EPUB…")
+                    downloadEpub(a, id, m.getString("title")) { err -> if (err != null) a.toast(err) }
+                }
                 else -> export(a, id, it.itemId)
             }
             true

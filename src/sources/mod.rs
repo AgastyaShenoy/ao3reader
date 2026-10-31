@@ -6,6 +6,7 @@
 //! Only sites that answer a plain request are sources. Sites with bot checks (Cloudflare's "Just
 //! a moment", say) aren't worked around: their books come in as files (Import).
 
+pub mod accounts;
 pub mod dictionary;
 pub mod forum;
 pub mod opds;
@@ -77,6 +78,13 @@ pub fn user_agent() -> String {
     format!("FlaxReader/{} (+https://github.com/{})", crate::updater::CURRENT_VERSION, crate::updater::GITHUB_REPO)
 }
 
+/// Whether a refused page is a bot check (Cloudflare's "Just a moment" page) rather than the
+/// site's own answer. Ordinary pages carry Cloudflare's background script too
+/// ("challenge-platform"), so that alone doesn't count.
+pub(crate) fn is_bot_check(body: &str) -> bool {
+    body.contains("Just a moment") || body.contains("_cf_chl_opt") || body.contains("cf-chl-")
+}
+
 fn host(url: &str) -> &str {
     let rest = url.split("://").nth(1).unwrap_or(url);
     rest.split(['/', '?', '#']).next().unwrap_or(rest)
@@ -119,7 +127,7 @@ impl CatalogClient {
             403 | 503 => {
                 // A bot check isn't something to get around: say so plainly.
                 let body = resp.body_mut().with_config().limit(256 * 1024).read_to_string().unwrap_or_default();
-                if body.contains("Just a moment") || body.contains("challenge-platform") || body.contains("cf-chl") {
+                if is_bot_check(&body) {
                     return Err(format!("{} is asking for a browser check, which Flax Reader doesn't do. Open it in your browser instead.", catalog.name));
                 }
                 return Err(format!("{} wants a user name and password (or refused them).", catalog.name));

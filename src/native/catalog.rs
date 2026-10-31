@@ -63,6 +63,8 @@ pub struct CatalogScreen {
     query: String,
     pub getting: HashMap<String, Getting>,
     adding: Option<AddForm>,
+    /// The page a "More" is loading for: its result only goes there.
+    more_for: Option<String>,
 }
 
 fn all(user: &[Catalog]) -> Vec<Catalog> {
@@ -72,6 +74,12 @@ fn all(user: &[Catalog]) -> Vec<Catalog> {
 impl CatalogScreen {
     /// A page arrived (or failed).
     pub fn loaded(&mut self, url: &str, append: bool, result: Result<Feed, String>) {
+        // A page left before it arrived (Back, another shelf, another source) has no say here.
+        let top = self.stack.last().map(|p| p.url.clone());
+        let current = if append { self.more_for.take().is_some_and(|f| Some(f) == top) } else { url.starts_with("search:") || top.as_deref() == Some(url) };
+        if !current {
+            return;
+        }
         self.busy = false;
         match result {
             Ok(feed) => {
@@ -329,8 +337,8 @@ impl CatalogScreen {
         if more {
             if let (Some(next), Some(top)) = (feed.next.clone(), self.stack.last()) {
                 self.busy = true;
+                self.more_for = Some(top.url.clone());
                 out.push(CatalogAction::Load { catalog: catalog.clone(), url: next, append: true });
-                let _ = top;
             }
         }
         (out, None)

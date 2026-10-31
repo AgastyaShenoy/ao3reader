@@ -84,6 +84,14 @@ pub fn story_id(url: &str) -> Option<String> {
     Some(format!("{}-{id}", site.tag))
 }
 
+/// A story's thread from its library id ("sb-1340351"): the forum sends the short address on
+/// to the thread.
+pub fn url_of_id(id: &str) -> Option<String> {
+    let (tag, n) = id.split_once('-')?;
+    let site = SITES.iter().find(|s| s.tag == tag)?;
+    (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).then(|| format!("https://{}/threads/{n}/", site.host))
+}
+
 /// The page of a forum the catalog screen shows: the site's boards, or a board's newest
 /// threads (each a story to get).
 pub fn feed(client: &CatalogClient, url: &str) -> Result<Feed, String> {
@@ -438,6 +446,9 @@ mod tests {
         assert_eq!(thread_url(t).unwrap(), "https://forums.spacebattles.com/threads/dragon-of-the-sun.1340351/");
         assert_eq!(story_id(t).unwrap(), "sb-1340351");
         assert_eq!(story_id("https://forums.sufficientvelocity.com/threads/136085/reader/").unwrap(), "sv-136085");
+        assert_eq!(url_of_id("sv-136085").as_deref(), Some("https://forums.sufficientvelocity.com/threads/136085/"));
+        assert_eq!(story_id(&url_of_id("sb-1340351").unwrap()).as_deref(), Some("sb-1340351"));
+        assert!(url_of_id("xx-1").is_none() && url_of_id("sb-").is_none() && url_of_id("12345").is_none());
         assert!(thread_url("https://forums.spacebattles.com/forums/quests.240/").is_none());
         assert!(thread_url("https://example.com/threads/x.1/").is_none());
     }

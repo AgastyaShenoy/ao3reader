@@ -484,7 +484,8 @@ pub fn listing_problem(html: &str) -> Option<String> {
 /// Parses any AO3 page that lists works as blurbs.
 pub fn parse_listing(html: &str, page: u32) -> Listing {
     let doc = Html::parse_document(html);
-    let works: Vec<Blurb> = doc.select(&sel("li.work.blurb")).filter_map(parse_blurb).collect();
+    // Bookmark lists show the same blurbs on `li.bookmark` (their id is the bookmark's).
+    let works: Vec<Blurb> = doc.select(&sel("li.work.blurb, li.bookmark.blurb")).filter_map(parse_blurb).collect();
     let count = Regex::new(r"(?i)of\s+([\d,]+)\s+works?\b|([\d,]+)\s+works?\s+found").expect("regex");
     let total = doc.select(&sel("h2.heading, h3.heading")).find_map(|h| {
         let t = text(h);
@@ -623,5 +624,22 @@ mod tests {
         assert_eq!(plus.name, "C++ Programming");
         assert_eq!(plus.url(1), "https://archiveofourown.org/tags/C%2B%2B%20Programming/works");
         assert!(listing_problem("<p>This tag has not been marked common and can't be filtered on (yet).</p>").is_some());
+    }
+
+    #[test]
+    fn bookmark_lists_read_like_work_lists() {
+        let page = r##"<html><body><ol class="bookmark index group">
+<li id="bookmark_9001" class="bookmark blurb group" role="article">
+  <div class="header module"><h4 class="heading"><a href="/works/555">Kept</a> by <a rel="author" href="/users/x/pseuds/x">x</a></h4></div>
+</li>
+<li id="bookmark_9002" class="bookmark blurb group" role="article">
+  <div class="header module"><h4 class="heading"><a href="/series/7">A series</a></h4></div>
+</li></ol>
+<ol class="pagination actions"><li class="next"><a href="?page=2">Next</a></li></ol></body></html>"##;
+        let l = parse_listing(page, 1);
+        assert_eq!(l.works.len(), 1, "series bookmarks are skipped");
+        assert_eq!(l.works[0].meta.id, "555");
+        assert_eq!(l.works[0].meta.title, "Kept");
+        assert!(l.has_next);
     }
 }

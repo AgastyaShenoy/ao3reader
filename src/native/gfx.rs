@@ -516,8 +516,15 @@ impl Gfx {
 
     pub fn range_rects(&self, t: Text, text: &str, start: usize, end: usize) -> Vec<Rect> {
         let Some(c) = self.layouts.get(&t.key) else { return Vec::new() };
-        let start = start.min(text.len());
-        let end = end.clamp(start, text.len());
+        // Offsets can land inside a character (a curly quote, an accented letter): snap them out.
+        let mut start = start.min(text.len());
+        while !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = end.clamp(start, text.len());
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
         let pos = utf16_len(&text[..start]);
         let len = utf16_len(&text[start..end]);
         unsafe {

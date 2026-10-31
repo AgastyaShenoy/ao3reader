@@ -230,7 +230,19 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         aloudBlock = block
         aloudWord = null
         tts?.setSpeechRate(Settings.config.optDouble("speech_rate", 1.0).toFloat().coerceIn(0.5f, 2f))
-        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "b$block")
+        // Voices take a few thousand characters at a time: a long paragraph goes in pieces, broken
+        // after a sentence or a space. Each piece's id carries where it starts ("b12@3990").
+        val most = (TextToSpeech.getMaxSpeechInputLength() - 100).coerceAtLeast(500)
+        var from = 0
+        while (from < text.length) {
+            var to = minOf(text.length, from + most)
+            if (to < text.length) {
+                val cut = text.lastIndexOf(". ", to).takeIf { it > from + most / 2 } ?: text.lastIndexOf(' ', to).takeIf { it > from }
+                if (cut != null) to = cut + 1
+            }
+            tts?.speak(text.substring(from, to), if (from == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, if (to >= text.length) "b$block" else "b$block@$from")
+            from = to
+        }
         page.followAloud()
         page.invalidate()
     }
@@ -285,8 +297,10 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         }
         override fun onRangeStart(id: String?, start: Int, end: Int, frame: Int) {
             handler.post {
-                if (reading && id == "b$aloudBlock") {
-                    aloudWord = start until end
+                // A later piece of a long paragraph says where in it the piece starts.
+                val (block, offset) = id.orEmpty().removePrefix("b").split('@').let { it[0] to (it.getOrNull(1)?.toIntOrNull() ?: 0) }
+                if (reading && block == "$aloudBlock") {
+                    aloudWord = (start + offset) until (end + offset)
                     page.followAloud()
                     page.invalidate()
                 }
@@ -539,10 +553,91 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         var tab = 0
         val list = ListView(a).apply { divider = null; selector = rounded(0, 0f) }
         val tabsHolder = FrameLayout(a)
-        fun fill() {
+        // AO3 works have their comments too: the current chapter's, a page at a time.
+        val ao3 = meta.optBoolean("ao3", false)
+        val footer = a.column()
+        val comments = mutableListOf<JSONObject>()
+        var cPage = 0
+        var cNext = false
+        var cLoading = false
+        var cTried = false
+        var cError: String? = null
+        lateinit var fill: () -> Unit
+        fun loadComments(page: Int) {
+            cLoading = true
+            cTried = true
+            Core.background("ao3.comments", json("chapter" to chapter, "page" to page)) { r ->
+                cLoading = false
+                r.onSuccess {
+                    val o = it as JSONObject
+                    if (page <= 1) comments.clear()
+                    comments.addAll(o.getJSONArray("comments").objects())
+                    cPage = o.getInt("page")
+                    cNext = o.getBoolean("has_next")
+                    cError = null
+                }.onFailure { cError = it.message }
+                if (tab == 3) fill()
+            }
+        }
+        fun commentsFooter() {
+            footer.removeAllViews()
+            if (!Core.obj("session").getBoolean("signed_in")) {
+                footer.addView(a.label("Sign in to AO3 (Settings › Sources › Accounts) to leave a comment.", 12.5f, p.muted), lp(top = a.dp(8)))
+                return
+            }
+            val draft = a.input("Write a comment…").apply {
+                inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                maxLines = 4
+            }
+            footer.addView(draft, lp(top = a.dp(8)))
+            lateinit var post: android.widget.TextView
+            post = a.button("Post", Kind.Primary) {
+                val text = draft.text.toString().trim()
+                if (text.isEmpty()) return@button
+                post.isEnabled = false
+                post.text = "Posting…"
+                Core.background("ao3.comment", json("chapter" to chapter, "text" to text)) { r ->
+                    post.isEnabled = true
+                    post.text = "Post"
+                    r.onSuccess { draft.setText(""); a.toast("Comment posted"); loadComments(1) }.onFailure { a.toast(it.message ?: "Couldn't post the comment") }
+                }
+            }
+            footer.addView(post, lp(-2, top = a.dp(8)))
+        }
+        fill = fun() {
             tabsHolder.removeAllViews()
-            tabsHolder.addView(a.segmented(listOf("Chapters", "Bookmarks", "Highlights"), tab, counts = listOf(0, bookmarks.length(), highlights.size)) { tab = it; fill() })
-            if (tab == 0) {
+            val names = listOf("Chapters", "Bookmarks", "Highlights") + if (ao3) listOf("Comments") else emptyList()
+            tabsHolder.addView(a.segmented(names, tab, counts = listOf(0, bookmarks.length(), highlights.size, 0).take(names.size)) { tab = it; fill() })
+            footer.gone(tab != 3)
+            if (tab == 3) {
+                // Asked once when the tab opens; a failure shows, it isn't retried on its own.
+                if (!cTried) loadComments(1)
+                val rows = comments.toList()
+                val message = when {
+                    rows.isNotEmpty() -> null
+                    cLoading -> "Loading comments from AO3…"
+                    cError != null -> cError
+                    else -> "No comments yet."
+                }
+                list.adapter = object : BaseAdapter() {
+                    override fun getCount() = if (message != null) 1 else rows.size + if (cNext) 1 else 0
+                    override fun getItem(i: Int) = i
+                    override fun getItemId(i: Int) = i.toLong()
+                    override fun getView(i: Int, c: View?, parent: ViewGroup?): View {
+                        if (message != null) return a.label(message, 14f, p.muted).apply { setPadding(a.dp(12), a.dp(20), a.dp(12), a.dp(20)); gravity = Gravity.CENTER }
+                        if (i == rows.size) return a.button(if (cLoading) "Loading…" else "Load more") { if (!cLoading) { loadComments(cPage + 1); fill() } }
+                        val m = rows[i]
+                        val t = a.column().apply { setPadding(a.dp(12) + a.dp(16) * m.optInt("depth").coerceAtMost(4), a.dp(10), a.dp(12), a.dp(10)) }
+                        val head = a.row()
+                        head.addView(a.label(m.optString("author").ifBlank { "Someone" }, 13.5f, p.text, bold = true, lines = 1))
+                        val whenText = listOf(m.optString("chapter"), m.optString("date")).filter { it.isNotBlank() }.joinToString("  ·  ")
+                        head.addView(a.label(whenText, 12f, p.muted, lines = 1).apply { setPadding(a.dp(8), 0, 0, 0) })
+                        t.addView(head)
+                        t.addView(a.label(m.getJSONArray("paragraphs").strings().joinToString("\n\n"), 14f, p.text).apply { setLineSpacing(0f, 1.15f) }, lp(top = a.dp(4)))
+                        return t
+                    }
+                }
+            } else if (tab == 0) {
                 list.adapter = object : BaseAdapter() {
                     override fun getCount() = chapters.size
                     override fun getItem(i: Int) = chapters[i]
@@ -611,6 +706,10 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         }
         box.addView(tabsHolder, lp(bottom = a.dp(8)))
         box.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
+        if (ao3) {
+            commentsFooter()
+            box.addView(footer, lp())
+        }
         fill()
         showPanel(box, Gravity.START, (width * 0.86f).toInt().coerceAtMost(a.dp(420)))
     }

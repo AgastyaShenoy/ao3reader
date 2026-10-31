@@ -20,6 +20,25 @@ impl Book {
         }
     }
 
+    pub fn comments_loaded(&mut self, key: &str, result: Result<crate::ao3::comments::CommentPage, String>) {
+        if let Book::Text(r) = self {
+            r.comments_loaded(key, result);
+        }
+    }
+
+    pub fn comment_posted(&mut self, result: &Result<(), String>) {
+        if let Book::Text(r) = self {
+            r.comment_posted(result);
+        }
+    }
+
+    /// Signed in to AO3, so the reader can post comments.
+    pub fn set_can_comment(&mut self, can: bool) {
+        if let Book::Text(r) = self {
+            r.can_comment = can;
+        }
+    }
+
     pub fn work_id(&self) -> &str {
         match self {
             Book::Text(r) => r.work_id(),
