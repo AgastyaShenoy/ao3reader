@@ -76,6 +76,43 @@ pub fn card_pills(m: &WorkMeta, rels: usize) -> Vec<Pill> {
 const WARNING_RED: Color = Color { r: 0.80, g: 0.22, b: 0.22, a: 1.0 };
 
 /// Lays out pills left to right, wrapping at `w`. Returns the height used.
+/// The width a pill takes, its label at most `w` wide.
+fn pill_width(ui: &mut Ui, pill: &Pill, w: f32) -> f32 {
+    let (label, lead) = match pill {
+        Pill::Marker(l, _) => (l, 22.0),
+        Pill::Ship(l) => (l, 27.0),
+        Pill::Tag(l) | Pill::Status(l) => (l, 10.0),
+    };
+    let love = matches!(pill, Pill::Ship(l) if romantic(l));
+    let style = if love { TextStyle::ui(12.5).semibold() } else { TextStyle::ui(12.5) };
+    ui.measure(label, &style, TextOpts::ellipsize(w - lead - 11.0)).w + lead + 11.0
+}
+
+/// Pills on one row `w` wide: as many whole pills as fit, then "+3" for the rest, so none is
+/// cut off at the edge.
+pub fn pill_row(ui: &mut Ui, x: f32, y: f32, w: f32, items: &[Pill]) {
+    let widths: Vec<f32> = items.iter().map(|p| pill_width(ui, p, w)).collect();
+    let more_w = |ui: &mut Ui, rest: usize| pill_width(ui, &Pill::Status(format!("+{rest}")), w) + 6.0;
+    let mut n = items.len();
+    loop {
+        let used: f32 = widths[..n].iter().map(|pw| pw + 6.0).sum::<f32>() - if n > 0 { 6.0 } else { 0.0 };
+        let more = if n < items.len() { more_w(ui, items.len() - n) } else { 0.0 };
+        if n == 0 || used + more <= w {
+            break;
+        }
+        n -= 1;
+    }
+    // Even the first pill is too wide: show it shortened.
+    let shown = if n == 0 && !items.is_empty() { 1 } else { n };
+    let more = if shown < items.len() { more_w(ui, items.len() - shown) } else { 0.0 };
+    pills(ui, x, y, w - more, &items[..shown]);
+    if shown < items.len() {
+        let used: f32 = widths[..shown].iter().map(|pw| pw + 6.0).sum::<f32>();
+        let used = used.min(w - more + 6.0);
+        pills(ui, x + used, y, more, &[Pill::Status(format!("+{}", items.len() - shown))]);
+    }
+}
+
 pub fn pills(ui: &mut Ui, x: f32, y: f32, w: f32, items: &[Pill]) -> f32 {
     let c = ui.c;
     let style = TextStyle::ui(12.5);

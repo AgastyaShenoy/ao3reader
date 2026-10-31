@@ -90,8 +90,8 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
             page.safeTop = cutout
             page.relayout()
         }
-        top.setPadding(a.dp(4), t + a.dp(4), a.dp(4), a.dp(4))
-        bottom.setPadding(a.dp(4), a.dp(2), a.dp(4), b + a.dp(4))
+        top.setPadding(a.dp(6), t + a.dp(6), a.dp(6), a.dp(6))
+        bottom.setPadding(a.dp(6), a.dp(4), a.dp(6), b + a.dp(8))
     }
 
     /** Recreates the chrome (after a theme change) while keeping the reading position. */
@@ -104,28 +104,29 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         page.relayout()
 
         top = a.row().apply { setBackgroundColor(p.surface) }
-        top.addView(a.iconButton(R.drawable.ic_back, p.text, "Back to library") { a.closeReader() })
-        top.addView(a.iconButton(R.drawable.ic_list, p.text, "Contents and bookmarks") { openContents() })
-        top.addView(a.label(meta.getString("title"), 15f, p.text, bold = true, lines = 1).apply { gravity = Gravity.CENTER_VERTICAL },
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = a.dp(4) })
-        top.addView(a.iconButton(R.drawable.ic_search, p.text, "Search in this work") { openSearch() })
-        top.addView(a.iconButton(R.drawable.ic_bookmark, p.text, "Bookmark this page") { addBookmark() })
-        if (meta.optBoolean("ao3", true)) top.addView(a.iconButton(R.drawable.ic_heart, p.text, "Leave kudos on AO3") { kudos() })
-        aloudButton = a.iconButton(if (reading) R.drawable.ic_stop else R.drawable.ic_volume, p.text, if (reading) "Stop reading aloud" else "Read aloud", reading) { toggleAloud() }
+        // Big bars: they're reached for with a thumb while holding the phone or tablet.
+        top.addView(a.iconButton(R.drawable.ic_back, p.text, "Back to library", large = true) { a.closeReader() })
+        top.addView(a.iconButton(R.drawable.ic_list, p.text, "Contents and bookmarks", large = true) { openContents() })
+        top.addView(a.label(meta.getString("title"), 18f, p.text, bold = true, lines = 1).apply { gravity = Gravity.CENTER_VERTICAL },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = a.dp(6) })
+        top.addView(a.iconButton(R.drawable.ic_search, p.text, "Search in this work", large = true) { openSearch() })
+        top.addView(a.iconButton(R.drawable.ic_bookmark, p.text, "Bookmark this page", large = true) { addBookmark() })
+        if (meta.optBoolean("ao3", true)) top.addView(a.iconButton(R.drawable.ic_heart, p.text, "Leave kudos on AO3", large = true) { kudos() })
+        aloudButton = a.iconButton(if (reading) R.drawable.ic_stop else R.drawable.ic_volume, p.text, if (reading) "Stop reading aloud" else "Read aloud", reading, large = true) { toggleAloud() }
         top.addView(aloudButton)
-        top.addView(a.iconButton(R.drawable.ic_text, p.text, "Text and theme") { openAppearance() })
+        top.addView(a.iconButton(R.drawable.ic_text, p.text, "Text and theme", large = true) { openAppearance() })
         addView(top, frame(h = ViewGroup.LayoutParams.WRAP_CONTENT, gravity = Gravity.TOP))
 
         bottom = a.column().apply { setBackgroundColor(p.surface) }
         progressLine = View(a).apply { setBackgroundColor(p.accentMark) }
         val track = FrameLayout(a).apply { setBackgroundColor(p.border) }
-        track.addView(progressLine, frame(0, a.dp(3)))
-        bottom.addView(track, lp(h = a.dp(3)))
-        val row = a.row()
-        row.addView(a.iconButton(R.drawable.ic_prev, p.text, "Previous chapter") { if (chapter > 0) jumpChapter(chapter - 1, 0f) })
-        status = a.label("", 12.5f, p.muted, lines = 2).apply { gravity = Gravity.CENTER }
+        track.addView(progressLine, frame(0, a.dp(4)))
+        bottom.addView(track, lp(h = a.dp(4)))
+        val row = a.row().apply { setPadding(0, a.dp(4), 0, 0) }
+        row.addView(a.iconButton(R.drawable.ic_prev, p.text, "Previous chapter", large = true) { if (chapter > 0) jumpChapter(chapter - 1, 0f) })
+        status = a.label("", 15f, p.muted, lines = 2).apply { gravity = Gravity.CENTER; setLineSpacing(0f, 1.1f) }
         row.addView(status, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        row.addView(a.iconButton(R.drawable.ic_next, p.text, "Next chapter") { if (chapter + 1 < chapters.size) jumpChapter(chapter + 1, 0f) })
+        row.addView(a.iconButton(R.drawable.ic_next, p.text, "Next chapter", large = true) { if (chapter + 1 < chapters.size) jumpChapter(chapter + 1, 0f) })
         bottom.addView(row)
         addView(bottom, frame(h = ViewGroup.LayoutParams.WRAP_CONTENT, gravity = Gravity.BOTTOM))
         bottom.gone(!Settings.typo.optBoolean("show_reading_progress_bar", true))
@@ -187,7 +188,7 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         page.contentDescription = page.visibleText()
         progressLine.post {
             val w = (progressLine.parent as? View)?.width ?: 0
-            progressLine.layoutParams = FrameLayout.LayoutParams((w * pct / 100).toInt(), a.dp(3))
+            progressLine.layoutParams = FrameLayout.LayoutParams((w * pct / 100).toInt(), a.dp(4))
         }
         dirty = true
         handler.removeCallbacks(saveLater)
@@ -270,7 +271,7 @@ class ReaderScreen(private val a: MainActivity, val workId: String, opened: JSON
         val tip = if (reading) "Stop reading aloud" else "Read aloud"
         b.tooltipText = tip
         b.contentDescription = tip
-        (b.background as? android.graphics.drawable.RippleDrawable)?.setDrawable(0, if (reading) rounded(p.selected, a.dpf(22)) else null)
+        (b.background as? android.graphics.drawable.RippleDrawable)?.setDrawable(0, if (reading) rounded(p.selected, b.width / 2f) else null)
     }
 
     private val progress = object : UtteranceProgressListener() {

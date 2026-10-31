@@ -15,7 +15,7 @@ use super::ui::*;
 use super::worker::Worker;
 use crate::ao3::client::Ao3Client;
 use crate::ao3::models::{UserSession, Work, WorkMeta};
-use crate::ao3::search::{Feed, Listing};
+use crate::ao3::search::{Feed, FeedKind, Listing};
 use crate::storage::follows::{FollowStore, Scope, STALE_MINUTES};
 use crate::storage::export::WorkExporter;
 use crate::reader::typography::{FontFamilyChoice, TypographySettings};
@@ -44,8 +44,10 @@ pub enum AppEvent {
     Login(Result<UserSession, String>),
     SessionUser(Result<Option<String>, String>),
     Searched { page: u32, result: Result<Listing, String> },
-    /// First pages of followed feeds, by feed id.
-    FollowsChecked(Vec<(String, Result<Listing, String>)>),
+    /// First pages of followed feeds, by feed id, with any followed story brought up to date.
+    FollowsChecked(Vec<(String, Result<(Listing, Option<Work>), String>)>),
+    /// A story followed from a link: its feed, first listing and (for forum stories) the story.
+    StoryFollowed(Result<(Feed, Listing, Option<Work>), String>),
     FeedPage(Result<Listing, String>),
     /// A page of a catalog (`url` is the page's address, or "search:…").
     CatalogPage { url: String, append: bool, result: Result<crate::sources::opds::Feed, String> },
@@ -301,13 +303,33 @@ impl App {
                     Err(e) => self.search.error = Some(e),
                 }
             }
+            AppEvent::StoryFollowed(result) => {
+                let done = result.and_then(|(feed, listing, work)| {
+                    if let Some(w) = &work {
+                        self.library.save_work(w)?;
+                    }
+                    let (name, kind) = (feed.name.clone(), feed.kind);
+                    let fid = self.follows.add(feed)?;
+                    let _ = self.follows.record(&fid, listing);
+                    self.following.show_kind(kind);
+                    self.set_toast(if work.is_some() { format!("Following “{name}”: it's in your library") } else { format!("Following “{name}”") });
+                    Ok(())
+                });
+                self.following.story_followed(done);
+            }
             AppEvent::FollowsChecked(results) => {
                 self.following.checking = false;
                 let mut fresh = 0;
                 let mut errors = Vec::new();
                 for (fid, res) in results {
                     match res {
-                        Ok(l) => fresh += self.follows.record(&fid, l).unwrap_or(0),
+                        Ok((l, work)) => {
+                            // A followed story's new chapters, into the library's copy.
+                            if let Some(w) = work {
+                                let _ = self.library.save_work(&w);
+                            }
+                            fresh += self.follows.record(&fid, l).unwrap_or(0)
+                        }
                         Err(e) => {
                             let name = self.follows.get(&fid).map(|f| f.feed.name.clone()).unwrap_or_default();
                             errors.push(format!("{name}: {e}"));
@@ -373,6 +395,14 @@ impl App {
 
     fn run_job(&self, job: impl FnOnce() -> AppEvent + Send + 'static) {
         if let Some(w) = &self.worker {
+            w.run(job);
+        }
+    }
+
+    /// A long job (a whole story from a forum, page by page), kept off the worker that loads
+    /// pages.
+    fn run_slow(&self, job: impl FnOnce() -> AppEvent + Send + 'static) {
+        if let Some(w) = &self.slow_worker {
             w.run(job);
         }
     }
@@ -627,7 +657,7 @@ impl App {
                 Tab::Settings => self.settings_frame(ui, body),
                 Tab::Library => self.library_frame(ui, body),
                 Tab::Browse => {
-                    let (actions, ao3) = self.catalogs.frame(ui, body, &self.config.catalogs, self.search.summary());
+                    let (actions, ao3) = self.catalogs.frame(ui, body, &self.config.catalogs, self.search.summary(), &self.follows);
                     self.catalog_actions(actions);
                     if let Some(area) = ao3 {
                         let actions = self.search.frame(ui, area, &self.library, &self.follows, signed_in(&self.config.session));
@@ -635,7 +665,7 @@ impl App {
                     }
                 }
                 Tab::Following => {
-                    let actions = self.following.frame(ui, body, &self.follows, &self.library);
+                    let actions = self.following.frame(ui, body, &self.follows, &self.library, &self.catalogs.getting);
                     self.browse_actions(actions);
                 }
                 Tab::Account => self.account_frame(ui, body),
@@ -766,18 +796,26 @@ impl App {
             self.following.checking = false;
             return;
         }
-        let feeds: Vec<(String, Feed)> = ids.into_iter().filter_map(|id| self.follows.get(&id).map(|f| (id, f.feed.clone()))).collect();
+        // A followed story kept in the library goes along, to have its new chapters added.
+        let feeds: Vec<(String, Feed, Option<Work>)> = ids
+            .into_iter()
+            .filter_map(|id| self.follows.get(&id).map(|f| (id, f.feed.clone())))
+            .map(|(id, feed)| {
+                let saved = crate::sources::story_work_id(&feed).and_then(|w| self.library.load_work(&w));
+                (id, feed, saved)
+            })
+            .collect();
         let Some(w) = &self.slow_worker else { return };
         self.following.checking = true;
-        let client = self.client.clone();
+        let (client, catalog_client, catalogs) = (self.client.clone(), self.catalog_client.clone(), self.config.catalogs.clone());
         w.run(move || {
-            // One feed at a time with a pause between, to go easy on AO3.
+            // One feed at a time with a pause between, to go easy on the sites.
             let mut out = Vec::new();
-            for (i, (id, feed)) in feeds.into_iter().enumerate() {
+            for (i, (id, feed, saved)) in feeds.into_iter().enumerate() {
                 if i > 0 {
                     std::thread::sleep(Duration::from_millis(1200));
                 }
-                let res = client.feed(&feed, 1);
+                let res = crate::sources::check_feed(&feed, saved, &client, &catalog_client, &catalogs);
                 let stop = res.as_ref().is_err_and(|e| e.contains("429"));
                 out.push((id, res));
                 if stop {
@@ -812,10 +850,23 @@ impl App {
                 }
                 CatalogAction::Get { catalog, url, key, title } => {
                     let client = self.catalog_client.clone();
-                    self.run_job(move || {
-                        let result = client.download(&url, &catalog).and_then(|bytes| crate::ao3::epub::import_named(&bytes, Some(&title)));
-                        AppEvent::CatalogBook { key, result }
-                    });
+                    // A forum story is read page by page: the slow worker, so Browse stays quick.
+                    let story = crate::sources::forum::thread_url(&url).is_some();
+                    let job = move || AppEvent::CatalogBook { key, result: client.get_work(&url, "", &catalog, Some(&title)) };
+                    if story {
+                        self.run_slow(job);
+                    } else {
+                        self.run_job(job);
+                    }
+                }
+                CatalogAction::FollowShelf { catalog, url, title } => {
+                    let feed = Feed { kind: FeedKind::Shelf, name: format!("{title} · {}", catalog.name), link: url, source: catalog.url };
+                    self.browse_actions(vec![BrowseAction::Follow(feed)]);
+                }
+                CatalogAction::FollowStory(url) => {
+                    self.following.story_busy = true;
+                    self.set_toast("Following the story: saving it to your library first…");
+                    self.browse_actions(vec![BrowseAction::FollowStory(url)]);
                 }
                 CatalogAction::Read(id) => self.open_work(&id),
                 CatalogAction::Save(list) => {
@@ -886,6 +937,30 @@ impl App {
                     self.run_job(move || AppEvent::Epub { name, result: client.download_epub(&work_id) });
                 }
                 BrowseAction::GoAccount => self.tab = Tab::Account,
+                BrowseAction::FollowStory(url) => {
+                    let client = self.catalog_client.clone();
+                    self.run_slow(move || AppEvent::StoryFollowed(crate::sources::follow_story(&url, &client)));
+                }
+                BrowseAction::GetBook { key, href, mime, catalog, title } => {
+                    let client = self.catalog_client.clone();
+                    let catalog = crate::sources::builtin()
+                        .into_iter()
+                        .chain(self.config.catalogs.iter().cloned())
+                        .find(|c| c.url == catalog)
+                        .unwrap_or(crate::sources::Catalog { name: title.clone(), url: catalog, ..Default::default() });
+                    self.catalogs.getting.insert(key.clone(), Getting::Busy);
+                    self.run_job(move || AppEvent::CatalogBook { key, result: client.get_work(&href, &mime, &catalog, Some(&title)) });
+                }
+                BrowseAction::GetStory { key, url, title } => {
+                    let client = self.catalog_client.clone();
+                    self.catalogs.getting.insert(key.clone(), Getting::Busy);
+                    let catalog = crate::sources::Catalog { name: title, url: url.clone(), ..Default::default() };
+                    self.run_slow(move || AppEvent::CatalogBook { key, result: client.get_work(&url, crate::sources::opds::STORY_MIME, &catalog, None) });
+                }
+                BrowseAction::OpenItem { url, id } => {
+                    let _ = self.follows.mark_work_read(&id);
+                    self.deferred.push(Deferred::Open(url));
+                }
             }
         }
     }

@@ -14,9 +14,9 @@ pub struct Link {
 }
 
 impl Link {
-    /// A downloadable copy of a book.
+    /// A downloadable copy of a book (Standard Ebooks' plain Atom feeds mark them as enclosures).
     fn is_acquisition(&self) -> bool {
-        self.rel.starts_with("http://opds-spec.org/acquisition")
+        self.rel.starts_with("http://opds-spec.org/acquisition") || self.rel == "enclosure"
     }
 
     /// Another feed: a shelf, a list, the next level down.
@@ -25,9 +25,13 @@ impl Link {
     }
 }
 
+/// What a story on a forum is marked as where a book would have its format: getting it reads the
+/// story's chapters from the forum (see `forum`).
+pub const STORY_MIME: &str = "application/x-forum-story";
+
 /// Book formats the reader opens, most preferred first, and whether they're the richer version
 /// ("EPUB3 with images" over a plain EPUB).
-const FORMATS: [&str; 2] = ["application/epub+zip", "application/pdf"];
+const FORMATS: [&str; 3] = ["application/epub+zip", "application/pdf", STORY_MIME];
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Entry {
@@ -37,6 +41,8 @@ pub struct Entry {
     /// The description, as plain text.
     pub summary: String,
     pub language: String,
+    /// When it was added or last changed, as "09 Mar 2024" (empty if the feed doesn't say).
+    pub updated: String,
     pub links: Vec<Link>,
 }
 
@@ -202,6 +208,7 @@ pub fn parse_feed(text: &str, base: &str) -> Result<Feed, String> {
             authors: e.all("author").filter_map(|a| a.child_text("name")).collect(),
             summary: description(e),
             language: e.child_text("language").unwrap_or_default(),
+            updated: e.child_text("updated").or_else(|| e.child_text("published")).map(|d| super::day(&d)).unwrap_or_default(),
             links: links(e, base),
         })
         .collect();

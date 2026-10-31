@@ -1,12 +1,14 @@
 //! Browse screen: one place to find books. AO3 (its own search, drawn by `browse::SearchScreen`)
-//! sits beside OPDS catalogs (Project Gutenberg, and any the reader adds), whose books download
-//! into the library.
+//! sits beside OPDS catalogs (Project Gutenberg, Standard Ebooks, and any the reader adds) and
+//! story forums (SpaceBattles, Sufficient Velocity), whose books and stories download into the
+//! library. Any shelf, and any forum story, can be followed.
 
 use super::gfx::*;
 use super::icons;
 use super::ui::*;
-use crate::sources::opds::{Entry, Feed};
+use crate::sources::opds::{Entry, Feed, STORY_MIME};
 use crate::sources::{self, Catalog};
+use crate::storage::follows::FollowStore;
 use std::collections::HashMap;
 
 /// The same column as AO3's search below it.
@@ -21,6 +23,10 @@ pub enum CatalogAction {
     Read(String),
     /// The reader's own catalogs changed.
     Save(Vec<Catalog>),
+    /// Follow the page on screen (a shelf).
+    FollowShelf { catalog: Catalog, url: String, title: String },
+    /// Follow a forum story (it's saved to the library first).
+    FollowStory(String),
 }
 
 /// A book being downloaded, or its result.
@@ -124,7 +130,7 @@ impl CatalogScreen {
 
     /// The screen, with its sources along the top. When AO3 is the source, returns where its
     /// search goes (`ao3_count` is that search's "1,234 works").
-    pub fn frame(&mut self, ui: &mut Ui, body: Rect, user: &[Catalog], ao3_count: Option<String>) -> (Vec<CatalogAction>, Option<Rect>) {
+    pub fn frame(&mut self, ui: &mut Ui, body: Rect, user: &[Catalog], ao3_count: Option<String>, follows: &FollowStore) -> (Vec<CatalogAction>, Option<Rect>) {
         let mut out = Vec::new();
         let c = ui.c;
         let catalogs = all(user);
@@ -134,7 +140,7 @@ impl CatalogScreen {
         let x = body.x + (body.w - w) / 2.0;
         let t = ui.text("Browse", &TextStyle::ui(26.0).semibold(), x, body.y + 22.0, c.text);
         ui.text_opts(
-            "Find books on AO3 and Project Gutenberg, or add your own catalogue: Calibre, Kavita, Komga, any OPDS feed.",
+            "Find books and stories, or add your own catalogue: Calibre, Kavita, Komga, any OPDS feed.",
             &TextStyle::ui(SMALL),
             TextOpts::ellipsize((w - t.w - 20.0).max(60.0)),
             x + t.w + 16.0,
@@ -142,14 +148,18 @@ impl CatalogScreen {
             c.muted,
         );
 
-        // Sources, and adding a catalog.
+        // Sources, and adding a catalog, wrapping onto more rows when there are many.
         let mut cx = x;
-        let cy = body.y + 22.0 + t.h + 14.0;
+        let mut cy = body.y + 22.0 + t.h + 14.0;
         let builtin = sources::builtin().len();
         let names: Vec<&str> = std::iter::once("AO3").chain(catalogs.iter().map(|c| c.name.as_str())).collect();
         for (i, name) in names.iter().enumerate() {
             let sel = i == self.current && self.adding.is_none();
             let bw = ui.button_width(name, None);
+            if cx > x && cx + bw > x + w {
+                cx = x;
+                cy += 42.0;
+            }
             let r = Rect::new(cx, cy, bw, 34.0);
             if ui.button_ex(id2(id("cat-chip"), i), r, name, None, if sel { ButtonKind::Tonal } else { ButtonKind::Secondary }, true) && !sel {
                 self.adding = None;
@@ -157,7 +167,12 @@ impl CatalogScreen {
             }
             cx += bw + 8.0;
         }
-        let add_r = Rect::new(cx, cy, ui.button_width("Add a catalogue", Some("\u{E710}")), 34.0);
+        let aw = ui.button_width("Add a catalogue", Some("\u{E710}"));
+        if cx + aw > x + w {
+            cx = x;
+            cy += 42.0;
+        }
+        let add_r = Rect::new(cx, cy, aw, 34.0);
         if ui.button_ex(id("cat-add"), add_r, "Add a catalogue", Some("\u{E710}"), ButtonKind::Ghost, true) {
             self.adding = Some(AddForm::default());
         }
@@ -202,6 +217,20 @@ impl CatalogScreen {
         }
         let title = self.stack.last().map(|p| p.title.clone()).unwrap_or_default();
         let mut right = row.right();
+        // Follow the shelf on screen: a page of books (not a search, nor a list of shelves).
+        let page_url = self.stack.last().map(|p| p.url.clone()).unwrap_or_default();
+        let shelf = self.stack.last().and_then(|p| p.feed.as_ref()).is_some_and(|f| f.entries.iter().any(|e| e.book().is_some()) || self.stack.len() > 1);
+        if shelf && !page_url.starts_with("search:") {
+            let following = follows.is_following_link(&page_url);
+            let label = if following { "Following" } else { "Follow" };
+            let fw = ui.button_width(label, Some(if following { icons::CHECK } else { "\u{E710}" }));
+            right -= fw;
+            if ui.button_ex(id("cat-follow"), Rect::new(right, y, fw, 34.0), label, Some(if following { icons::CHECK } else { "\u{E710}" }), ButtonKind::Secondary, !following) {
+                out.push(CatalogAction::FollowShelf { catalog: catalog.clone(), url: page_url.clone(), title: title.clone() });
+            }
+            ui.tip(id("cat-follow"), Rect::new(right, y, fw, 34.0), if following { "You follow this shelf: its new books show in Following" } else { "Show this shelf's new books in Following" });
+            right -= 8.0;
+        }
         if index >= builtin {
             let rw = ui.button_width("Remove", Some(icons::DELETE));
             right -= rw;
@@ -256,11 +285,12 @@ impl CatalogScreen {
         let mut opened: Option<(String, String)> = None;
         let mut get: Option<(String, String, String)> = None;
         let mut read: Option<String> = None;
+        let mut follow: Option<String> = None;
         let mut more = false;
         ui.scroll_area(id("cat-list"), list, |ui, _view, y0| {
             let mut yy = y0;
             for (i, e) in feed.entries.iter().enumerate() {
-                let h = Self::entry(ui, x, yy, w, i, e, getting, &mut opened, &mut get, &mut read);
+                let h = Self::entry(ui, x, yy, w, i, e, getting, follows, &mut opened, &mut get, &mut read, &mut follow);
                 yy += h + 8.0;
             }
             if feed.next.is_some() {
@@ -284,6 +314,9 @@ impl CatalogScreen {
         if let Some(id) = read {
             out.push(CatalogAction::Read(id));
         }
+        if let Some(url) = follow {
+            out.push(CatalogAction::FollowStory(url));
+        }
         if more {
             if let (Some(next), Some(top)) = (feed.next.clone(), self.stack.last()) {
                 self.busy = true;
@@ -304,12 +337,15 @@ impl CatalogScreen {
         i: usize,
         e: &Entry,
         getting: &HashMap<String, Getting>,
+        follows: &FollowStore,
         opened: &mut Option<(String, String)>,
         get: &mut Option<(String, String, String)>,
         read: &mut Option<String>,
+        follow: &mut Option<String>,
     ) -> f32 {
         let c = ui.c;
-        let btn_w = 120.0;
+        let story = e.book().is_some_and(|b| b.mime == STORY_MIME);
+        let btn_w = if story { 120.0 + 8.0 + 112.0 } else { 120.0 };
         let text_w = (w - btn_w - 48.0).max(120.0);
         let title = ui.measure(&e.title, &TextStyle::ui(15.0).semibold(), TextOpts::wrap(text_w).max_lines(2));
         let by = if e.authors.is_empty() { String::new() } else { e.authors.join(", ") };
@@ -329,7 +365,18 @@ impl CatalogScreen {
             ui.g.draw_text(s, x + 16.0, ty, c.text.alpha(0.82));
         }
 
-        let br = Rect::new(r.right() - 16.0 - btn_w, y + (h - 34.0) / 2.0, btn_w, 34.0);
+        let mut br = Rect::new(r.right() - 16.0 - 120.0, y + (h - 34.0) / 2.0, 120.0, 34.0);
+        if let Some(book) = e.book().filter(|_| story) {
+            // A story can be followed for its new chapters (which saves it too).
+            let following = follows.is_following_link(&book.href);
+            let fr = br;
+            br.x -= 128.0;
+            let label = if following { "Following" } else { "Follow" };
+            if ui.button_ex(id2(id("cat-follow-story"), i), fr, label, Some(if following { icons::CHECK } else { "\u{E710}" }), ButtonKind::Ghost, !following) {
+                *follow = Some(book.href.clone());
+            }
+            ui.tip(id2(id("cat-follow-story"), i), fr, if following { "You follow this story" } else { "Save the story and get its new chapters as they're posted" });
+        }
         let key = if e.id.is_empty() { e.title.clone() } else { e.id.clone() };
         if let Some(book) = e.book() {
             match getting.get(&key) {
@@ -344,10 +391,10 @@ impl CatalogScreen {
                     if ui.button_ex(id2(id("cat-get"), i), br, label, Some(icons::DOWNLOAD), ButtonKind::Tonal, true) {
                         *get = Some((key.clone(), book.href.clone(), e.title.clone()));
                     }
-                    let kind = if book.mime.contains("pdf") { "PDF" } else { "EPUB" };
                     let tip = match other {
                         Some(Getting::Failed(msg)) => msg.clone(),
-                        _ => format!("Download the {kind} to your library"),
+                        _ if story => "Save the story's chapters to your library".to_string(),
+                        _ => format!("Download the {} to your library", if book.mime.contains("pdf") { "PDF" } else { "EPUB" }),
                     };
                     ui.tip(id2(id("cat-get"), i), br, &tip);
                 }

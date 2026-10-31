@@ -1,15 +1,17 @@
-//! Search AO3 (with filters and sorting), open a pasted work link, and Following (authors,
-//! tags and collections). AO3 was down for maintenance while these were built; they were tried
-//! on sample data only.
+//! Search AO3 (with filters and sorting), open a pasted work link, and Following (stories,
+//! AO3 authors, tags and collections, and catalogue shelves). AO3 was down for maintenance while
+//! its parts were built; they were tried on sample data only.
 
+use super::catalog::Getting;
 use super::gfx::*;
 use super::icons;
-use super::reader::preface::{card_pills, pills, thousands, Pill};
+use super::reader::preface::{card_pills, pill_row, pills, thousands, Pill};
 use super::ui::*;
 use crate::ao3::models::{WorkMeta, WorkRating};
 use crate::ao3::parser::Ao3Parser;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use crate::ao3::search::{Blurb, Feed, FeedKind, SearchQuery, SortBy, Tri};
+use crate::ao3::search::{Blurb, Feed, FeedKind, ItemLink, SearchQuery, SortBy, Tri};
 use crate::storage::follows::{FollowStore, Mark, Scope, STALE_MINUTES};
 use crate::storage::library::LibraryManager;
 
@@ -44,6 +46,14 @@ pub enum BrowseAction {
     MarkRead(Target),
     FeedPage(Feed, u32),
     OpenUrl(String),
+    /// Follow a story from a link (it downloads first).
+    FollowStory(String),
+    /// Get a followed shelf's book into the library.
+    GetBook { key: String, href: String, mime: String, catalog: String, title: String },
+    /// Download a followed story again.
+    GetStory { key: String, url: String, title: String },
+    /// Open a followed item online (a Royal Road chapter); it's then read.
+    OpenItem { url: String, id: String },
 }
 
 const RATINGS: [(Option<WorkRating>, &str); 6] = [
@@ -631,7 +641,7 @@ fn blurb_card(ui: &mut Ui, r: Rect, b: &Blurb, in_library: bool, mark: Mark, fro
     let more = Rect::new(r.right() - 48.0, r.y + 10.0, 36.0, 34.0);
     let mut menu: Vec<(String, BrowseAction)> = Vec::new();
     let mut offer = |kind: FeedKind, name: &String, what: &str| {
-        let feed = Feed { kind, name: name.clone() };
+        let feed = Feed::new(kind, name.clone());
         if follows.is_following(kind, name) {
             menu.push((format!("Unfollow {what}{name}"), BrowseAction::Unfollow(feed.id())));
         } else {
@@ -678,9 +688,7 @@ fn blurb_card(ui: &mut Ui, r: Rect, b: &Blurb, in_library: bool, mark: Mark, fro
     ui.text_opts(&byline, &TextStyle::ui(13.0), TextOpts::ellipsize(tw), r.x + 16.0, r.y + 44.0, c.muted);
 
     let tags = card_pills(m, 3);
-    ui.g.push_clip(Rect::new(r.x + 16.0, r.y + 66.0, r.w - 32.0, 26.0));
-    pills(ui, r.x + 16.0, r.y + 67.0, 10_000.0, &tags);
-    ui.g.pop_clip();
+    pill_row(ui, r.x + 16.0, r.y + 67.0, r.w - 32.0, &tags);
 
     let more_tags: Vec<String> = m.characters.iter().take(3).chain(m.freeform_tags.iter().take(6)).cloned().collect();
     ui.text_opts(&more_tags.join(" · "), &TextStyle::ui(12.5), TextOpts::ellipsize(r.w - 32.0), r.x + 16.0, r.y + 98.0, c.muted);
@@ -723,11 +731,17 @@ fn blurb_card(ui: &mut Ui, r: Rect, b: &Blurb, in_library: bool, mark: Mark, fro
 
 // ---- Following ---------------------------------------------------------------------------
 
-const KINDS: [(FeedKind, &str, &str, &str); 3] = [
+/// Kinds of feed, in tab order: (kind, tab name, what to type when following one, plural).
+const KINDS: [(FeedKind, &str, &str, &str); 5] = [
+    (FeedKind::Story, "Stories", "Paste a link to a story on SpaceBattles, Sufficient Velocity or Royal Road", "stories"),
     (FeedKind::Author, "Authors", "AO3 user name, or a link to their page", "authors"),
     (FeedKind::Tag, "Tags", "Fandom, ship or tag, e.g. Hermione Granger/Harry Potter", "tags"),
+    (FeedKind::Shelf, "Shelves", "", "shelves"),
     (FeedKind::Collection, "Collections", "Collection name, or a link to it", "collections"),
 ];
+
+/// A followed story or a catalogue's book: shorter than an AO3 work's card.
+const ITEM_H: f32 = 132.0;
 
 pub struct FollowingScreen {
     /// Index into KINDS: which kind of feed the screen shows.
@@ -738,6 +752,9 @@ pub struct FollowingScreen {
     pub error: Option<String>,
     adding: bool,
     add_name: String,
+    /// A story being followed (it downloads first), and why that failed.
+    pub story_busy: bool,
+    pub story_error: Option<String>,
     /// Older works of the selected feed, loaded on request.
     pub more: Vec<Blurb>,
     pub more_page: u32,
@@ -748,7 +765,21 @@ pub struct FollowingScreen {
 
 impl Default for FollowingScreen {
     fn default() -> Self {
-        Self { tab: 0, selected: None, checking: false, error: None, adding: false, add_name: String::new(), more: Vec::new(), more_page: 1, more_next: true, more_busy: false, auto_checked: false }
+        Self {
+            tab: 0,
+            selected: None,
+            checking: false,
+            error: None,
+            adding: false,
+            add_name: String::new(),
+            story_busy: false,
+            story_error: None,
+            more: Vec::new(),
+            more_page: 1,
+            more_next: true,
+            more_busy: false,
+            auto_checked: false,
+        }
     }
 }
 
@@ -778,31 +809,135 @@ fn chips_height(ui: &mut Ui, w: f32, names: &[String]) -> f32 {
 }
 
 /// "+ name" chips that follow on click (only when the user clicks: nothing is followed for them).
-fn suggestion_chips(ui: &mut Ui, x: f32, y: f32, w: f32, kind: FeedKind, names: &[String], out: &mut Vec<BrowseAction>) -> f32 {
+fn suggestion_chips(ui: &mut Ui, x: f32, y: f32, w: f32, feeds: &[Feed], out: &mut Vec<BrowseAction>) -> f32 {
     let (mut cx, mut cy) = (x, y);
-    for (i, n) in names.iter().enumerate() {
-        let label = format!("+ {n}");
+    for (i, f) in feeds.iter().enumerate() {
+        let label = format!("+ {}", f.name);
         let tw = ui.measure(&label, &TextStyle::ui(13.0), TextOpts::default()).w + 26.0;
         if cx > x && cx + tw > x + w {
             cx = x;
             cy += 36.0;
         }
-        let (cw, clicked) = chip(ui, id2(id("fol-suggest"), (kind.label(), i)), cx, cy, &label, 0, false);
+        let (cw, clicked) = chip(ui, id2(id("fol-suggest"), (f.kind.label(), i)), cx, cy, &label, 0, false);
         if clicked {
-            out.push(BrowseAction::Follow(Feed { kind, name: n.clone() }));
+            out.push(BrowseAction::Follow(f.clone()));
         }
         cx += cw + 6.0;
     }
     cy + 30.0 - y
 }
 
+/// Feeds to offer for `kind`: authors and tags from the library, or shelves worth following.
+fn suggested(kind: FeedKind, follows: &FollowStore, library: &LibraryManager) -> Vec<Feed> {
+    match kind {
+        FeedKind::Shelf => crate::sources::suggested_shelves().into_iter().filter(|f| !follows.is_following_link(&f.link)).collect(),
+        k if k.is_ao3() => follows.suggestions(library.entries().values().map(|e| &e.meta), k, 8).into_iter().map(|n| Feed::new(k, n)).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A link to a story the app can follow (on a forum or Royal Road).
+fn is_story_link(s: &str) -> bool {
+    crate::sources::forum::thread_url(s).is_some() || crate::sources::royalroad::fiction_id(s).is_some()
+}
+
+/// The site a followed story is on, for "Open on …".
+fn story_site(link: &str) -> &'static str {
+    crate::sources::forum::site_of(link).map_or("Royal Road", |s| s.name)
+}
+
+/// A followed story, or a book on a followed shelf.
+#[allow(clippy::too_many_arguments)]
+fn item_card(ui: &mut Ui, r: Rect, b: &Blurb, in_library: bool, mark: Mark, from: &[String], getting: &HashMap<String, Getting>, out: &mut Vec<BrowseAction>) {
+    let c = ui.c;
+    let m = &b.meta;
+    let key = &m.id;
+    ui.card(r);
+
+    // What the button does: read the saved story, get the book, or open the chapter online.
+    let (label, icon, action): (String, &str, Option<BrowseAction>) = match &b.link {
+        Some(ItemLink::Story { url }) => match (in_library, getting.get(key)) {
+            (true, _) | (_, Some(Getting::Done(_))) => ("Read".into(), icons::READING, Some(BrowseAction::Read(key.clone()))),
+            (_, Some(Getting::Busy)) => (String::new(), "", None),
+            (_, failed) => (if failed.is_some() { "Try again" } else { "Get" }.into(), icons::DOWNLOAD, Some(BrowseAction::GetStory { key: key.clone(), url: url.clone(), title: m.title.clone() })),
+        },
+        Some(ItemLink::Book { href, mime, catalog }) => match getting.get(key) {
+            Some(Getting::Done(work)) => ("Read".into(), icons::READING, Some(BrowseAction::Read(work.clone()))),
+            Some(Getting::Busy) => (String::new(), "", None),
+            failed => (
+                if failed.is_some() { "Try again" } else { "Get" }.into(),
+                icons::DOWNLOAD,
+                Some(BrowseAction::GetBook { key: key.clone(), href: href.clone(), mime: mime.clone(), catalog: catalog.clone(), title: m.title.clone() }),
+            ),
+        },
+        Some(ItemLink::Web { url }) => ("Read on Royal Road".into(), icons::GLOBE, Some(BrowseAction::OpenItem { url: url.clone(), id: key.clone() })),
+        None => (String::new(), "", None),
+    };
+    let by = r.bottom() - 46.0;
+    let bw = if label.is_empty() { 40.0 } else { ui.button_width(&label, Some(icon)).max(96.0) };
+    let br = Rect::new(r.right() - 16.0 - bw, by, bw, 34.0);
+    let mut fire = false;
+    if label.is_empty() {
+        if matches!(getting.get(key), Some(Getting::Busy)) {
+            ui.spinner(br.x + br.w / 2.0, br.y + 17.0, 9.0);
+        }
+    } else if ui.button_ex(id2(id("item-go"), key), br, &label, Some(icon), ButtonKind::Tonal, true) {
+        fire = true;
+    }
+    if let Some(Getting::Failed(msg)) = getting.get(key) {
+        ui.tip(id2(id("item-go"), key), br, msg);
+    }
+
+    let tw = r.w - 32.0;
+    let mut tx = r.x + 16.0;
+    if mark != Mark::None {
+        let nt = ui.measure(mark.label(), &TextStyle::ui(12.0).semibold(), TextOpts::default());
+        let nr = Rect::new(tx, r.y + 17.0, nt.w + 16.0, 22.0);
+        let (fill, fg) = if mark == Mark::New { (c.accent_text.alpha(0.16), c.accent_text) } else { (c.selected(), c.text) };
+        ui.g.fill_round(nr, 11.0, fill);
+        ui.g.draw_text(nt, nr.x + 8.0, nr.y + (22.0 - nt.h) / 2.0, fg);
+        tx += nr.w + 8.0;
+    }
+    let title_r = Rect::new(tx, r.y + 14.0, tw - (tx - r.x - 16.0), 28.0);
+    let tresp = ui.interact_as(id2(id("item-title"), key), title_r, Role::Button, &m.title);
+    let tt = ui.text_opts(&m.title, &TextStyle::ui(17.0).semibold(), TextOpts::ellipsize(title_r.w), title_r.x, title_r.y, c.text);
+    if tresp.hovered && action.is_some() {
+        ui.g.fill_rect(Rect::new(title_r.x, title_r.y + tt.h - 1.0, tt.w, 1.0), c.text.alpha(0.6));
+    }
+    fire |= tresp.clicked;
+    let mut byline = if m.authors.is_empty() { String::new() } else { format!("by {}", m.authors.join(", ")) };
+    if let Some(ItemLink::Story { url } | ItemLink::Web { url }) = &b.link {
+        let site = story_site(url);
+        byline = if byline.is_empty() { site.to_string() } else { format!("{byline}  ·  {site}") };
+    }
+    ui.text_opts(&byline, &TextStyle::ui(13.0), TextOpts::ellipsize(tw), r.x + 16.0, r.y + 44.0, c.muted);
+    let summary: String = m.summary_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    ui.text_opts(&summary, &TextStyle::ui(13.0), TextOpts::ellipsize(tw), r.x + 16.0, r.y + 66.0, c.text.alpha(0.82));
+
+    let mut stats = Vec::new();
+    if matches!(b.link, Some(ItemLink::Story { .. })) && m.stats.chapters_published > 0 {
+        stats.push(format!("{} chapters", m.stats.chapters_published));
+    }
+    if !b.updated.is_empty() {
+        stats.push(b.updated.clone());
+    }
+    let lw = (br.x - r.x - 32.0).max(0.0);
+    ui.text_opts(&stats.join("  ·  "), &TextStyle::ui(12.5), TextOpts::ellipsize(lw), r.x + 16.0, by + 2.0, c.muted);
+    if !from.is_empty() {
+        ui.text_opts(&format!("From {}", from.join(", ")), &TextStyle::ui(12.0), TextOpts::ellipsize(lw), r.x + 16.0, by + 22.0, c.text.alpha(0.65));
+    }
+    if fire {
+        out.extend(action);
+    }
+}
+
 impl FollowingScreen {
-    pub fn frame(&mut self, ui: &mut Ui, body: Rect, follows: &FollowStore, library: &LibraryManager) -> Vec<BrowseAction> {
+    pub fn frame(&mut self, ui: &mut Ui, body: Rect, follows: &FollowStore, library: &LibraryManager, getting: &HashMap<String, Getting>) -> Vec<BrowseAction> {
         let mut out = Vec::new();
         let c = ui.c;
         let w = (body.w - 48.0).min(MAX_W);
         let x = body.x + (body.w - w) / 2.0;
-        let (kind, kind_label, hint, plural) = KINDS[self.tab];
+        let (kind, _, hint, plural) = KINDS[self.tab];
         if self.selected.as_deref().is_some_and(|s| follows.get(s).is_none_or(|f| f.feed.kind != kind)) {
             self.selected = None;
         }
@@ -826,6 +961,7 @@ impl FollowingScreen {
         };
         if button(ui, "fol-add", "Follow", "\u{E710}", ButtonKind::Primary, true) {
             self.adding = !self.adding;
+            self.story_error = None;
         }
         if !mine.is_empty() && button(ui, "fol-check", if self.checking { "Checking…" } else { "Refresh" }, icons::SYNC, ButtonKind::Secondary, !self.checking) {
             self.checking = true;
@@ -843,68 +979,50 @@ impl FollowingScreen {
             out.push(BrowseAction::Check(Target::Stale));
         }
 
-        // Authors / Tags (/ Collections, once there are any), each with a badge for its new works.
+        // Stories / Authors / Tags / Shelves (/ Collections, once there are any), each with a
+        // badge for its new works.
         let mut y = body.y + 22.0 + t.h + 14.0;
-        let show_collections = self.tab == 2 || follows.list().iter().any(|f| f.feed.kind == FeedKind::Collection);
+        let show_collections = self.tab == 4 || follows.list().iter().any(|f| f.feed.kind == FeedKind::Collection);
         let tabs: Vec<(&str, usize)> = KINDS
             .iter()
-            .take(if show_collections { 3 } else { 2 })
+            .take(if show_collections { 5 } else { 4 })
             .map(|(k, label, _, _)| (*label, follows.unread_count(Scope::Kind(*k))))
             .collect();
         let mut tab = self.tab;
-        if ui.segmented_counts(id("fol-tabs"), Rect::new(x, y, 150.0 * tabs.len() as f32, 34.0), &tabs, &mut tab, Badge::New) {
+        if ui.segmented_counts(id("fol-tabs"), Rect::new(x, y, (140.0 * tabs.len() as f32).min(w), 34.0), &tabs, &mut tab, Badge::New) {
             self.tab = tab;
             self.select(None, ui);
             return out;
         }
         y += 48.0;
 
-        let suggestions = follows.suggestions(library.entries().values().map(|e| &e.meta), kind, 8);
+        let suggestions = suggested(kind, follows, library);
         if self.adding {
-            let extra = if suggestions.is_empty() { 0.0 } else { 36.0 + chips_height(ui, w - 36.0, &suggestions) };
-            let card = Rect::new(x, y, w, 112.0 + extra);
-            ui.card(card);
-            ui.text(&format!("Follow {} on AO3", if kind == FeedKind::Author { "an author" } else if kind == FeedKind::Tag { "a tag" } else { "a collection" }), &TextStyle::ui(14.0).semibold(), card.x + 18.0, card.y + 14.0, c.text);
-            let fw = ui.button_width("Follow", Some(icons::CHECK));
-            let input = Rect::new(card.x + 18.0, card.y + 42.0, card.w - 36.0 - fw - 8.0, 34.0);
-            let resp = ui.text_input(id("fol-name"), input, &mut self.add_name, hint, false);
-            let go = ui.button_ex(id("fol-go"), Rect::new(input.right() + 8.0, input.y, fw, 34.0), "Follow", Some(icons::CHECK), ButtonKind::Primary, !self.add_name.trim().is_empty());
-            let note = if kind == FeedKind::Tag { "Tag names must match AO3's exactly. A link copied from AO3 always works." } else { "A link copied from AO3 always works." };
-            ui.text(note, &TextStyle::ui(12.5), card.x + 18.0, card.y + 84.0, c.muted);
-            if (go || resp.submitted) && !self.add_name.trim().is_empty() {
-                if let Some(feed) = Feed::parse(&self.add_name, kind) {
-                    if feed.kind != kind {
-                        // A pasted link of another kind: show it under its own tab.
-                        self.tab = KINDS.iter().position(|k| k.0 == feed.kind).unwrap_or(self.tab);
-                    }
-                    out.push(BrowseAction::Follow(feed));
-                    self.add_name.clear();
-                    self.adding = false;
-                }
-            }
-            if !suggestions.is_empty() {
-                ui.text("From your library", &TextStyle::ui(12.0).semibold(), card.x + 18.0, card.y + 112.0, c.muted);
-                suggestion_chips(ui, card.x + 18.0, card.y + 134.0, card.w - 36.0, kind, &suggestions, &mut out);
-            }
-            y += card.h + 12.0;
+            y += self.add_card(ui, x, y, w, kind, hint, &suggestions, &mut out) + 12.0;
+        } else if self.story_busy || self.story_error.is_some() {
+            y += self.story_status(ui, x, y, w) + 12.0;
         }
 
         if mine.is_empty() {
             let msg = match kind {
+                FeedKind::Story => "Follow a story to get its new chapters. Stories from SpaceBattles and Sufficient Velocity are saved to your library and kept up to date; Royal Road's new chapters open in your browser.",
                 FeedKind::Author => "Follow AO3 users to see their new works and updates here. Use Follow above, or ⋯ on any search result.",
                 FeedKind::Tag => "Follow any AO3 tag: a fandom, a character, or a relationship such as Hermione Granger/Harry Potter. Use Follow above, or ⋯ on any search result.",
+                FeedKind::Shelf => "Follow a catalogue's shelf to see the books added to it, like Project Gutenberg's latest or a forum's newest stories. Open any shelf in Browse and choose Follow.",
                 FeedKind::Collection => "Follow an AO3 collection (a challenge, fest or community) by its name or link.",
             };
             let tt = ui.measure(msg, &TextStyle::ui(13.5), TextOpts::wrap(w - 36.0).line_height(1.45));
-            let sug_h = if suggestions.is_empty() || self.adding { 0.0 } else { 40.0 + chips_height(ui, w - 36.0, &suggestions) };
+            let names: Vec<String> = suggestions.iter().map(|f| format!("+ {}", f.name)).collect();
+            let sug_h = if suggestions.is_empty() || self.adding { 0.0 } else { 40.0 + chips_height(ui, w - 36.0, &names) };
             let r = Rect::new(x, y, w, tt.h + 64.0 + sug_h);
             ui.card(r);
             ui.text(&format!("No {plural} followed yet"), &TextStyle::ui(15.0).semibold(), r.x + 18.0, r.y + 14.0, c.text);
             ui.g.draw_text(tt, r.x + 18.0, r.y + 40.0, c.muted);
             if sug_h > 0.0 {
                 let sy = r.y + 52.0 + tt.h;
-                ui.text("From your library (click to follow)", &TextStyle::ui(12.0).semibold(), r.x + 18.0, sy, c.muted);
-                suggestion_chips(ui, r.x + 18.0, sy + 22.0, r.w - 36.0, kind, &suggestions, &mut out);
+                let label = if kind == FeedKind::Shelf { "Shelves to follow (click to follow)" } else { "From your library (click to follow)" };
+                ui.text(label, &TextStyle::ui(12.0).semibold(), r.x + 18.0, sy, c.muted);
+                suggestion_chips(ui, r.x + 18.0, sy + 22.0, r.w - 36.0, &suggestions, &mut out);
             }
             return out;
         }
@@ -934,19 +1052,27 @@ impl FollowingScreen {
 
         let sel = self.selected.as_deref().and_then(|s| follows.get(s));
         if let Some(f) = sel {
-            let mut info = format!("{} · {}", kind_label.trim_end_matches('s'), f.feed.name);
+            let mut info = format!("{} · {}", kind.label(), f.feed.name);
             if let Some(t) = f.total {
                 info.push_str(&format!("  ·  {} works", thousands(t)));
             }
             info.push_str(&format!("  ·  {}", f.checked.map_or("not checked yet".into(), |t| format!("checked {}", ago(t)))));
-            ui.text_opts(&info, &TextStyle::ui(13.0), TextOpts::ellipsize(w - 260.0), x + 2.0, y + 8.0, c.text);
+            ui.text_opts(&info, &TextStyle::ui(13.0), TextOpts::ellipsize(w - 300.0), x + 2.0, y + 8.0, c.text);
             let uw = ui.button_width("Unfollow", Some(icons::CLOSE));
             if ui.button_ex(id("fol-unfollow"), Rect::new(x + w - uw, y, uw, 32.0), "Unfollow", Some(icons::CLOSE), ButtonKind::Secondary, true) {
                 out.push(BrowseAction::Unfollow(f.id()));
             }
-            let ow = ui.button_width("Open on AO3", Some(icons::GLOBE));
-            if ui.button_ex(id("fol-ao3"), Rect::new(x + w - uw - 8.0 - ow, y, ow, 32.0), "Open on AO3", Some(icons::GLOBE), ButtonKind::Ghost, true) {
-                out.push(BrowseAction::OpenUrl(f.feed.url(1)));
+            // A shelf is a catalogue's feed: nothing to open in a browser.
+            let open = match kind {
+                FeedKind::Shelf => None,
+                FeedKind::Story => Some(format!("Open on {}", story_site(&f.feed.link))),
+                _ => Some("Open on AO3".to_string()),
+            };
+            if let Some(label) = open {
+                let ow = ui.button_width(&label, Some(icons::GLOBE));
+                if ui.button_ex(id("fol-ao3"), Rect::new(x + w - uw - 8.0 - ow, y, ow, 32.0), &label, Some(icons::GLOBE), ButtonKind::Ghost, true) {
+                    out.push(BrowseAction::OpenUrl(f.feed.url(1)));
+                }
             }
             y += 44.0;
         }
@@ -954,41 +1080,53 @@ impl FollowingScreen {
         let timeline = follows.timeline(scope);
         let extra: Vec<&Blurb> = self.more.iter().filter(|m| !timeline.iter().any(|(b, _, _)| b.meta.id == m.meta.id)).collect();
         let area = Rect::new(body.x, y, body.w, (body.bottom() - y).max(0.0));
-        let (checking, error) = (self.checking, self.error.clone());
+        // Only this tab's feeds' problems: AO3 being down doesn't belong under Stories.
+        let checking = self.checking;
+        let error = mine.iter().find_map(|f| f.error.as_ref().map(|e| format!("{}: {e}", f.feed.name)));
         let sel_error = sel.and_then(|f| f.error.clone());
-        let show_from = self.selected.is_none();
+        let show_from = self.selected.is_none() && kind != FeedKind::Story;
         let (more_next, more_busy, more_page) = (self.more_next, self.more_busy, self.more_page);
-        let sel_feed = sel.map(|f| f.feed.clone());
+        let sel_feed = sel.map(|f| f.feed.clone()).filter(|f| f.kind.is_ao3());
         let mut load_more = false;
+        let empty = match kind {
+            FeedKind::Story => "Nothing yet. Use Refresh to look for new chapters.",
+            FeedKind::Shelf => "Nothing yet. Use Refresh to load the shelf's newest books.",
+            _ => "No works yet. Use Refresh to load the newest works from AO3.",
+        };
         ui.scroll_area(id("fol-list"), area, |ui, view, y0| {
             let mut yy = y0 + 2.0;
             if checking {
                 ui.spinner(x + 14.0, yy + 14.0, 7.0);
-                ui.text("Checking AO3 for new works…", &TextStyle::ui(13.5), x + 30.0, yy + 5.0, c.muted);
+                ui.text("Checking for new works…", &TextStyle::ui(13.5), x + 30.0, yy + 5.0, c.muted);
                 yy += 38.0;
             }
             if let Some(e) = sel_error.as_ref().or(error.as_ref()) {
                 yy += error_box(ui, x, yy, w, "Couldn't check for new works", e) + 12.0;
             }
             if timeline.is_empty() && !checking {
-                ui.text("No works yet. Use Refresh to load the newest works from AO3.", &TextStyle::ui(14.0), x + 4.0, yy + 8.0, c.muted);
+                ui.text(empty, &TextStyle::ui(14.0), x + 4.0, yy + 8.0, c.muted);
                 yy += 40.0;
             }
-            let n = timeline.len() + extra.len();
-            for i in 0..n {
-                let r = Rect::new(x, yy + i as f32 * (CARD_H + GAP), w, CARD_H);
+            let items: Vec<(&Blurb, Vec<String>, Mark)> = timeline
+                .iter()
+                .map(|(b, from, mark)| (*b, if show_from { from.iter().map(|f| f.feed.name.clone()).collect() } else { Vec::new() }, *mark))
+                .chain(extra.iter().map(|b| (*b, Vec::new(), Mark::None)))
+                .collect();
+            for (b, from, mark) in &items {
+                let h = if b.link.is_some() { ITEM_H } else { CARD_H };
+                let r = Rect::new(x, yy, w, h);
+                yy += h + GAP;
                 if r.bottom() < view.y || r.y > view.bottom() {
                     continue;
                 }
-                if let Some((b, from, mark)) = timeline.get(i) {
-                    let names: Vec<String> = if show_from { from.iter().map(|f| f.feed.name.clone()).collect() } else { Vec::new() };
-                    blurb_card(ui, r, b, library.get_entry(&b.meta.id).is_some(), *mark, &names, follows, &mut out);
-                } else if let Some(b) = extra.get(i - timeline.len()) {
-                    blurb_card(ui, r, b, library.get_entry(&b.meta.id).is_some(), Mark::None, &[], follows, &mut out);
+                let in_library = library.get_entry(&b.meta.id).is_some();
+                if b.link.is_some() {
+                    item_card(ui, r, b, in_library, *mark, from, getting, &mut out);
+                } else {
+                    blurb_card(ui, r, b, in_library, *mark, from, follows, &mut out);
                 }
             }
-            yy += n as f32 * (CARD_H + GAP);
-            if sel_feed.is_some() && n > 0 && more_next {
+            if sel_feed.is_some() && !items.is_empty() && more_next {
                 if more_busy {
                     ui.spinner(x + w / 2.0 - 70.0, yy + 18.0, 7.0);
                     ui.text("Loading older works…", &TextStyle::ui(13.5), x + w / 2.0 - 54.0, yy + 9.0, c.muted);
@@ -1008,6 +1146,84 @@ impl FollowingScreen {
         out
     }
 
+    /// The card for following something of `kind`. Returns its height.
+    #[allow(clippy::too_many_arguments)]
+    fn add_card(&mut self, ui: &mut Ui, x: f32, y: f32, w: f32, kind: FeedKind, hint: &str, suggestions: &[Feed], out: &mut Vec<BrowseAction>) -> f32 {
+        let c = ui.c;
+        let names: Vec<String> = suggestions.iter().map(|f| format!("+ {}", f.name)).collect();
+        let chips_h = if suggestions.is_empty() { 0.0 } else { chips_height(ui, w - 36.0, &names) };
+        if kind == FeedKind::Shelf {
+            let card = Rect::new(x, y, w, 70.0 + chips_h);
+            ui.card(card);
+            ui.text("Follow a shelf", &TextStyle::ui(14.0).semibold(), card.x + 18.0, card.y + 14.0, c.text);
+            ui.text("Open any shelf in Browse and choose Follow, or pick one here.", &TextStyle::ui(12.5), card.x + 18.0, card.y + 38.0, c.muted);
+            suggestion_chips(ui, card.x + 18.0, card.y + 62.0, card.w - 36.0, suggestions, out);
+            return card.h + if chips_h > 0.0 { 12.0 } else { 0.0 };
+        }
+        let status_h = if self.story_busy || self.story_error.is_some() { 40.0 } else { 0.0 };
+        let extra = if suggestions.is_empty() { 0.0 } else { 36.0 + chips_h };
+        let card = Rect::new(x, y, w, 112.0 + extra + status_h);
+        ui.card(card);
+        let heading = match kind {
+            FeedKind::Story => "Follow a story",
+            FeedKind::Author => "Follow an author on AO3",
+            FeedKind::Tag => "Follow a tag on AO3",
+            _ => "Follow a collection on AO3",
+        };
+        ui.text(heading, &TextStyle::ui(14.0).semibold(), card.x + 18.0, card.y + 14.0, c.text);
+        let fw = ui.button_width("Follow", Some(icons::CHECK));
+        let input = Rect::new(card.x + 18.0, card.y + 42.0, card.w - 36.0 - fw - 8.0, 34.0);
+        let resp = ui.text_input(id("fol-name"), input, &mut self.add_name, hint, false);
+        let ready = !self.add_name.trim().is_empty() && !self.story_busy;
+        let go = ui.button_ex(id("fol-go"), Rect::new(input.right() + 8.0, input.y, fw, 34.0), "Follow", Some(icons::CHECK), ButtonKind::Primary, ready);
+        let note = match kind {
+            FeedKind::Story => "SpaceBattles and Sufficient Velocity stories are saved to your library and kept up to date. Royal Road asks for a browser check, so its new chapters open in your browser.",
+            FeedKind::Tag => "Tag names must match AO3's exactly. A link copied from AO3 always works.",
+            _ => "A link copied from AO3 always works.",
+        };
+        ui.text_opts(note, &TextStyle::ui(12.5), TextOpts::ellipsize(card.w - 36.0), card.x + 18.0, card.y + 84.0, c.muted);
+        if (go || resp.submitted) && ready {
+            let text = self.add_name.trim().to_string();
+            if kind == FeedKind::Story || is_story_link(&text) {
+                // A story link pasted under another tab still follows the story.
+                self.tab = 0;
+                self.story_busy = true;
+                self.story_error = None;
+                out.push(BrowseAction::FollowStory(text));
+                self.add_name.clear();
+            } else if let Some(feed) = Feed::parse(&text, kind) {
+                if feed.kind != kind {
+                    // A pasted link of another kind: show it under its own tab.
+                    self.tab = KINDS.iter().position(|k| k.0 == feed.kind).unwrap_or(self.tab);
+                }
+                out.push(BrowseAction::Follow(feed));
+                self.add_name.clear();
+                self.adding = false;
+            }
+        }
+        if status_h > 0.0 {
+            self.story_status(ui, card.x + 8.0, card.y + 104.0, card.w - 16.0);
+        }
+        if !suggestions.is_empty() {
+            let sy = card.y + 112.0 + status_h;
+            ui.text("From your library", &TextStyle::ui(12.0).semibold(), card.x + 18.0, sy, c.muted);
+            suggestion_chips(ui, card.x + 18.0, sy + 22.0, card.w - 36.0, suggestions, out);
+        }
+        card.h
+    }
+
+    /// A story being followed: busy, or why it failed. Returns its height.
+    fn story_status(&self, ui: &mut Ui, x: f32, y: f32, w: f32) -> f32 {
+        let c = ui.c;
+        if self.story_busy {
+            ui.spinner(x + 18.0, y + 16.0, 7.0);
+            ui.text("Saving the story to your library… long stories take a little while.", &TextStyle::ui(13.0), x + 34.0, y + 7.0, c.muted);
+        } else if let Some(e) = &self.story_error {
+            ui.text_opts(e, &TextStyle::ui(13.0), TextOpts::ellipsize(w - 20.0), x + 10.0, y + 7.0, c.danger_text);
+        }
+        32.0
+    }
+
     fn target(&self, kind: FeedKind) -> Target {
         self.selected.clone().map_or(Target::Kind(kind), Target::One)
     }
@@ -1020,10 +1236,23 @@ impl FollowingScreen {
         ui.scroll_to_top(id("fol-list"));
     }
 
-    /// Shows the tab for a kind of feed (e.g. after following one).
+    /// Shows the tab for a kind of feed (e.g. after following one), with `feed` on its own.
     pub fn show_kind(&mut self, kind: FeedKind) {
         if let Some(i) = KINDS.iter().position(|k| k.0 == kind) {
             self.tab = i;
+        }
+    }
+
+    /// A story is followed: done adding.
+    pub fn story_followed(&mut self, result: Result<(), String>) {
+        self.story_busy = false;
+        match result {
+            Ok(()) => {
+                self.story_error = None;
+                self.adding = false;
+                self.tab = 0;
+            }
+            Err(e) => self.story_error = Some(e),
         }
     }
 

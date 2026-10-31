@@ -24,6 +24,8 @@ cd android
 .\gradlew.bat assembleRelease      # app/build/outputs/apk/release/app-release.apk
 ```
 
+The release APK carries only the ARM (arm64) build of the Rust bridge, which every current phone and tablet uses. To try it in the emulator on a PC, add the emulator's x86-64 build too: `.\gradlew.bat assembleRelease -Pemulator`.
+
 The release build is signed with the debug key, so it installs for testing. Publishing to a store needs your own signing key.
 
 If Gradle fails with `Unable to establish loopback connection`, Java can't create its socket file in your temp folder (the path may be too long). Point it at a short folder first:

@@ -62,7 +62,7 @@ class PdfScreen(private val a: MainActivity, val workId: String, opened: JSONObj
         insetTop = t
         insetBottom = b
         pages.safeTop = cutout
-        top.setPadding(a.dp(4), t + a.dp(4), a.dp(4), a.dp(4))
+        top.setPadding(a.dp(6), t + a.dp(6), a.dp(6), a.dp(6))
     }
 
     override fun rebuild() {
@@ -72,10 +72,10 @@ class PdfScreen(private val a: MainActivity, val workId: String, opened: JSONObj
         addView(pages, frame())
         pages.recolor()
         top = a.row().apply { setBackgroundColor(p.surface) }
-        top.addView(a.iconButton(R.drawable.ic_back, p.text, "Back to library") { a.closeReader() })
-        top.addView(a.label(meta.optString("title"), 15f, p.text, bold = true, lines = 1).apply { gravity = Gravity.CENTER_VERTICAL },
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = a.dp(4) })
-        pageLabel = a.label("", 13f, p.muted, lines = 1).apply { setPadding(a.dp(8), 0, a.dp(12), 0) }
+        top.addView(a.iconButton(R.drawable.ic_back, p.text, "Back to library", large = true) { a.closeReader() })
+        top.addView(a.label(meta.optString("title"), 18f, p.text, bold = true, lines = 1).apply { gravity = Gravity.CENTER_VERTICAL },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = a.dp(6) })
+        pageLabel = a.label("", 15f, p.muted, lines = 1).apply { setPadding(a.dp(8), 0, a.dp(14), 0) }
         top.addView(pageLabel)
         addView(top, frame(h = ViewGroup.LayoutParams.WRAP_CONTENT, gravity = Gravity.TOP))
         setInsets(insetTop, insetBottom, pages.safeTop)

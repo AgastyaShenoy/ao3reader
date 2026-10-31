@@ -103,9 +103,14 @@ fun utf16At(s: String, bytes: Int): Int {
 // Layout's measurements leave out the space that justification adds between words, though its
 // drawing has it, so positions in justified text are worked out here.
 
+/** Layouts built justified. Layout can only say so itself from Android 15 on
+ *  (`getJustificationMode`), and calling that on Android 14 crashes, so the page view keeps
+ *  track (weakly: a layout is dropped with its chapter). */
+private val justifiedLayouts: MutableSet<Layout> = java.util.Collections.newSetFromMap(java.util.WeakHashMap())
+
 /** Whether `line` is stretched to the full width (all but a paragraph's last line). */
 private fun justified(l: Layout, line: Int): Boolean {
-    if (l.justificationMode == Layout.JUSTIFICATION_MODE_NONE) return false
+    if (l !in justifiedLayouts) return false
     val end = l.getLineEnd(line)
     return end < l.text.length && l.text[end - 1] != '\n'
 }
@@ -361,7 +366,7 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
             .setLineSpacing(add, 1f)
             .setIncludePad(false)
         if (justify) b.setJustificationMode(Layout.JUSTIFICATION_MODE_INTER_WORD)
-        return b.build()
+        return b.build().also { if (justify) justifiedLayouts += it }
     }
 
     private fun bottoms(l: StaticLayout, offset: Float): FloatArray = FloatArray(l.lineCount) { l.getLineBottom(it) + offset }
@@ -860,9 +865,13 @@ class PageView(context: Context, private val reader: ReaderScreen) : View(contex
                 reader.toggleChrome()
                 return true
             }
+            val y = e.y / height
+            // Bands along the top and bottom (where the bars appear) and a wide middle show the
+            // bars; the strips down the sides turn pages.
             when {
-                x < 0.28f -> turn(false)
-                x > 0.72f -> turn(true)
+                y < 0.2f || y > 0.8f -> reader.toggleChrome()
+                x < 0.17f -> turn(false)
+                x > 0.83f -> turn(true)
                 else -> reader.toggleChrome()
             }
             return true

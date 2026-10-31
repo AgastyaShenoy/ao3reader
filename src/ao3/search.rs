@@ -232,13 +232,16 @@ impl SearchQuery {
     }
 }
 
-/// What a followed feed is.
+/// What a followed feed is: an AO3 author, tag or collection, one story (on a forum or Royal
+/// Road), or a catalogue's shelf.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedKind {
     Author,
     Tag,
     Collection,
+    Story,
+    Shelf,
 }
 
 impl FeedKind {
@@ -247,19 +250,39 @@ impl FeedKind {
             FeedKind::Author => "Author",
             FeedKind::Tag => "Tag",
             FeedKind::Collection => "Collection",
+            FeedKind::Story => "Story",
+            FeedKind::Shelf => "Shelf",
         }
+    }
+
+    /// A listing on AO3 (as opposed to a story or a catalogue's shelf).
+    pub fn is_ao3(self) -> bool {
+        matches!(self, FeedKind::Author | FeedKind::Tag | FeedKind::Collection)
     }
 }
 
-/// A work listing on AO3: an author's works, a tag's works, or a collection's works.
+/// Something followed: a work listing on AO3 (an author's, a tag's or a collection's works), a
+/// story, or a catalogue's shelf.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Feed {
     pub kind: FeedKind,
-    /// User name (optionally `user/pseud`), tag name, or collection name.
+    /// User name (optionally `user/pseud`), tag name, or collection name; a story's or shelf's
+    /// title.
     pub name: String,
+    /// A story's or shelf's address.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub link: String,
+    /// The catalogue a shelf is in (its start address).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
 }
 
 impl Feed {
+    /// An AO3 author, tag or collection.
+    pub fn new(kind: FeedKind, name: impl Into<String>) -> Feed {
+        Feed { kind, name: name.into(), link: String::new(), source: String::new() }
+    }
+
     /// Reads an AO3 link (`/users/x`, `/tags/x/works`, `/collections/x`) or a plain name of `kind`.
     pub fn parse(input: &str, kind: FeedKind) -> Option<Feed> {
         let s = input.trim();
@@ -275,23 +298,27 @@ impl Feed {
                 ["users", user, "pseuds", pseud, ..] => {
                     let (user, pseud) = (percent_decode(user), percent_decode(pseud));
                     // A user's default pseud is the user.
-                    Some(Feed { kind: FeedKind::Author, name: if user.eq_ignore_ascii_case(&pseud) { user } else { format!("{user}/{pseud}") } })
+                    Some(Feed::new(FeedKind::Author, if user.eq_ignore_ascii_case(&pseud) { user } else { format!("{user}/{pseud}") }))
                 }
-                ["users", user, ..] => Some(Feed { kind: FeedKind::Author, name: percent_decode(user) }),
-                ["tags", tag, ..] => Some(Feed { kind: FeedKind::Tag, name: decode(tag) }),
-                ["collections", c, ..] => Some(Feed { kind: FeedKind::Collection, name: percent_decode(c) }),
+                ["users", user, ..] => Some(Feed::new(FeedKind::Author, percent_decode(user))),
+                ["tags", tag, ..] => Some(Feed::new(FeedKind::Tag, decode(tag))),
+                ["collections", c, ..] => Some(Feed::new(FeedKind::Collection, percent_decode(c))),
                 _ => None,
             };
         }
-        Some(Feed { kind, name: s.to_string() })
+        Some(Feed::new(kind, s))
     }
 
     pub fn id(&self) -> String {
-        format!("{}:{}", self.kind.label().to_lowercase(), self.name)
+        let key = if self.link.is_empty() { &self.name } else { &self.link };
+        format!("{}:{key}", self.kind.label().to_lowercase())
     }
 
-    /// Newest-first listing URL for a page (1-based).
+    /// Newest-first listing URL for a page (1-based); a story's or shelf's own address.
     pub fn url(&self, page: u32) -> String {
+        if !self.kind.is_ao3() {
+            return self.link.clone();
+        }
         let base = match self.kind {
             FeedKind::Author => match self.name.split_once('/') {
                 Some((user, pseud)) => format!("{AO3}/users/{}/pseuds/{}/works", encode_path(user), encode_path(pseud)),
@@ -299,6 +326,7 @@ impl Feed {
             },
             FeedKind::Tag => format!("{AO3}/tags/{}/works", tag_path(&self.name)),
             FeedKind::Collection => format!("{AO3}/collections/{}/works", encode_path(&self.name)),
+            FeedKind::Story | FeedKind::Shelf => unreachable!(),
         };
         if page > 1 {
             format!("{base}?page={page}")
@@ -331,11 +359,31 @@ fn unescape_tag(s: &str) -> String {
 }
 
 /// One work in a listing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Blurb {
     pub meta: WorkMeta,
     /// Date shown on the blurb: when the work was last updated, e.g. "09 Mar 2024".
     pub updated: String,
+    /// What changes when the work does, for following; AO3 works use their date. A story's is its
+    /// newest chapter.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
+    /// Where it leads, for what isn't an AO3 work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<ItemLink>,
+}
+
+/// What a followed item that isn't an AO3 work leads to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ItemLink {
+    /// A book in a catalogue (`catalog` is the catalogue's start address). An Atom `mime` means
+    /// the book's own page, whose best copy gets downloaded.
+    Book { href: String, mime: String, catalog: String },
+    /// A forum story, kept in the library (its id is the item's) and brought up to date.
+    Story { url: String },
+    /// A page to read in the browser.
+    Web { url: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -422,7 +470,7 @@ fn parse_blurb(li: ElementRef) -> Option<Blurb> {
     };
     let updated = li.select(&sel("p.datetime")).next().map(text).unwrap_or_default();
     m.stats.published_date = updated.clone();
-    Some(Blurb { meta: m, updated })
+    Some(Blurb { meta: m, updated, ..Default::default() })
 }
 
 /// Why an AO3 page that should list works can't, in reader terms.
@@ -561,14 +609,14 @@ mod tests {
 
     #[test]
     fn feeds() {
-        let tag = Feed { kind: FeedKind::Tag, name: "Hermione Granger/Harry Potter".into() };
+        let tag = Feed::new(FeedKind::Tag, "Hermione Granger/Harry Potter");
         assert_eq!(tag.url(1), "https://archiveofourown.org/tags/Hermione%20Granger*s*Harry%20Potter/works");
-        let dotted = Feed { kind: FeedKind::Tag, name: "Harry Potter - J. K. Rowling".into() };
+        let dotted = Feed::new(FeedKind::Tag, "Harry Potter - J. K. Rowling");
         assert_eq!(dotted.url(2), "https://archiveofourown.org/tags/Harry%20Potter%20-%20J*d*%20K*d*%20Rowling/works?page=2");
         let parsed = Feed::parse("https://archiveofourown.org/tags/Hermione%20Granger*s*Harry%20Potter/works?page=3", FeedKind::Author).unwrap();
         assert_eq!(parsed, tag);
         assert_eq!(Feed::parse("archiveofourown.org/users/ana/pseuds/Ana2/works", FeedKind::Tag).unwrap().name, "ana/Ana2");
-        assert_eq!(Feed::parse("https://archiveofourown.org/collections/hp_harmony", FeedKind::Tag).unwrap(), Feed { kind: FeedKind::Collection, name: "hp_harmony".into() });
+        assert_eq!(Feed::parse("https://archiveofourown.org/collections/hp_harmony", FeedKind::Tag).unwrap(), Feed::new(FeedKind::Collection, "hp_harmony"));
         assert_eq!(Feed::parse("someone", FeedKind::Author).unwrap().url(1), "https://archiveofourown.org/users/someone/works");
         assert_eq!(Feed::parse("https://archiveofourown.org/users/ana/pseuds/ana/works", FeedKind::Tag).unwrap().name, "ana");
         let plus = Feed::parse("https://archiveofourown.org/tags/C++%20Programming/works", FeedKind::Author).unwrap();

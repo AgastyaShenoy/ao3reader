@@ -210,11 +210,9 @@ fn card(ui: &mut Ui, r: Rect, e: &LibraryEntry, confirming: bool, out: &mut Vec<
     }
     ui.text_opts(&byline, &TextStyle::ui(13.0), TextOpts::ellipsize(tw), r.x + 16.0, r.y + 44.0, c.muted);
 
-    // Tag pills on one row, clipped to the card.
+    // Tag pills on one row: whole pills only, then "+2" for the rest.
     let pills = super::reader::preface::card_pills(m, 3);
-    ui.g.push_clip(Rect::new(r.x + 16.0, r.y + 66.0, r.w - 32.0, 26.0));
-    super::reader::preface::pills(ui, r.x + 16.0, r.y + 67.0, 10_000.0, &pills);
-    ui.g.pop_clip();
+    super::reader::preface::pill_row(ui, r.x + 16.0, r.y + 67.0, r.w - 32.0, &pills);
 
     let summary = m.summary_text.split_whitespace().collect::<Vec<_>>().join(" ");
     ui.text_opts(&summary, &TextStyle::ui(13.0), TextOpts::wrap(r.w - 32.0).max_lines(2).line_height(1.35), r.x + 16.0, r.y + card_layout(m).0, c.text.alpha(0.82));

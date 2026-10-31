@@ -226,6 +226,8 @@ fn blurb_json(b: &Blurb, lib: &LibraryManager) -> Value {
     v["comments"] = json!(b.meta.stats.comments);
     v["language"] = json!(b.meta.language);
     v["in_library"] = json!(lib.get_entry(&b.meta.id).is_some());
+    // What a story or a catalogue's book leads to (none for AO3 works).
+    v["link"] = serde_json::to_value(&b.link).unwrap_or(Value::Null);
     v
 }
 
@@ -242,6 +244,8 @@ fn feed_kind(a: &Value) -> FeedKind {
     match a.get("kind").and_then(Value::as_str) {
         Some("author") => FeedKind::Author,
         Some("collection") => FeedKind::Collection,
+        Some("story") => FeedKind::Story,
+        Some("shelf") => FeedKind::Shelf,
         _ => FeedKind::Tag,
     }
 }
@@ -263,12 +267,15 @@ fn follows_json(s: &State) -> Value {
             "author": s.follows.unread_count(Scope::Kind(FeedKind::Author)),
             "tag": s.follows.unread_count(Scope::Kind(FeedKind::Tag)),
             "collection": s.follows.unread_count(Scope::Kind(FeedKind::Collection)),
+            "story": s.follows.unread_count(Scope::Kind(FeedKind::Story)),
+            "shelf": s.follows.unread_count(Scope::Kind(FeedKind::Shelf)),
         },
         "follows": s.follows.list().iter().map(|f| json!({
             "id": f.id(),
             "kind": f.feed.kind.label().to_lowercase(),
             "name": f.feed.name,
             "url": f.feed.url(1),
+            "link": f.feed.link,
             "unread": f.unread.len(),
             "total": f.total,
             "checked": f.checked.map(|c| c.timestamp()),
@@ -721,6 +728,49 @@ fn dispatch(method: &str, a: &Value) -> R {
             let id = s.follows.add(feed)?;
             Ok(json!({ "id": id, "name": name }))
         }),
+        // A story from a link: a forum story downloads whole first (a network call: no lock held).
+        "follows.story" => {
+            let client = with_state(|s| Ok(s.catalogs.clone()))?;
+            let (feed, listing, work) = ao3reader::sources::follow_story(arg_str(a, "url")?, &client)?;
+            with_state(|s| {
+                if let Some(w) = &work {
+                    s.library.save_work(w)?;
+                }
+                let name = feed.name.clone();
+                let id = s.follows.add(feed)?;
+                let _ = s.follows.record(&id, listing);
+                Ok(json!({ "id": id, "name": name, "saved": work.is_some() }))
+            })
+        }
+        "follows.shelf" => with_state(|s| {
+            let feed = Feed { kind: FeedKind::Shelf, name: arg_str(a, "name")?.to_string(), link: arg_str(a, "link")?.to_string(), source: arg_str(a, "source")?.to_string() };
+            let name = feed.name.clone();
+            let id = s.follows.add(feed)?;
+            Ok(json!({ "id": id, "name": name }))
+        }),
+        // Shelves worth following that aren't followed yet.
+        "follows.shelves" => with_state(|s| {
+            Ok(Value::Array(
+                ao3reader::sources::suggested_shelves()
+                    .into_iter()
+                    .filter(|f| !s.follows.is_following_link(&f.link))
+                    .map(|f| json!({ "name": f.name, "link": f.link, "source": f.source }))
+                    .collect(),
+            ))
+        }),
+        // A followed shelf's book, or a followed story again, into the library.
+        "follows.get" => {
+            let client = with_state(|s| Ok(s.catalogs.clone()))?;
+            let source = a.get("catalog").and_then(Value::as_str).unwrap_or_default();
+            let catalog = with_state(|s| Ok(ao3reader::sources::builtin().into_iter().chain(s.config.catalogs.iter().cloned()).find(|c| c.url == source)))?
+                .unwrap_or(Catalog { name: "the catalogue".into(), url: source.to_string(), ..Default::default() });
+            let mime = a.get("mime").and_then(Value::as_str).unwrap_or_default();
+            let work = client.get_work(arg_str(a, "href")?, mime, &catalog, a.get("title").and_then(Value::as_str))?;
+            with_state(|s| {
+                s.library.save_work(&work)?;
+                Ok(json!({ "id": work.meta.id, "meta": meta_json(&work.meta) }))
+            })
+        }
         "follows.remove" => with_state(|s| {
             s.follows.remove(arg_str(a, "id")?)?;
             Ok(Value::Null)
@@ -778,9 +828,25 @@ fn dispatch(method: &str, a: &Value) -> R {
                 if i > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(1200));
                 }
-                let Some((client, feed)) = with_state(|s| Ok(s.follows.get(id).map(|f| (s.client.clone(), f.feed.clone()))))? else { continue };
-                match client.feed(&feed, 1) {
-                    Ok(listing) => fresh += with_state(|s| s.follows.record(id, listing))?,
+                // A followed story kept in the library goes along, to have its new chapters added.
+                let Some((client, catalogs, list, feed, saved)) = with_state(|s| {
+                    Ok(s.follows.get(id).map(|f| {
+                        let saved = ao3reader::sources::story_work_id(&f.feed).and_then(|w| s.library.load_work(&w));
+                        (s.client.clone(), s.catalogs.clone(), s.config.catalogs.clone(), f.feed.clone(), saved)
+                    }))
+                })?
+                else {
+                    continue;
+                };
+                match ao3reader::sources::check_feed(&feed, saved, &client, &catalogs, &list) {
+                    Ok((listing, work)) => {
+                        fresh += with_state(|s| {
+                            if let Some(w) = &work {
+                                s.library.save_work(w)?;
+                            }
+                            s.follows.record(id, listing)
+                        })?
+                    }
                     Err(e) => {
                         let rate_limited = e.contains("429");
                         with_state(|s| s.follows.record_error(id, e.clone()))?;
@@ -889,8 +955,7 @@ fn dispatch(method: &str, a: &Value) -> R {
         }
         "catalog.get" => {
             let (catalog, client) = catalog_arg(a)?;
-            let bytes = client.download(arg_str(a, "url")?, &catalog)?;
-            let work = ao3reader::ao3::epub::import_named(&bytes, a.get("title").and_then(Value::as_str))?;
+            let work = client.get_work(arg_str(a, "url")?, a.get("mime").and_then(Value::as_str).unwrap_or_default(), &catalog, a.get("title").and_then(Value::as_str))?;
             with_state(|s| {
                 s.library.save_work(&work)?;
                 Ok(json!({ "id": work.meta.id, "meta": meta_json(&work.meta) }))
@@ -968,7 +1033,9 @@ mod jni_entry {
     pub extern "system" fn Java_org_ao3reader_Core_call<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, method: JString<'l>, arg: JString<'l>) -> jstring {
         let method: String = env.get_string(&method).map(Into::into).unwrap_or_default();
         let arg: String = env.get_string(&arg).map(Into::into).unwrap_or_default();
-        let out = super::handle(&method, &arg);
+        // A panic must not cross into Java (it would end the app): it becomes the call's error.
+        let out = std::panic::catch_unwind(|| super::handle(&method, &arg))
+            .unwrap_or_else(|_| serde_json::json!({ "err": format!("Something went wrong in {method}.") }).to_string());
         env.new_string(out).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
     }
 }

@@ -12,8 +12,10 @@ use crate::ao3::parser::Ao3Parser;
 use crate::reader::rich_text::{paragraph_words, tagged, FIELD};
 use regex::Regex;
 use scraper::{ElementRef, Html, Selector};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::OnceLock;
 
 /// Refuse to inflate any single file beyond this (protects against zip bombs).
 const MAX_ENTRY: usize = 64 * 1024 * 1024;
@@ -126,6 +128,24 @@ fn resolve(base: &str, href: &str) -> (String, Option<String>) {
         }
     }
     (parts.join("/"), frag)
+}
+
+/// XHTML closes empty elements with "/>" (`<a id="x"/>`), which an HTML parser reads as an
+/// opening tag: everything after an `<a/>` would end up inside the link, and a whole chapter
+/// would read as one paragraph. Spelled out as `<a id="x"></a>`; the empty elements HTML knows
+/// (`<br/>`, `<img/>`) stay as they are.
+fn expand_self_closing(html: &str) -> Cow<'_, str> {
+    const VOID: [&str; 14] = ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"];
+    static TAG: OnceLock<Regex> = OnceLock::new();
+    let tag = TAG.get_or_init(|| Regex::new(r"<([A-Za-z][A-Za-z0-9:_-]*)(\s[^<>]*?)?\s*/>").expect("valid pattern"));
+    tag.replace_all(html, |c: &regex::Captures| {
+        let name = &c[1];
+        if VOID.contains(&name.to_ascii_lowercase().as_str()) {
+            c[0].to_string()
+        } else {
+            format!("<{name}{}></{name}>", c.get(2).map_or("", |m| m.as_str()))
+        }
+    })
 }
 
 fn elements(doc: &Html) -> impl Iterator<Item = ElementRef<'_>> {
@@ -591,7 +611,7 @@ pub fn parse_epub(bytes: &[u8]) -> Result<Work, String> {
         if linked_id.is_none() {
             linked_id = ao3_url.captures(&html).map(|c| c[1].to_string());
         }
-        let doc = Html::parse_document(&html);
+        let doc = Html::parse_document(&expand_self_closing(&html));
         // AO3's preface (metadata) and afterword are not chapters.
         if ao3_preface(&doc, &mut meta) {
             is_ao3 = true;
@@ -725,6 +745,17 @@ mod tests {
         out.extend_from_slice(&cd_off.to_le_bytes());
         out.extend_from_slice(&[0, 0]);
         out
+    }
+
+    #[test]
+    fn self_closing_tags_are_spelled_out() {
+        let x = r#"<h1><span class="hide"><a id="t7"/>Title</span></h1><p>One.<br/>Two</p><img src="a.jpg" /><div class="x" />"#;
+        assert_eq!(expand_self_closing(x), r#"<h1><span class="hide"><a id="t7"></a>Title</span></h1><p>One.<br/>Two</p><img src="a.jpg" /><div class="x"></div>"#);
+        // Parsed, the paragraphs stay paragraphs instead of running into the link.
+        let doc = Html::parse_document(&expand_self_closing(r#"<body><h1><a id="t7"/>Title</h1><p>One.</p><p>Two.</p></body>"#));
+        let ps: Vec<String> = doc.select(&Selector::parse("p").unwrap()).map(|p| p.text().collect()).collect();
+        assert_eq!(ps, ["One.", "Two."]);
+        assert!(doc.select(&Selector::parse("a p").unwrap()).next().is_none());
     }
 
     const CONTAINER: &str = r#"<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;

@@ -59,15 +59,17 @@ fun Context.icon(res: Int, color: Int, size: Int = 24): ImageView = ImageView(th
 }
 
 /** Round icon button with a ripple. `tip` names it: shown on long-press (or mouse hover) and read
- *  by screen readers. */
-fun Context.iconButton(res: Int, color: Int, tip: String, active: Boolean = false, onClick: () -> Unit): FrameLayout {
+ *  by screen readers. `large` is for the reader's bars, reached for while holding the device. */
+fun Context.iconButton(res: Int, color: Int, tip: String, active: Boolean = false, large: Boolean = false, onClick: () -> Unit): FrameLayout {
     val p = Settings.pal
     return FrameLayout(this).apply {
-        // 42 dp, or the 48 dp Android recommends with larger touch targets.
-        val pad = dp(if (Settings.big) 13 else 10)
+        // 42 dp, or the 48 dp Android recommends with larger touch targets; 58 or 64 dp large.
+        val glyph = if (large) 28 else 22
+        val pad = dp(if (large) (if (Settings.big) 18 else 15) else if (Settings.big) 13 else 10)
+        val radius = dpf(glyph / 2f) + pad
         setPadding(pad, pad, pad, pad)
-        background = RippleDrawable(ColorStateList.valueOf(alpha(p.text, 0.15f)), if (active) rounded(p.selected, dpf(22)) else null, rounded(0xFFFFFFFF.toInt(), dpf(22)))
-        addView(icon(res, color, 22).apply { layoutParams = FrameLayout.LayoutParams(dp(22), dp(22)) })
+        background = RippleDrawable(ColorStateList.valueOf(alpha(p.text, 0.15f)), if (active) rounded(p.selected, radius) else null, rounded(0xFFFFFFFF.toInt(), radius))
+        addView(icon(res, color, glyph).apply { layoutParams = FrameLayout.LayoutParams(dp(glyph), dp(glyph)) })
         isClickable = true
         setOnClickListener { onClick() }
         tooltipText = tip

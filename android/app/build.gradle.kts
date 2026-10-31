@@ -24,6 +24,11 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Signed with the debug key so it installs for testing; a store build needs a real key.
             signingConfig = signingConfigs.getByName("debug")
+            // Phones and tablets run ARM: the emulator's x86-64 copy of the Rust core only goes in
+            // with -Pemulator (for testing on a PC), which halves the download for everyone else.
+            ndk {
+                abiFilters += if (project.hasProperty("emulator")) listOf("arm64-v8a", "x86_64") else listOf("arm64-v8a")
+            }
         }
     }
 

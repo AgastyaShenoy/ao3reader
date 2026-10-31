@@ -59,8 +59,8 @@ class SearchState {
 }
 
 class FollowingState {
-    /** "author", "tag" or "collection": which tab is showing. */
-    var kind = "author"
+    /** "story", "author", "tag", "shelf" or "collection": which tab is showing. */
+    var kind = "story"
     /** Feed id shown on its own, or null for every feed of the tab. */
     var selected: String? = null
     var checking = false
@@ -70,6 +70,9 @@ class FollowingState {
     var moreNext = true
     var moreBusy = false
     var scroll = 0
+    /** A story being followed (it downloads first), and why that failed. */
+    var storyBusy = false
+    var storyError: String? = null
 }
 
 private val SORTS = listOf(
@@ -633,7 +636,7 @@ private fun unfollow(a: MainActivity, id: String, name: String) {
     a.rebuild()
 }
 
-private fun checkFollows(a: MainActivity, arg: JSONObject) {
+fun checkFollows(a: MainActivity, arg: JSONObject) {
     val st = a.following
     st.checking = true
     st.error = null
@@ -653,7 +656,9 @@ private fun checkFollows(a: MainActivity, arg: JSONObject) {
 
 // ---- Following ------------------------------------------------------------------------------
 
-private val KINDS = listOf("author" to "Authors", "tag" to "Tags", "collection" to "Collections")
+private val KINDS = listOf("story" to "Stories", "author" to "Authors", "tag" to "Tags", "shelf" to "Shelves", "collection" to "Collections")
+private val AO3_KINDS = setOf("author", "tag", "collection")
+const val STORY_MIME = "application/x-forum-story"
 
 private fun ago(ts: Long): String {
     val m = (System.currentTimeMillis() / 1000 - ts) / 60
@@ -665,8 +670,16 @@ private fun ago(ts: Long): String {
     }
 }
 
+/** The site a story is on, from its address. */
+private fun storySite(url: String): String = when {
+    "spacebattles" in url -> "SpaceBattles"
+    "sufficientvelocity" in url -> "Sufficient Velocity"
+    else -> "Royal Road"
+}
+
 /** "+ name" chips from the user's library; tapping one follows it (nothing is followed otherwise). */
 private fun suggestionChips(a: MainActivity, kind: String, onPick: (String) -> Unit): View? {
+    if (kind !in AO3_KINDS) return null
     val names = runCatching { Core.arr("follows.suggest", json("kind" to kind)).strings() }.getOrDefault(emptyList())
     if (names.isEmpty()) return null
     val box = a.column()
@@ -677,6 +690,128 @@ private fun suggestionChips(a: MainActivity, kind: String, onPick: (String) -> U
     return box
 }
 
+/** Shelves worth following, as "+ name" chips. */
+private fun shelfChips(a: MainActivity, onPick: () -> Unit): View? {
+    val shelves = runCatching { Core.arr("follows.shelves").objects() }.getOrDefault(emptyList())
+    if (shelves.isEmpty()) return null
+    val box = a.column()
+    box.addView(a.label("Shelves to follow — tap one", 12.5f, Settings.pal.muted, bold = true), lp(bottom = a.dp(6)))
+    val row = a.row()
+    shelves.forEach { sh ->
+        row.addView(chip(a, "+ " + sh.getString("name"), false) {
+            onPick()
+            followShelf(a, sh.getString("name"), sh.getString("link"), sh.getString("source"))
+        }, chipLp(a))
+    }
+    box.addView(HorizontalScrollView(a).apply { isHorizontalScrollBarEnabled = false; addView(row) })
+    return box
+}
+
+/** Follows a catalogue's shelf and loads it. */
+fun followShelf(a: MainActivity, name: String, link: String, source: String) {
+    val added = try {
+        Core.obj("follows.shelf", json("name" to name, "link" to link, "source" to source))
+    } catch (e: CoreError) {
+        return a.toast(e.message ?: "Couldn't follow that")
+    }
+    a.toast("Following ${added.getString("name")}")
+    a.following.kind = "shelf"
+    a.following.selected = null
+    checkFollows(a, json("id" to added.getString("id")))
+}
+
+/** Follows a story from a link; a forum story is saved to the library first. */
+fun followStory(a: MainActivity, url: String) {
+    val st = a.following
+    st.kind = "story"
+    st.selected = null
+    st.storyBusy = true
+    st.storyError = null
+    if (a.currentTab == MainActivity.FOLLOWING) a.rebuild()
+    a.toast("Following the story…")
+    Core.background("follows.story", json("url" to url), slow = true) { r ->
+        st.storyBusy = false
+        r.onSuccess {
+            val o = it as JSONObject
+            a.toast(if (o.getBoolean("saved")) "Following “${o.getString("name")}”: it's in your library" else "Following “${o.getString("name")}”")
+        }.onFailure {
+            st.storyError = it.message
+            a.toast(it.message ?: "Couldn't follow that story")
+        }
+        if (a.currentTab == MainActivity.FOLLOWING) a.rebuild() else a.refreshNav()
+    }
+}
+
+/** A followed story, or a book on a followed shelf. */
+private fun itemCard(a: MainActivity, w: JSONObject, mark: String, from: List<String>): View {
+    val p = Settings.pal
+    val id = w.getString("id")
+    val title = w.getString("title")
+    val link = w.getJSONObject("link")
+    val kind = link.getString("kind")
+    val card = a.card()
+    val getting = a.catalogs.getting
+
+    fun get(href: String, mime: String, catalog: String) {
+        getting[id] = "busy"
+        a.rebuild()
+        Core.background("follows.get", json("href" to href, "mime" to mime, "catalog" to catalog, "title" to title), slow = mime == STORY_MIME) { r ->
+            r.onSuccess {
+                getting[id] = "done:" + (it as JSONObject).getString("id")
+                a.toast("Saved “$title” to your library")
+            }.onFailure {
+                getting[id] = "failed:${it.message}"
+                a.toast(it.message ?: "Couldn't get it")
+            }
+            if (a.currentTab == MainActivity.FOLLOWING) a.rebuild()
+        }
+    }
+
+    // What the button does: read the saved story, get the book, or open the chapter online.
+    val state = getting[id]
+    val action: Pair<String, () -> Unit>? = when (kind) {
+        "story" -> when {
+            w.optBoolean("in_library") || state?.startsWith("done:") == true -> "Read" to { a.openWork(id) }
+            state == "busy" -> null
+            else -> (if (state != null) "Try again" else "Get") to { get(link.getString("url"), STORY_MIME, "") }
+        }
+        "book" -> when {
+            state?.startsWith("done:") == true -> "Read" to { a.openWork(state.removePrefix("done:")) }
+            state == "busy" -> null
+            else -> (if (state != null) "Try again" else "Get") to { get(link.getString("href"), link.getString("mime"), link.getString("catalog")) }
+        }
+        else -> "Read on Royal Road" to {
+            Core.req("follows.read", json("work" to id))
+            openUrl(a, link.getString("url"))
+            a.rebuild()
+        }
+    }
+
+    val top = a.row()
+    if (mark.isNotEmpty()) top.addView(a.markBadge(mark), lp(-2).apply { rightMargin = a.dp(8) })
+    top.addView(a.label(title, 17f, p.text, bold = true, lines = 2).apply { action?.let { (_, go) -> setOnClickListener { go() } } },
+        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    card.addView(top)
+    val authors = w.getJSONArray("authors").strings().joinToString(", ")
+    val by = listOfNotNull(authors.takeIf { it.isNotEmpty() }?.let { "by $it" }, if (kind == "book") null else storySite(link.getString("url"))).joinToString("  ·  ")
+    if (by.isNotEmpty()) card.addView(a.label(by, 13f, p.muted, lines = 1), lp(top = a.dp(2)))
+    val summary = w.optString("summary").split(Regex("\\s+")).joinToString(" ").trim()
+    if (summary.isNotEmpty()) card.addView(a.label(summary, 13.5f, alpha(p.text, 0.85f), lines = 3).apply { setLineSpacing(0f, 1.15f) }, lp(top = a.dp(6)))
+    val stats = mutableListOf<String>()
+    if (kind == "story" && w.optInt("chapters") > 0) stats += "${w.getInt("chapters")} chapters"
+    if (w.optString("updated").isNotEmpty()) stats += w.getString("updated")
+    if (stats.isNotEmpty()) card.addView(a.label(stats.joinToString("  ·  ") { it.replace(' ', ' ') }, 12f, p.muted), lp(top = a.dp(8)))
+    if (from.isNotEmpty()) card.addView(a.label("From " + from.joinToString(", "), 12f, alpha(p.text, 0.7f), lines = 1), lp(top = a.dp(4)))
+
+    val actions = a.row()
+    if (action != null) {
+        val icon = if (action.first == "Read") R.drawable.ic_book else if (kind == "web") R.drawable.ic_globe else R.drawable.ic_download
+        actions.addView(a.button(action.first, Kind.Tonal, icon) { action.second() })
+    } else actions.addView(a.label("Getting…", 13.5f, p.muted))
+    card.addView(actions, lp(top = a.dp(12)))
+    return card
+}
+
 fun followingScreen(a: MainActivity): View {
     val p = Settings.pal
     val st = a.following
@@ -684,7 +819,7 @@ fun followingScreen(a: MainActivity): View {
     val all = info.getJSONArray("follows").objects()
     val byKind = info.getJSONObject("unread_by_kind")
     val hasCollections = all.any { it.getString("kind") == "collection" }
-    if (st.kind == "collection" && !hasCollections) st.kind = "author"
+    if (st.kind == "collection" && !hasCollections) st.kind = "story"
     val follows = all.filter { it.getString("kind") == st.kind }
     if (st.selected != null && follows.none { it.getString("id") == st.selected }) st.selected = null
     val scope = if (st.selected != null) json("id" to st.selected) else json("kind" to st.kind)
@@ -693,14 +828,20 @@ fun followingScreen(a: MainActivity): View {
     val box = a.column()
     box.addView(a.header("Following"))
 
-    // Authors | Tags (| Collections, once any are followed), each with its unread count.
+    // Stories | Authors | Tags | Shelves (| Collections, once any are followed), each with its
+    // unread count. Four or five don't fit side by side on a phone: they scroll.
     val kinds = KINDS.filter { it.first != "collection" || hasCollections }
-    val tabs = a.segmented(kinds.map { it.second }, kinds.indexOfFirst { it.first == st.kind }.coerceAtLeast(0), counts = kinds.map { byKind.optInt(it.first) }, newCounts = true) { i ->
-        st.kind = kinds[i].first
-        st.selected = null; st.more.clear(); st.morePage = 1; st.moreNext = true; st.scroll = 0
-        a.rebuild()
+    val tabs = a.row().apply { setPadding(a.dp(16), 0, a.dp(16), 0) }
+    kinds.forEach { (k, label) ->
+        tabs.addView(a.countChip(label, byKind.optInt(k), k == st.kind, new = true) {
+            if (k != st.kind) {
+                st.kind = k
+                st.selected = null; st.more.clear(); st.morePage = 1; st.moreNext = true; st.scroll = 0
+                a.rebuild()
+            }
+        }, chipLp(a))
     }
-    box.addView(tabs, lp(bottom = a.dp(10)).apply { leftMargin = a.dp(16); rightMargin = a.dp(16) })
+    box.addView(a.pillScroller(tabs), lp(bottom = a.dp(10)))
 
     val actions = a.row().apply { setPadding(a.dp(16), 0, a.dp(16), 0) }
     actions.addView(a.button("Follow", Kind.Primary, R.drawable.ic_add) { addFollowDialog(a) })
@@ -715,19 +856,28 @@ fun followingScreen(a: MainActivity): View {
     box.addView(actions)
 
     // Check feeds that haven't been checked (or tried) for a while. A failed check counts as
-    // tried, so a down AO3 isn't asked again and again.
+    // tried, so a site that's down isn't asked again and again.
     if (!st.checking && all.any { it.optBoolean("stale") }) box.post { if (!st.checking) checkFollows(a, json("stale" to true)) }
+
+    if (st.kind == "story" && (st.storyBusy || st.storyError != null)) {
+        val status = FrameLayout(a).apply { setPadding(a.dp(16), a.dp(10), a.dp(16), 0) }
+        status.addView(if (st.storyBusy) spinnerRow(a, "Saving the story to your library… long stories take a little while.") else errorCard(a, "Couldn't follow the story", st.storyError!!))
+        box.addView(status, lp())
+    }
 
     if (follows.isEmpty()) {
         val c = a.card()
         c.addView(a.label("No $plural followed yet", 15f, p.text, bold = true))
         val text = when (st.kind) {
+            "story" -> "Follow a story to get its new chapters. Stories from SpaceBattles and Sufficient Velocity are saved to your library and kept up to date; Royal Road's new chapters open in your browser. Tap Follow and paste a link."
             "author" -> "Follow AO3 users to see their new works and updates here. Tap Follow, or use ⋮ on any search result."
             "tag" -> "Follow any AO3 tag: a fandom, a character, or a relationship such as Hermione Granger/Harry Potter. Tap Follow, or use ⋮ on any search result."
+            "shelf" -> "Follow a catalogue's shelf to see the books added to it, like Project Gutenberg's latest or a forum's newest stories. Open any shelf in Browse and tap Follow."
             else -> "Follow an AO3 collection (a challenge, fest or community) by its name or link."
         }
         c.addView(a.label(text, 13.5f, p.muted), lp(top = a.dp(6)))
-        suggestionChips(a, st.kind) { follow(a, st.kind, it) }?.let { c.addView(it, lp(top = a.dp(14))) }
+        val chips = if (st.kind == "shelf") shelfChips(a) {} else suggestionChips(a, st.kind) { follow(a, st.kind, it) }
+        chips?.let { c.addView(it, lp(top = a.dp(14))) }
         box.addView(c, lp(top = a.dp(14)).apply { leftMargin = a.dp(16); rightMargin = a.dp(16) })
         return box
     }
@@ -762,11 +912,17 @@ fun followingScreen(a: MainActivity): View {
         lateinit var more: View
         more = a.iconButton(R.drawable.ic_more, p.text, "More") {
             val m = a.popupMenu(more)
-            m.menu.add(0, 0, 0, "Open on AO3")
+            // A shelf is a catalogue's feed: nothing to open in a browser.
+            val open = when (st.kind) {
+                "shelf" -> null
+                "story" -> "Open on ${storySite(sel.getString("url"))}"
+                else -> "Open on AO3"
+            }
+            if (open != null) m.menu.add(0, 0, 0, open)
             m.menu.add(0, 1, 1, "Unfollow")
             m.setOnMenuItemClickListener {
                 if (it.itemId == 0) openUrl(a, sel.getString("url"))
-                else a.dialog("Unfollow ${sel.getString("name")}?", "Its works leave your Following list.", ok = "Unfollow", okKind = Kind.Danger) {
+                else a.dialog("Unfollow ${sel.getString("name")}?", "It leaves your Following list. Anything saved to your library stays.", ok = "Unfollow", okKind = Kind.Danger) {
                     unfollow(a, sel.getString("id"), sel.getString("name"))
                     true
                 }
@@ -778,15 +934,22 @@ fun followingScreen(a: MainActivity): View {
         header.addView(c)
         if (!sel.isNull("error")) header.addView(errorCard(a, "Couldn't check this feed", sel.getString("error")), lp(bottom = a.dp(8)))
     }
-    if (st.checking) header.addView(spinnerRow(a, "Checking AO3 for new works…"))
-    else if (st.error != null && sel == null) header.addView(errorCard(a, "Couldn't check every feed", st.error!!), lp(bottom = a.dp(8)))
+    // Only this tab's feeds' problems: AO3 being down doesn't belong under Stories.
+    val tabError = follows.firstOrNull { !it.isNull("error") }?.let { "${it.getString("name")}: ${it.getString("error")}" }
+    if (st.checking) header.addView(spinnerRow(a, "Checking for new works…"))
+    else if (tabError != null && sel == null) header.addView(errorCard(a, "Couldn't check every feed", tabError), lp(bottom = a.dp(8)))
 
     val timeline = Core.arr("follows.timeline", scope).objects()
     val items = timeline + st.more.filter { m -> timeline.none { it.getString("id") == m.getString("id") } }
-    if (items.isEmpty() && !st.checking) header.addView(a.label("No works yet. Tap Refresh to load the newest works from AO3.", 14f, p.muted).apply { setPadding(a.dp(4), a.dp(16), a.dp(4), 0) })
+    val empty = when (st.kind) {
+        "story" -> "Nothing yet. Tap Refresh to look for new chapters."
+        "shelf" -> "Nothing yet. Tap Refresh to load the shelf's newest books."
+        else -> "No works yet. Tap Refresh to load the newest works from AO3."
+    }
+    if (items.isEmpty() && !st.checking) header.addView(a.label(empty, 14f, p.muted).apply { setPadding(a.dp(4), a.dp(16), a.dp(4), 0) })
     list.addHeaderView(header, null, false)
 
-    if (sel != null && items.isNotEmpty() && st.moreNext) {
+    if (sel != null && st.kind in AO3_KINDS && items.isNotEmpty() && st.moreNext) {
         val footer = FrameLayout(a).apply { setPadding(0, a.dp(4), 0, a.dp(8)) }
         if (st.moreBusy) footer.addView(spinnerRow(a, "Loading older works…")) else footer.addView(a.button("Load older works") {
             st.moreBusy = true
@@ -807,8 +970,9 @@ fun followingScreen(a: MainActivity): View {
     }
     val followed = followedKeys()
     list.adapter = adapter({ items }) { w ->
-        val fromNames = if (st.selected == null) w.optJSONArray("from")?.strings() ?: emptyList() else emptyList()
-        blurbCard(a, w, followed, mark = w.optString("mark"), from = fromNames)
+        val fromNames = if (st.selected == null && st.kind != "story") w.optJSONArray("from")?.strings() ?: emptyList() else emptyList()
+        if (w.isNull("link")) blurbCard(a, w, followed, mark = w.optString("mark"), from = fromNames)
+        else itemCard(a, w, w.optString("mark"), fromNames)
     }
     list.setSelection(st.scroll)
     list.setOnScrollListener(object : android.widget.AbsListView.OnScrollListener {
@@ -821,31 +985,54 @@ fun followingScreen(a: MainActivity): View {
 
 private fun addFollowDialog(a: MainActivity) {
     val p = Settings.pal
-    val hints = mapOf(
-        "author" to "AO3 user name, or a link to their page",
-        "tag" to "Fandom, ship or tag, e.g. Hermione Granger/Harry Potter",
-        "collection" to "Collection name, or a link to it",
-    )
-    var kind = KINDS.indexOfFirst { it.first == a.following.kind }.coerceAtLeast(0)
-    val col = a.column()
-    val input = a.input(hints.getValue(KINDS[kind].first))
-    val seg = FrameLayout(a)
-    val suggestions = FrameLayout(a)
-    lateinit var dialog: android.app.Dialog
-    fun fill() {
-        seg.removeAllViews()
-        seg.addView(a.segmented(KINDS.map { it.second }, kind) { i -> kind = i; input.hint = hints.getValue(KINDS[i].first); fill() })
-        suggestions.removeAllViews()
-        suggestionChips(a, KINDS[kind].first) { name -> dialog.dismiss(); follow(a, KINDS[kind].first, name) }?.let { suggestions.addView(it) }
-    }
-    col.addView(seg)
-    col.addView(input, lp(top = a.dp(12)))
-    col.addView(a.label("Tag names must match AO3's exactly. A link copied from AO3 always works.", 12.5f, p.muted), lp(top = a.dp(8)))
-    col.addView(suggestions, lp(top = a.dp(12)))
-    fill()
-    dialog = a.dialog("Follow on AO3", body = col, ok = "Follow") {
-        val name = input.text.toString().trim()
-        if (name.isNotEmpty()) follow(a, KINDS[kind].first, name)
-        true
+    when (a.following.kind) {
+        "story" -> {
+            val input = a.input("https://…").apply { inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI; typeface = Settings.face() }
+            val col = a.column()
+            col.addView(input)
+            col.addView(a.label("SpaceBattles and Sufficient Velocity stories are saved to your library and kept up to date. Royal Road asks for a browser check, so its new chapters open in your browser.", 12.5f, p.muted), lp(top = a.dp(8)))
+            a.dialog("Follow a story", "Paste a link to a story on SpaceBattles, Sufficient Velocity or Royal Road.", col, ok = "Follow") {
+                val url = input.text.toString().trim()
+                if (url.isNotEmpty()) followStory(a, url)
+                true
+            }
+        }
+        "shelf" -> {
+            lateinit var dialog: android.app.Dialog
+            val chips = shelfChips(a) { dialog.dismiss() }
+            dialog = a.dialog("Follow a shelf", "Open any shelf in Browse and tap Follow, or pick one here.", chips, cancel = "Close")
+        }
+        else -> {
+            val ao3 = KINDS.filter { it.first in AO3_KINDS }
+            val hints = mapOf(
+                "author" to "AO3 user name, or a link to their page",
+                "tag" to "Fandom, ship or tag, e.g. Hermione Granger/Harry Potter",
+                "collection" to "Collection name, or a link to it",
+            )
+            var kind = ao3.indexOfFirst { it.first == a.following.kind }.coerceAtLeast(0)
+            val col = a.column()
+            val input = a.input(hints.getValue(ao3[kind].first))
+            val seg = FrameLayout(a)
+            val suggestions = FrameLayout(a)
+            lateinit var dialog: android.app.Dialog
+            fun fill() {
+                seg.removeAllViews()
+                seg.addView(a.segmented(ao3.map { it.second }, kind) { i -> kind = i; input.hint = hints.getValue(ao3[i].first); fill() })
+                suggestions.removeAllViews()
+                suggestionChips(a, ao3[kind].first) { name -> dialog.dismiss(); follow(a, ao3[kind].first, name) }?.let { suggestions.addView(it) }
+            }
+            col.addView(seg)
+            col.addView(input, lp(top = a.dp(12)))
+            col.addView(a.label("Tag names must match AO3's exactly. A link copied from AO3 always works.", 12.5f, p.muted), lp(top = a.dp(8)))
+            col.addView(suggestions, lp(top = a.dp(12)))
+            fill()
+            dialog = a.dialog("Follow on AO3", body = col, ok = "Follow") {
+                val name = input.text.toString().trim()
+                // A story link pasted here still follows the story.
+                if (name.contains("spacebattles.com/") || name.contains("sufficientvelocity.com/") || name.contains("royalroad.com/")) followStory(a, name)
+                else if (name.isNotEmpty()) follow(a, ao3[kind].first, name)
+                true
+            }
+        }
     }
 }

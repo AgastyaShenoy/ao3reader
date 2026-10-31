@@ -107,6 +107,14 @@ private fun catalogView(a: MainActivity): View {
         a.rebuild()
     })
     top.addView(a.label(page.title, 16f, p.text, bold = true, lines = 1).apply { setPadding(a.dp(8), 0, 0, 0) }, LinearLayout.LayoutParams(0, -2, 1f))
+    // Follow the shelf on screen: a page of books (not a search, nor a list of shelves).
+    val shelf = page.feed?.getJSONArray("entries")?.objects()?.any { !it.isNull("book") } == true || cs.stack.size > 1
+    if (shelf && !page.url.startsWith("search:")) {
+        val following = followedLinks().contains(page.url)
+        top.addView(a.button(if (following) "Following" else "Follow", Kind.Secondary, if (following) R.drawable.ic_check else R.drawable.ic_add) {
+            if (!following) followShelf(a, "${page.title} · ${catalog.getString("name")}", page.url, catalog.getString("url"))
+        })
+    }
     if (!catalog.optBoolean("builtin")) top.addView(a.iconButton(R.drawable.ic_delete, p.muted, "Remove this catalogue") {
         a.dialog("Remove ${catalog.getString("name")}?", "Books you got from it stay in your library.", ok = "Remove", okKind = Kind.Danger) {
             cs.catalogs = Core.arr("catalog.remove", json("index" to index)).objects()
@@ -198,13 +206,15 @@ private fun entryCard(a: MainActivity, e: JSONObject, index: Int, open: (String,
     val book = e.optJSONObject("book")
     val feed = e.optJSONObject("feed")
     val state = cs.getting[key]
+    val story = book?.optString("mime") == STORY_MIME
     val action: View? = when {
         book != null && state == "busy" -> a.label("Getting…", 13.5f, p.muted)
         book != null && state?.startsWith("done:") == true -> a.button("Read", Kind.Tonal, R.drawable.ic_book) { a.openWork(state.removePrefix("done:")) }
         book != null -> a.button(if (state?.startsWith("failed:") == true) "Try again" else "Get", Kind.Tonal, R.drawable.ic_download) {
             cs.getting[key] = "busy"
             a.rebuild()
-            Core.background("catalog.get", json("index" to index, "url" to book.getString("href"), "title" to e.getString("title"))) { r ->
+            // A forum story is read page by page: the slow worker, so Browse stays quick.
+            Core.background("catalog.get", json("index" to index, "url" to book.getString("href"), "mime" to book.optString("mime"), "title" to e.getString("title")), slow = story) { r ->
                 r.onSuccess {
                     val id = (it as JSONObject).getString("id")
                     cs.getting[key] = "done:$id"
@@ -221,9 +231,20 @@ private fun entryCard(a: MainActivity, e: JSONObject, index: Int, open: (String,
     }
     if (action != null) row.addView(action, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = a.dp(10) })
     card.addView(row)
+    if (story && book != null) {
+        // A story can be followed for its new chapters (which saves it too).
+        val following = followedLinks().contains(book.getString("href"))
+        card.addView(a.button(if (following) "Following" else "Follow for new chapters", Kind.Ghost, if (following) R.drawable.ic_check else R.drawable.ic_add) {
+            if (!following) followStory(a, book.getString("href"))
+        }, lp(top = a.dp(6)).apply { width = LinearLayout.LayoutParams.WRAP_CONTENT })
+    }
     if (feed != null && book == null) card.setOnClickListener { open(e.getString("title"), feed.getString("href")); a.rebuild() }
     return card
 }
+
+/** Addresses of the followed stories and shelves. */
+private fun followedLinks(): Set<String> =
+    runCatching { Core.obj("follows").getJSONArray("follows").objects().map { it.optString("link") }.filter { it.isNotEmpty() }.toSet() }.getOrDefault(emptySet())
 
 /** Adding a catalog: its address, a name for its chip, and a login if it needs one. */
 fun addCatalogDialog(a: MainActivity) {

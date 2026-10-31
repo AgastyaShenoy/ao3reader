@@ -100,6 +100,13 @@ class MainActivity : Activity() {
         // When a text field gives up focus it lands here; don't grey the whole screen to show it.
         if (Build.VERSION.SDK_INT >= 26) root.defaultFocusHighlightEnabled = false
         setContentView(root)
+        // Draw behind the status and navigation bars on every Android version (15 and later do it
+        // anyway); the screens leave room for the bars themselves (applyInsets). Otherwise Android
+        // 11–14 shrink the window whenever the reader shows its bars, and the page reflows.
+        if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false)
+        if (Build.VERSION.SDK_INT >= 28) {
+            window.attributes = window.attributes.apply { layoutInDisplayCutoutMode = android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES }
+        }
         root.setOnApplyWindowInsetsListener { v, insets -> applyInsets(insets); insets }
         rebuild()
 
@@ -339,7 +346,7 @@ class MainActivity : Activity() {
         Anim.enter(r.view, dy = dpf(28), ms = 220)
         if (!hintShown) {
             hintShown = true
-            toast("Tap the middle of the page for the menu; tap the sides to turn pages.")
+            toast("Tap the middle, top or bottom of the page for the menu; tap the sides to turn pages.")
         }
     }
 

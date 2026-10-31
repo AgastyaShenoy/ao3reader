@@ -65,6 +65,18 @@ impl Element {
         }
     }
 
+    /// All the text inside exactly as written (HTML carried in CDATA, say).
+    pub fn raw_text(&self) -> String {
+        let mut out = String::new();
+        for n in &self.children {
+            match n {
+                Node::Text(t) => out.push_str(t),
+                Node::Element(e) => out.push_str(&e.raw_text()),
+            }
+        }
+        out
+    }
+
     /// Text of the first child with this local name.
     pub fn child_text(&self, name: &str) -> Option<String> {
         self.first(name).map(Element::text).filter(|t| !t.is_empty())

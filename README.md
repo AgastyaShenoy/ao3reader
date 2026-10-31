@@ -8,7 +8,7 @@
 
 A small, quick e-reader for Windows and Android.
 
-Read the EPUB and PDF books you have, find free books on Project Gutenberg or in your own catalogues, and read fan fiction from Archive of Our Own. Highlight passages, add notes and look words up as you read. Themes, fonts and reading aids are made for long, comfortable reading. Your books stay on your own device.
+Read the EPUB and PDF books you have, find free books on Project Gutenberg, Standard Ebooks or your own catalogues, and follow stories on SpaceBattles, Sufficient Velocity, Royal Road and Archive of Our Own. Highlight passages, add notes and look words up as you read. Themes, fonts and reading aids are made for long, comfortable reading. Your books stay on your own device.
 
 - **Small:** the Windows app is a single exe and uses about 10–15 MB of memory while you read. There's no web view, no Electron and no GPU driver.
 - **Native:** Windows draws with Direct2D and DirectWrite; Android uses its own built-in views. Both share one Rust core.
@@ -16,7 +16,7 @@ Read the EPUB and PDF books you have, find free books on Project Gutenberg or in
 - **Private:** no ads, no tracking and no account. The app goes online only for what you ask it to.
 
 > [!IMPORTANT]
-> **The AO3 features haven't been tested against the live site yet.** Archive of Our Own has been down for maintenance while they were built, so searching AO3, following authors and tags, downloading works, signing in and leaving kudos were only tested against saved pages. They'll be tested, and fixed where needed, once AO3 is back online. Everything else (your books, Project Gutenberg, catalogues, highlights, the dictionary) works now.
+> **The AO3 features haven't been tested against the live site yet.** Archive of Our Own has been down for maintenance while they were built, so searching AO3, following authors and tags, downloading works, signing in and leaving kudos were only tested against saved pages. They'll be tested, and fixed where needed, once AO3 is back online. Everything else (your books, Project Gutenberg, Standard Ebooks, the story forums, Royal Road, catalogues, highlights, the dictionary) works now.
 
 <p>
 <img src="docs/screenshots/windows/reader.png" width="49%" alt="Reading Pride and Prejudice with two highlights">
@@ -51,8 +51,17 @@ Read the EPUB and PDF books you have, find free books on Project Gutenberg or in
 ### Finding books
 - **Your own files:** open EPUB books, PDFs and AO3 web pages, or open them with Flax Reader from your file manager.
 - **Project Gutenberg:** browse and search tens of thousands of free books, built in.
+- **Standard Ebooks:** carefully edited public-domain books, built in. Its newest releases are free to everyone; its patrons can add the full catalogue with their sign-in.
+- **SpaceBattles and Sufficient Velocity:** browse the story boards, and save any story's chapters (its "threadmarks") to your library.
 - **Your catalogues:** add any OPDS catalogue, such as Calibre's content server, Kavita, Komga or a library's catalogue, with a sign-in if it needs one.
-- **Archive of Our Own** *(not yet tested against the live site; see above)*: search with AO3's filters, paste a link to a work, follow authors, tags and collections, and leave kudos.
+- **Archive of Our Own** *(not yet tested against the live site; see above)*: search with AO3's filters, paste a link to a work, and leave kudos.
+- **Other sites:** Flax Reader only fetches from sites that answer a plain request. Sites behind a bot check (FanFiction.net, Scribble Hub, Webnovel, Feedbooks) aren't fetched; save their pages or books and import them instead.
+
+### Following
+- **Stories:** paste a link to a story on SpaceBattles or Sufficient Velocity and it's saved to your library and kept up to date as new chapters come out. Royal Road stories tell you about new chapters too, which open in your browser (Royal Road's chapter pages ask for a browser check).
+- **Shelves:** follow any catalogue shelf, such as Project Gutenberg's latest books, Standard Ebooks' new releases or a forum's newest stories, to see what's added.
+- **AO3** *(not yet tested against the live site)*: follow authors, tags and collections.
+- **New and updated** works and chapters are marked, and a badge on Following shows how many are unread. Feeds are checked at most every 30 minutes, one at a time.
 
 ### Library
 - **Shelves:** Reading, Completed, For later and Favourites.
@@ -131,7 +140,7 @@ Everything is plain JSON in one folder: `%APPDATA%\ao3reader\ao3reader\data` on 
 | :--- | :--- |
 | `library.json` | Your library: each book's details, shelf, favourite, progress, bookmarks, highlights and notes |
 | `works/<id>.json` | The text of each book, with its pictures (or the PDF itself) beside it |
-| `follows.json` | Followed AO3 authors, tags and collections, and which works are new |
+| `follows.json` | Followed stories, shelves and AO3 authors, tags and collections, and what's new in them |
 | `config.json` | Settings, theme, your catalogues, your AO3 sign-in and your learned reading speed |
 
 Saves are crash-safe. Each file is written to a temporary file first and then swapped in, so it's never left half-written. A `.bak` copy is kept from when the app last started. If a file can't be read, it's set aside and the last good copy is used.

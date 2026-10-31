@@ -65,6 +65,8 @@ struct Host {
     hand_cursor: bool,
     edit_brush: HBRUSH,
     edit_brush_color: u32,
+    /// The colours last given to the window's title bar.
+    title_bar: Option<(u32, u32, u32)>,
     a11y: uia::Shared,
     /// What the focused control said last (the page in the reader changes under the focus).
     focus_said: String,
@@ -105,6 +107,26 @@ impl Host {
         Colors::from_palette(&self.app.config.palette())
     }
 
+    /// Gives the title bar the theme's colours: the header's background, the text colour and the
+    /// border (Windows 11), and dark window buttons on dark themes (Windows 10 too).
+    fn theme_title_bar(&mut self, c: Colors) {
+        use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE};
+        let want = (colorref(c.surface).0, colorref(c.text).0, colorref(c.border).0);
+        if self.title_bar == Some(want) {
+            return;
+        }
+        self.title_bar = Some(want);
+        let dark: i32 = self.app.config.palette().is_dark.into();
+        unsafe {
+            let set = |attr, v: &u32| DwmSetWindowAttribute(self.hwnd, attr, v as *const u32 as *const core::ffi::c_void, 4);
+            // Older Windows doesn't know some of these; it just keeps its own colours.
+            let _ = DwmSetWindowAttribute(self.hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const i32 as *const core::ffi::c_void, 4);
+            let _ = set(DWMWA_CAPTION_COLOR, &want.0);
+            let _ = set(DWMWA_TEXT_COLOR, &want.1);
+            let _ = set(DWMWA_BORDER_COLOR, &want.2);
+        }
+    }
+
     /// Reads the system's dark mode and high-contrast setting and passes them to the app.
     fn read_system_look(&mut self) {
         unsafe {
@@ -140,6 +162,7 @@ impl Host {
             self.set_edit_font();
         }
         let colors = self.colors();
+        self.theme_title_bar(colors);
         let size = self.client_dips();
         let moved = self.mem.keyboard(&mut self.input);
         if moved && self.mem.focus.is_none_or(|f| !self.mem.edits.contains_key(&f)) && unsafe { GetFocus() } != self.hwnd {
@@ -640,6 +663,7 @@ pub fn run() -> Result<()> {
             hand_cursor: false,
             edit_brush: CreateSolidBrush(COLORREF(0)),
             edit_brush_color: u32::MAX,
+            title_bar: None,
             a11y: uia::Shared::new(hwnd),
             focus_said: String::new(),
         };

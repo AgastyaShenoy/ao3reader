@@ -1,5 +1,6 @@
-//! Followed authors, tags and collections, kept in `follows.json` next to the library.
-//! Nothing is ever followed automatically: feeds are only added when the user asks.
+//! Followed AO3 authors, tags and collections, stories and catalogue shelves, kept in
+//! `follows.json` next to the library. Nothing is ever followed automatically: feeds are only
+//! added when the user asks.
 
 use crate::ao3::models::WorkMeta;
 use crate::ao3::search::{Blurb, Feed, FeedKind, Listing};
@@ -79,6 +80,11 @@ impl Mark {
     }
 }
 
+/// What tells a change apart: a story's newest chapter, an AO3 work's date.
+fn version(b: &Blurb) -> String {
+    if b.version.is_empty() { b.updated.clone() } else { b.version.clone() }
+}
+
 /// Parses a blurb date ("09 Mar 2024") for sorting; unknown dates sort last.
 pub fn blurb_date(s: &str) -> NaiveDate {
     NaiveDate::parse_from_str(s.trim(), "%d %b %Y").unwrap_or(NaiveDate::MIN)
@@ -134,11 +140,17 @@ impl FollowStore {
     }
 
     pub fn is_following(&self, kind: FeedKind, name: &str) -> bool {
-        self.follows.iter().any(|f| f.feed.kind == kind && f.feed.name.eq_ignore_ascii_case(name))
+        self.follows.iter().any(|f| f.feed.kind == kind && f.feed.link.is_empty() && f.feed.name.eq_ignore_ascii_case(name))
+    }
+
+    /// A story or shelf, by its address.
+    pub fn is_following_link(&self, link: &str) -> bool {
+        self.follows.iter().any(|f| !f.feed.link.is_empty() && f.feed.link == link)
     }
 
     pub fn add(&mut self, feed: Feed) -> Result<String, String> {
-        if self.is_following(feed.kind, &feed.name) {
+        let taken = if feed.link.is_empty() { self.is_following(feed.kind, &feed.name) } else { self.is_following_link(&feed.link) };
+        if taken {
             return Err(format!("You already follow {}.", feed.name));
         }
         let id = feed.id();
@@ -194,11 +206,13 @@ impl FollowStore {
             return Ok(0);
         };
         let first = f.checked.is_none();
+        // A shelf only tells of books new to it: catalogues change their dates freely.
+        let shelf = f.feed.kind == FeedKind::Shelf;
         let mut fresh = Vec::new();
         for b in &listing.works {
             let wid = &b.meta.id;
             let known = f.seen.get(wid);
-            if first || known.is_some_and(|d| *d == b.updated) {
+            if first || known.is_some_and(|d| *d == version(b)) || (shelf && known.is_some()) {
                 continue;
             }
             if known.is_some() && !f.unread.contains(wid) {
@@ -213,7 +227,7 @@ impl FollowStore {
         fresh.truncate(MAX_UNREAD);
         f.updated.retain(|w| fresh.contains(w));
         f.unread = fresh;
-        f.seen = listing.works.iter().map(|b| (b.meta.id.clone(), b.updated.clone())).collect();
+        f.seen = listing.works.iter().map(|b| (b.meta.id.clone(), version(b))).collect();
         f.latest = listing.works;
         f.total = listing.total;
         f.checked = Some(Utc::now());
@@ -279,7 +293,7 @@ impl FollowStore {
                 FeedKind::Author => m.authors.iter().collect(),
                 // Ships first, then fandoms: they make the most useful feeds.
                 FeedKind::Tag => m.relationships.iter().chain(m.fandoms.iter()).collect(),
-                FeedKind::Collection => Vec::new(),
+                FeedKind::Collection | FeedKind::Story | FeedKind::Shelf => Vec::new(),
             };
             for n in names {
                 let n = n.trim();
@@ -303,7 +317,7 @@ mod tests {
     use super::*;
 
     fn blurb(id: &str, updated: &str) -> Blurb {
-        Blurb { meta: WorkMeta { id: id.into(), ..WorkMeta::default() }, updated: updated.into() }
+        Blurb { meta: WorkMeta { id: id.into(), ..WorkMeta::default() }, updated: updated.into(), ..Default::default() }
     }
 
     fn listing(works: Vec<Blurb>) -> Listing {
@@ -324,8 +338,8 @@ mod tests {
     fn new_and_updated_works() {
         let dir = temp("marks");
         let mut s = store(&dir);
-        let id = s.add(Feed { kind: FeedKind::Tag, name: "Harmony".into() }).unwrap();
-        assert!(s.add(Feed { kind: FeedKind::Tag, name: "harmony".into() }).is_err());
+        let id = s.add(Feed::new(FeedKind::Tag, "Harmony")).unwrap();
+        assert!(s.add(Feed::new(FeedKind::Tag, "harmony")).is_err());
 
         // The first check is the baseline.
         assert_eq!(s.record(&id, listing(vec![blurb("1", "01 Jan 2024"), blurb("2", "02 Jan 2024")])).unwrap(), 0);
@@ -353,11 +367,32 @@ mod tests {
     }
 
     #[test]
+    fn stories_and_shelves() {
+        let dir = temp("stories");
+        let mut s = store(&dir);
+        let story = Feed { kind: FeedKind::Story, name: "Dragon of the Sun".into(), link: "https://forums.spacebattles.com/threads/x.1/".into(), source: String::new() };
+        let id = s.add(story.clone()).unwrap();
+        assert!(s.add(story).is_err());
+        let item = |v: &str| Blurb { meta: WorkMeta { id: "sb-1".into(), ..WorkMeta::default() }, updated: "31 Oct 2026".into(), version: v.into(), link: None };
+        s.record(&id, listing(vec![item("111")])).unwrap();
+        // Same day, new chapter: the version tells it apart.
+        assert_eq!(s.record(&id, listing(vec![item("113")])).unwrap(), 1);
+        assert_eq!(s.get(&id).unwrap().mark("sb-1"), Mark::Updated);
+
+        let shelf = s.add(Feed { kind: FeedKind::Shelf, name: "Latest".into(), link: "https://x/latest".into(), source: "https://x/".into() }).unwrap();
+        s.record(&shelf, listing(vec![blurb("a", "01 Jan 2024")])).unwrap();
+        // A changed date on a known book isn't news; a new book is.
+        assert_eq!(s.record(&shelf, listing(vec![blurb("b", "02 Jan 2024"), blurb("a", "02 Jan 2024")])).unwrap(), 1);
+        assert_eq!(s.get(&shelf).unwrap().unread, vec!["b"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn scopes_staleness_and_suggestions() {
         let dir = temp("scopes");
         let mut s = store(&dir);
-        let a = s.add(Feed { kind: FeedKind::Author, name: "ana".into() }).unwrap();
-        let t = s.add(Feed { kind: FeedKind::Tag, name: "Fluff".into() }).unwrap();
+        let a = s.add(Feed::new(FeedKind::Author, "ana")).unwrap();
+        let t = s.add(Feed::new(FeedKind::Tag, "Fluff")).unwrap();
         s.record(&a, listing(vec![blurb("1", "01 Jan 2024")])).unwrap();
         s.record(&t, listing(vec![blurb("2", "01 Jan 2024")])).unwrap();
         s.record(&a, listing(vec![blurb("5", "02 Jan 2024"), blurb("1", "01 Jan 2024")])).unwrap();
@@ -366,7 +401,7 @@ mod tests {
         assert_eq!(s.timeline(Scope::Kind(FeedKind::Tag)).len(), 1);
 
         // A failed check counts as an attempt, so it isn't retried straight away.
-        let c = s.add(Feed { kind: FeedKind::Collection, name: "c".into() }).unwrap();
+        let c = s.add(Feed::new(FeedKind::Collection, "c")).unwrap();
         assert_eq!(s.stale(30), vec![c.clone()]);
         s.record_error(&c, "AO3 is down".into()).unwrap();
         assert!(s.stale(30).is_empty());
